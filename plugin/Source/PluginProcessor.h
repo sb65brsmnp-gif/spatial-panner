@@ -91,6 +91,7 @@ public:
     static void setSessionPathForTesting(const std::string& path);
     void tickForTesting() { timerCallback(); }
     LayerEngine& engineForTesting() { return engine_; }
+    juce::AudioProcessorValueTreeState& parametersForTesting() { return params_; }
     SharedSession& session() { return *session_; }
 
 private:
