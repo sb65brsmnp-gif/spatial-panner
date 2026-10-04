@@ -95,12 +95,18 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
 ## For the standalone app and the plugin
 
 * Build the `Scene` from the editor's model; a `Renderer` takes an immutable
-  copy at construction. Changing layer positions or the room currently means
-  constructing a new `Renderer` (cheap for small scenes; the HRTF load is the
-  slow part at ~0.5 s, so cache `HrtfSet` or keep one renderer per output).
-  Making layer positions hot-swappable without a rebuild is a small change
-  in `Renderer::Impl::computeTargets`, which already recomputes images when a
-  layer's position offset changes.
+  copy at construction. Most edits do not need a new `Renderer`:
+  `Renderer::prepareUpdate(scene)` (any thread) returns a `SceneUpdate` when
+  only layers' properties, the listener (paths, speed, head) or the name
+  changed, and `applyUpdate(update)` (audio thread, allocation free) swaps it
+  in. Moved layers glide to their new position over ~40 ms, so dragging a
+  source is click free. `prepareUpdate` returns null, meaning "rebuild", when
+  the layer count, room or environment changed, or when the new scene could
+  exceed the delay lines' `RenderConfig::maxDistance`. The app gives live
+  edits headroom by building with a larger `maxDistance`.
+* `analyzeScene` / `analysisToJson` (`sp/SceneAnalysis.h`) sample every path
+  and the listener pose over time for the editor to draw; `sp-scene analyze`
+  exposes the same on stdin/stdout.
 * Many plugin instances with N = 1 layer each render exactly what one
   instance with N layers would, except for the reverb tail (each instance
   runs its own FDN; sum is equivalent). `Pose` is a pure function of time, so
@@ -141,6 +147,8 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
              "look_at_point": [x, y, z], "look_at_layer": -1,
              "keys": [{"time": 0, "yaw": 0, "pitch": 0, "roll": 0, "easing": "smooth"}],
              "yaw_offset": 0, "pitch_offset": 0, "roll_offset": 0}
+    // keyframed: keys are absolute angles. along_path / look_at: keys are
+    // offsets on top of the path heading or look-at direction.
   },
   "environment": {"speed_of_sound": 343, "temperature_c": 20, "humidity": 50,
                   "pressure_kpa": 101.325, "air_absorption": true}
@@ -188,6 +196,10 @@ interfaces.
 * **Spread** blends HRIRs over a ring of directions around the source;
   speaker mode currently ignores spread (MDAP table per spread value is
   trivial to add).
+* **Head keys in along_path and look_at modes are offsets** on top of the
+  path heading or the look-at direction (the spec only defined keys for the
+  keyframed mode). This lets the timeline's yaw and pitch lanes turn and
+  tilt the head while it still follows the path.
 * **Banking** in along-path head mode is parsed but not applied.
 * **Speaker distance compensation** exists for custom layouts with
   distances; presets are equidistant.

@@ -5,6 +5,7 @@
 #   nlohmann/json  MIT     scene files
 #   dr_libs        MIT-0   WAV read/write in the tools
 #   Catch2         BSL-1.0 unit tests
+#   JUCE 9         AGPLv3 / JUCE licence (Starter tier for personal use)  the app
 #
 # SAF needs a BLAS/LAPACK provider: Apple Accelerate on macOS, OpenBLAS +
 # LAPACKE elsewhere (apt: libopenblas-dev liblapacke-dev).
@@ -104,4 +105,13 @@ if(SP_FETCH_HRTF AND NOT EXISTS ${SP_DEFAULT_HRTF})
     file(REMOVE ${SP_DEFAULT_HRTF})
     message(WARNING "HRTF download failed: ${hrtf_status}. Pass -DSP_DEFAULT_HRTF=/path/to/file.sofa")
   endif()
+endif()
+
+# --------------------------------------------------------------------- JUCE
+if(SP_BUILD_APP)
+  FetchContent_Declare(juce
+    GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+    GIT_TAG        9.0.3  # be29c81492b6151c8ea8d14c840e1311963b3a83
+    GIT_SHALLOW    TRUE)
+  FetchContent_MakeAvailable(juce)
 endif()

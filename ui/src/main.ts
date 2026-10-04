@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import './styles.css';
 import { store } from './model/store';
-import { defaultScene, engineScene, mergeEditorKeys } from './model/scene';
+import { defaultScene, engineScene, mergeEditorKeys, type SceneDoc } from './model/scene';
 import { createBackend } from './bridge/backend';
 import { Viewport, type ViewName } from './view/viewport';
 import { SceneView } from './view/sceneView';
@@ -184,6 +184,7 @@ store.subscribe((kinds) => {
     if (kinds.has('analysis')) view.rebuildPaths();
   }
   if (kinds.has('meters')) view.updateMeters();
+  if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
@@ -195,15 +196,16 @@ async function openScene(): Promise<void> {
   if (store.dirty && !confirm('Discard unsaved changes?')) return;
   try {
     const r = await backend.openScene();
-    if (!r) return;
-    store.audioInfo.clear();
-    store.load(mergeEditorKeys(r.scene, r.raw), r.path);
-    const out = store.scene.editor?.output;
-    if (out) backend.setOutput(out);
-    setTimeout(frame, 100);
+    if (r) loadOpened(r);
   } catch (e) {
     toast(`Could not open: ${e}`, 'error');
   }
+}
+
+function loadOpened(r: { path: string; scene: SceneDoc; raw: unknown }): void {
+  store.audioInfo.clear();
+  store.load(mergeEditorKeys(r.scene, r.raw), r.path);
+  setTimeout(frame, 100);
 }
 
 async function saveScene(saveAs: boolean): Promise<void> {
@@ -250,13 +252,11 @@ window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind
 // ---------------------------------------------------------------- start
 
 store.load(defaultScene(), null);
-if (backend.kind === 'dev') {
-  const demo = new URLSearchParams(location.search).get('scene');
-  if (demo) {
-    fetch('/api/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: demo }) })
-      .then((r) => r.json()).then((r) => { store.load(mergeEditorKeys(r.scene, r.raw), r.path); setTimeout(frame, 100); });
-  }
-}
+backend.onOpenFile((r) => {
+  if (!store.dirty || confirm('Discard unsaved changes?')) loadOpened(r);
+});
+// A scene given on the command line / opened from the Finder (app), or ?scene=name.json (dev).
+backend.startupScene().then((r) => { if (r) loadOpened(r); }).catch((e) => toast(String(e), 'error'));
 setView('persp');
 frame();
 refreshInfo();

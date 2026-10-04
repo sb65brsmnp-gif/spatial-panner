@@ -91,6 +91,11 @@ function devApi(): Plugin {
   };
 }
 
+// Non-ASCII characters as \uXXXX escapes (valid in JS strings, template
+// literals and regexes), so the page does not depend on the WebView honouring
+// the charset of a resource-provider response.
+const asciiOnly = (js: string) => js.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
 // Inlines the built JS and CSS into index.html so the app embeds one file.
 function singleFile(): Plugin {
   return {
@@ -103,7 +108,7 @@ function singleFile(): Plugin {
       for (const [name, chunk] of Object.entries(bundle)) {
         if (chunk.type === 'chunk' && chunk.isEntry) {
           src = src.replace(new RegExp(`<script[^>]*src="[^"]*${name}"[^>]*></script>`),
-            () => `<script type="module">${chunk.code.replace(/<\/script/g, '<\\/script')}</script>`);
+            () => `<script type="module">${asciiOnly(chunk.code).replace(/<\/script/g, '<\\/script')}</script>`);
           delete bundle[name];
         } else if (chunk.type === 'asset' && name.endsWith('.css')) {
           src = src.replace(new RegExp(`<link[^>]*href="[^"]*${name}"[^>]*>`), () => `<style>${String(chunk.source)}</style>`);

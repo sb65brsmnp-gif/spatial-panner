@@ -43,6 +43,8 @@ export interface Backend {
   saveScene(scene: SceneDoc, path: string | null): Promise<{ path: string } | null>;
   bounce(req: BounceRequest): Promise<{ path: string } | null>;
   showAudioSettings(): Promise<void>;
+  startupScene(): Promise<{ path: string; scene: SceneDoc; raw: unknown } | null>;
+  onOpenFile(fn: (r: { path: string; scene: SceneDoc; raw: unknown }) => void): void;
   onTick(fn: (t: Tick) => void): void;
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void): void;
 }
@@ -98,6 +100,10 @@ class AppBackend implements Backend {
   saveScene(scene: SceneDoc, path: string | null) { return this.call<{ path: string } | null>('saveScene', { scene, path }); }
   bounce(req: BounceRequest) { return this.call<{ path: string } | null>('bounce', req); }
   async showAudioSettings() { await this.call('showAudioSettings'); }
+  startupScene() { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('startupScene'); }
+  onOpenFile(fn: (r: { path: string; scene: SceneDoc; raw: unknown }) => void) {
+    window.__JUCE__!.backend.addEventListener('openFile', (raw: string) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw));
+  }
   onTick(fn: (t: Tick) => void) { window.__JUCE__!.backend.addEventListener('tick', fn); }
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void) {
     window.__JUCE__!.backend.addEventListener('message', fn);
@@ -182,6 +188,11 @@ class DevBackend implements Backend {
   async showAudioSettings() {
     for (const f of this.msgFns) f({ text: 'Audio settings are in the app.', level: 'info' });
   }
+  async startupScene() {
+    const name = new URLSearchParams(location.search).get('scene');
+    return name ? this.post<{ path: string; scene: SceneDoc; raw: unknown }>('/api/open', { name }) : null;
+  }
+  onOpenFile() {}
   onTick(fn: (t: Tick) => void) { this.tickFns.push(fn); }
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void) { this.msgFns.push(fn); }
 }
