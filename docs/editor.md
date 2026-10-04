@@ -38,11 +38,19 @@ dev server instead of the built-in page, with hot reload.
 ## Using it
 
 **Layers** (sidebar): *Add audio files…* creates one layer per file (WAV,
-AIFF, FLAC, MP3, M4A, Ogg, CAF; decoded to mono and kept in memory). Each
-layer has mute and solo, level, start time and loop, Doppler amount, width (spread),
-directivity and facing, distance rolloff, room send and reflections. Drag a layer in the view to move it; Shift+drag changes
-its height. Any number of layers can be added; CPU is the limit (see
-docs/engine.md for figures).
+AIFF, FLAC, MP3, M4A, Ogg, CAF; kept in memory). A mono file is one source.
+A stereo file becomes a **stereo pair**: two balls, L and R, joined by a bar,
+playing the file's left and right channels from their own places, so the
+listener can walk between or through them. Drag the bar to move the pair,
+drag an end to widen, narrow or turn it (Option-drag an end keeps the centre
+fixed), or use the *Stereo field* sliders: width (metres), rotation,
+elevation and *Mono*, which sums both channels at the centre. *Play as* turns
+a stereo file into a single summed source instead. Each layer also has mute
+and solo, level, start time and loop, Doppler amount, spread, directivity and
+facing, distance rolloff, room send and reflections. Drag a layer in the view
+to move it; Shift+drag changes its height. Any number of layers can be added;
+CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
+layers).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
 the path; drawing again appends to the current path's end.
@@ -63,7 +71,10 @@ snap is on the same tab.
 **Views**: 3D orbit (1), Top (2), Front (3), Side (4), and Ears (5), the
 listener's own view while playing. *Follow* keeps the listener in view.
 
-**Timeline** (bottom): play/pause (Space), click the ruler to seek. Three
+**Timeline** (bottom): transport buttons for beginning of path (Enter), back
+and forward (a click jumps 5 s, hold to scrub at 4x), stop, play/pause
+(Space) and end of path; `,` and `.` step the playhead 1 s back or forward,
+0.1 s with Shift. Click the ruler to seek. Three
 lanes hold keys for speed (m/s), head yaw and head pitch. Double-click a lane
 to add a key, drag to move it, Delete to remove it; the bar above the lanes
 edits the selected key's value and easing. Mouse wheel zooms. In the default

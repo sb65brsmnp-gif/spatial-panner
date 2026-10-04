@@ -146,6 +146,13 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
           numFrames, /*timeline time of the first frame, seconds*/ t);
 ```
 
+* Inputs are one mono buffer per layer channel, layer by layer: layer i takes
+  `inputs[inputIndex(i)]` and, for a stereo layer, the next one (left, then
+  right); `numInputs()` = `inputChannels(scene)`. A stereo layer is two
+  voices (two delay lines, two image sets, two HRTF pairs), so it costs twice
+  a mono layer. `LayerControls::stereoWidthScale`, `stereoRotationOffsetDeg`
+  and `mono` are the automatable stereo controls; the ends glide to their new
+  places like a moved layer does.
 * Any `numFrames` is accepted; output lags by `latencySamples()` (= the
   sub-block, 32 samples). Report that to the host. Traced reflections lag a
   further `stats().reflectionLatency` samples behind the direct sound; that
@@ -190,7 +197,14 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
     "doppler": 1.0, "spread_deg": 0, "directivity": 0.7, "directivity_forward": [1, 0, 0],
     "reference_distance": 1.0, "min_distance": 0.25, "rolloff": 1.0,
     "reverb_send_db": 0, "reflection_order": -1, "start_time": 0, "loop": true,
-    "occlusion": true, "occlusion_radius": 0.5          // ray tracer: size of the source for occlusion
+    "occlusion": true, "occlusion_radius": 0.5,         // ray tracer: size of the source for occlusion
+    // Stereo layers: two emitters fed by the audio's left and right channels.
+    // "position" is the centre of the pair; the ends sit width / 2 either side
+    // along a bar that lies on +X at rotation 0 (left on -X), turned about +Y
+    // by "rotation" (positive turns the right end towards -Z) and tilted by
+    // "elevation" (positive raises the right end). "mono" sums both channels
+    // at half level and plays them from the centre. Default: 1 channel.
+    "channels": 2, "stereo": {"width": 2.0, "rotation": 0, "elevation": 0, "mono": false}
   }],
   "room": {
     "type": "box" | "outdoor" | "mesh" | "none", "size": [w, h, d], "origin": [x, y, z],

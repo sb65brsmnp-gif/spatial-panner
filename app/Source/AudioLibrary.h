@@ -1,8 +1,8 @@
 // Decoded layer audio, shared by every renderer program that uses it.
 //
-// Files are read on a background thread, mixed to mono (the engine renders
-// each layer as a point or spread source) and resampled to the device rate.
-// Everything is held in memory; a 3-minute stem at 48 kHz is ~35 MB.
+// Files are read on a background thread, kept as mono or as a left/right
+// pair (further channels are dropped) and resampled to the device rate.
+// Everything is held in memory; a 3-minute stereo stem at 48 kHz is ~70 MB.
 #pragma once
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -17,8 +17,13 @@
 namespace spapp {
 
 struct LayerAudio {
-    std::vector<float> samples;  // mono, at `sampleRate`
+    std::vector<std::vector<float>> channels;  // 1 or 2 channels, at `sampleRate`
     double sampleRate = 0;
+    int numChannels() const { return static_cast<int>(channels.size()); }
+    size_t numSamples() const { return channels.empty() ? 0 : channels[0].size(); }
+    // Channel `c`, or the last one a mono file has (a stereo layer playing a
+    // mono file plays it from both ends).
+    const std::vector<float>& channel(int c) const { return channels[static_cast<size_t>(std::min(c, numChannels() - 1))]; }
 };
 
 struct AudioFileInfo {

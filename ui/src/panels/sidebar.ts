@@ -1,6 +1,6 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
-import { defaultLayer, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
+import { defaultLayer, defaultStereo, isStereo, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
 import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
@@ -180,10 +180,23 @@ export class Sidebar {
       const files = await this.backend.chooseAudioFiles();
       if (!files.length) return;
       for (const f of files) this.store.audioInfo.set(f.path, f);
-      u((x) => { x.audio = files[0].path; if (!x.name) x.name = files[0].name; });
+      u((x) => {
+        x.audio = files[0].path;
+        if (!x.name) x.name = files[0].name;
+        // A stereo file plays as a pair, a mono file as one source.
+        x.channels = Math.min(2, Math.max(1, files[0].channels || 1));
+        if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
+      });
     });
     const info = this.store.audioInfo.get(l.audio);
-    const audioDesc = l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${info.channels} ch` : ''}` : 'none';
+    const audioDesc = l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${info.channels === 1 ? 'mono' : info.channels === 2 ? 'stereo' : `${info.channels} ch`}` : ''}` : 'none';
+    const stereo = isStereo(l);
+    const st = l.stereo ?? defaultStereo();
+    // How the file's channels are played: a left/right pair or summed to one source.
+    const playAs = select(['2', '1'], stereo ? '2' : '1', (v) => u((x) => {
+      x.channels = v === '2' ? 2 : 1;
+      if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
+    }), { '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' });
     const facing = Math.round(Math.atan2(-l.directivity_forward[0], -l.directivity_forward[2]) * 180 / Math.PI);
     const remove = el('button', { class: 'btn danger' }, 'Remove layer');
     remove.addEventListener('click', () => { this.store.select({ kind: 'layer', index: i }); this.tools.deleteSelection(); });
@@ -206,7 +219,8 @@ export class Sidebar {
       this.body.append(section('Layer',
         row('Track', track),
         row('Name', nameIn),
-        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Track is', el('span', { class: 'muted' }, stereo ? 'stereo: the layer is a left/right pair' : 'mono: the layer is one source')),
+        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         el('p', { class: 'muted' }, 'The track\'s Level and Position offset parameters adjust this live and can be automated in Logic.'),
       ));
@@ -214,15 +228,27 @@ export class Sidebar {
       this.body.append(section('Layer',
         row('Name', nameIn),
         row('Audio', el('span', { class: 'file', title: l.audio }, audioDesc), replace),
-        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        info && !info.error && info.channels >= 2 ? row('Play as', playAs) : '',
+        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
           checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
       ));
     }
+    if (stereo) {
+      const us = (fn: (s: typeof st) => void, key?: string) => u((x) => { x.stereo = x.stereo ?? defaultStereo(); fn(x.stereo); }, key);
+      this.body.append(section('Stereo field',
+        el('p', { class: 'muted' }, 'Left and right play from the two ends of the bar. Drag the bar to move the pair, drag an end to widen, narrow or turn it; Option-drag an end keeps the centre fixed.'),
+        row('Width', slider(st.width, 0, 12, 0.05, (v) => us((x) => { x.width = v; }, 'stwidth'), (v) => `${v.toFixed(2)} m`, () => this.store.endGesture())),
+        row('Rotation', slider(st.rotation, -180, 180, 1, (v) => us((x) => { x.rotation = v; }, 'strot'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Elevation', slider(st.elevation, -90, 90, 1, (v) => us((x) => { x.elevation = v; }, 'stel'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Mono', checkbox(st.mono, (v) => us((x) => { x.mono = v; }), 'sum left and right at the centre')),
+        this.plugin ? el('p', { class: 'muted' }, 'The track\'s Stereo Width, Stereo Rotation and Mono parameters adjust this live and can be automated in Logic.') : '',
+      ));
+    }
     this.body.append(section('Sound source',
       row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
-      row('Width', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+      row('Spread', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
       row('Directivity', slider(l.directivity, 0, 1, 0.01, (v) => u((x) => { x.directivity = v; }, 'dir'), (v) => v < 0.01 ? 'omni' : v > 0.99 ? 'cardioid' : v.toFixed(2), () => this.store.endGesture())),
       row('Facing', slider(facing, -180, 180, 1, (v) => u((x) => {
         const r = v * Math.PI / 180;
@@ -246,8 +272,9 @@ export class Sidebar {
     this.addLayers(files);
   }
 
-  // New layers go on a ring around the listener's start, facing it.
-  private addLayers(files: { path: string; name: string }[]): void {
+  // New layers go on a ring around the listener's start, facing it. Stereo
+  // files become left/right pairs.
+  private addLayers(files: { path: string; name: string; channels?: number }[]): void {
     const L = this.store.scene.listener;
     const first = L.paths[L.active_path]?.segments[0]?.points[0] ?? L.static_position;
     this.upd((s) => {
@@ -258,7 +285,9 @@ export class Sidebar {
         const r = 3 + 0.4 * Math.floor(i / 6);
         const pos: [number, number, number] = [
           Math.round((first[0] - r * Math.sin(a)) * 100) / 100, 1.6, Math.round((first[2] - r * Math.cos(a)) * 100) / 100];
-        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos }));
+        const channels = Math.min(2, Math.max(1, f.channels || 1));
+        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos, channels,
+          ...(channels === 2 ? { stereo: defaultStereo() } : {}) }));
       });
     });
     this.store.select({ kind: 'layer', index: this.store.scene.layers.length - 1 });

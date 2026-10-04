@@ -261,3 +261,70 @@ TEST_CASE("Doppler: approaching listener raises the pitch, doppler = 0 does not"
     auto r0 = render(s, cfg, {tone}, n);
     CHECK(count(r0.out[0]) == Approx(1000).epsilon(0.005));
 }
+
+TEST_CASE("Stereo layer: two inputs, left channel heard on the left, mono fold sums at the centre") {
+    Scene s = freeFieldScene();
+    Layer l;
+    l.channels = 2;
+    l.position = {0, 1.6f, -3};
+    l.stereo.width = 4;  // left end at x = -2, right end at x = +2
+    s.layers.push_back(l);
+    RenderConfig cfg;
+    cfg.mode = OutputMode::Ambisonics;
+    cfg.ambisonicsOrder = 1;
+    const int n = 24000;
+    std::vector<float> tone(n), silence(n, 0.0f);
+    for (int i = 0; i < n; ++i) tone[i] = 0.5f * std::sin(2 * kPi * 1000 * i / 48000.0f);
+
+    Renderer r(s, cfg, 2);
+    CHECK(r.numInputs() == 2);
+    CHECK(r.numLayers() == 1);
+    CHECK(r.inputIndex(0) == 0);
+
+    // Only the left channel sounds: Y (ACN 1, +left) is positive, in phase with W.
+    auto left = render(s, cfg, {tone, silence}, n);
+    double wy = 0;
+    for (int i = 2400; i < n; ++i) wy += static_cast<double>(left.out[0][i]) * left.out[1][i];
+    CHECK(wy > 0);
+    // Only the right channel: Y negative.
+    auto right = render(s, cfg, {silence, tone}, n);
+    wy = 0;
+    for (int i = 2400; i < n; ++i) wy += static_cast<double>(right.out[0][i]) * right.out[1][i];
+    CHECK(wy < 0);
+
+    // Mono fold: the same tone in both channels plays from the centre at the
+    // level of one channel (the ends each carry (L + R) / 4), so W matches a
+    // mono layer with the same tone, and Y is about zero.
+    Scene folded = s;
+    folded.layers[0].stereo.mono = true;
+    auto mono = render(folded, cfg, {tone, tone}, n);
+    Scene single = s;
+    single.layers[0].channels = 1;
+    auto ref = render(single, cfg, {tone}, n);
+    const double dB = 10 * std::log10(energy(mono.out[0], 2400) / energy(ref.out[0], 2400));
+    CHECK(dB == Approx(0).margin(0.3));
+    CHECK(energy(mono.out[1], 2400) < 0.01 * energy(mono.out[0], 2400));
+}
+
+TEST_CASE("Stereo geometry: offsets and ends round trip") {
+    Vec3 d = stereoOffset(4, 0, 0);
+    CHECK(d.x == Approx(2));
+    CHECK(d.z == Approx(0).margin(1e-6));
+    d = stereoOffset(4, 90, 0);  // right end turned towards -Z
+    CHECK(d.x == Approx(0).margin(1e-6));
+    CHECK(d.z == Approx(-2));
+    d = stereoOffset(4, 30, 20);
+    Vec3 centre{1, 1.6f, -2};
+    Vec3 c;
+    Layer::Stereo st;
+    stereoFromEnds(centre - d, centre + d, c, st);
+    CHECK(c.x == Approx(1));
+    CHECK(st.width == Approx(4));
+    CHECK(st.rotationDeg == Approx(30).margin(1e-3));
+    CHECK(st.elevationDeg == Approx(20).margin(1e-3));
+    Scene s;
+    Layer a, b;
+    b.channels = 2;
+    s.layers = {a, b};
+    CHECK(inputChannels(s) == 3);
+}

@@ -127,8 +127,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpatialPannerProcessor::crea
     layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"doppler", 1}, "Layer Doppler",
                                                           NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f,
                                                           AudioParameterFloatAttributes().withLabel("%")));
-    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"width", 1}, "Layer Width",
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"width", 1}, "Layer Spread",
                                                           NormalisableRange<float>(0.0f, 180.0f, 0.1f), 0.0f, deg));
+    // Stereo layers (a stereo track): the pair's width as a factor of the
+    // scene's, its rotation added to the scene's, and a mono fold.
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"stwidth", 1}, "Layer Stereo Width",
+                                                          NormalisableRange<float>(0.0f, 400.0f, 0.1f), 100.0f,
+                                                          AudioParameterFloatAttributes().withLabel("%")));
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"strot", 1}, "Layer Stereo Rotation",
+                                                          NormalisableRange<float>(-180.0f, 180.0f, 0.1f), 0.0f, deg));
+    layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"mono", 1}, "Layer Mono", false));
     const char* axes[] = {"x", "y", "z"};
     for (const char* a : axes)
         layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{std::string("off") + a, 1},
@@ -160,6 +168,9 @@ SpatialPannerProcessor::SpatialPannerProcessor()
     pMute_ = params_.getRawParameterValue("mute");
     pDoppler_ = params_.getRawParameterValue("doppler");
     pWidth_ = params_.getRawParameterValue("width");
+    pStereoWidth_ = params_.getRawParameterValue("stwidth");
+    pStereoRotation_ = params_.getRawParameterValue("strot");
+    pMono_ = params_.getRawParameterValue("mono");
     pX_ = params_.getRawParameterValue("offx");
     pY_ = params_.getRawParameterValue("offy");
     pZ_ = params_.getRawParameterValue("offz");
@@ -228,6 +239,7 @@ void SpatialPannerProcessor::reconfigureEngine() {
 void SpatialPannerProcessor::prepareToPlay(double sampleRate, int maxBlock) {
     sampleRate_ = sampleRate;
     mono_.assign(static_cast<size_t>(std::max(maxBlock, 64)), 0.0f);
+    right_.assign(mono_.size(), 0.0f);
     expected_ = -1;
     reconfigureEngine();
     {
@@ -254,6 +266,7 @@ void SpatialPannerProcessor::applyDocToEngine(const json& d) {
         docLevelGain_ = L.mute ? 0.0f : sp::dbToGain(L.levelDb);
         docDoppler_ = L.dopplerAmount;
         docSpread_ = L.spreadDeg;
+        docChannels_ = L.channels;
         engine_.setScene(s);
         docText_ = std::move(text);
     } catch (const std::exception& e) {
@@ -393,6 +406,13 @@ void SpatialPannerProcessor::manageSlot() {
         if (slot_ >= 0) session_->setSlotName(slot_, token_, trackName_);
     }
     session_->heartbeatSlot(slot_, token_);
+    // The track's channel count decides whether its layer is a stereo pair.
+    const auto* inBus = getBus(true, 0);
+    const int ch = inBus ? std::max(1, std::min(2, inBus->getNumberOfChannels())) : 1;
+    if (ch != slotChannels_ || slot_ != slotForAudio_) {
+        session_->setSlotChannels(slot_, token_, ch);
+        slotChannels_ = ch;
+    }
     slotForAudio_ = slot_;
 }
 
@@ -602,8 +622,12 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     lc.positionOffset = {pX_->load(), pY_->load(), pZ_->load()};
     lc.dopplerAmount = docDoppler_.load() * pDoppler_->load() / 100.0f;
     lc.spreadDeg = std::min(180.0f, docSpread_.load() + pWidth_->load());
+    lc.stereoWidthScale = pStereoWidth_->load() / 100.0f;
+    lc.stereoRotationOffsetDeg = pStereoRotation_->load();
+    if (pMono_->load() > 0.5f) lc.mono = true;   // off: the scene's setting stands
     const float meterGain = lc.mute ? 0.0f : docLevelGain_.load() * sp::dbToGain(levelDb);
     const int slot = slotForAudio_.load(std::memory_order_relaxed);
+    const bool stereoLayer = docChannels_.load(std::memory_order_relaxed) == 2;
 
     const int chunk = static_cast<int>(mono_.size());
     float* outs[LayerEngine::kMaxOutputs];
@@ -611,7 +635,16 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     for (int off = 0; off < n; off += chunk) {
         const int k = std::min(chunk, n - off);
         float peak = 0;
-        if (nIn > 0) {
+        if (nIn > 0 && stereoLayer) {
+            // Left and right feed the pair's two ends (a mono track feeds both).
+            const float* l = buffer.getReadPointer(0) + off;
+            const float* r = buffer.getReadPointer(std::min(1, nIn - 1)) + off;
+            for (int i = 0; i < k; ++i) {
+                mono_[static_cast<size_t>(i)] = l[i];
+                right_[static_cast<size_t>(i)] = r[i];
+                peak = std::max(peak, std::max(std::abs(l[i]), std::abs(r[i])));
+            }
+        } else if (nIn > 0) {
             const float g = 1.0f / static_cast<float>(nIn);
             for (int i = 0; i < k; ++i) {
                 float s = 0;
@@ -622,11 +655,14 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
             }
         } else {
             std::fill(mono_.begin(), mono_.begin() + k, 0.0f);
+            std::fill(right_.begin(), right_.begin() + k, 0.0f);
         }
         if (slot >= 0) session_->addMeter(slot, peak * meterGain);
         for (int c = 0; c < no; ++c) outs[c] = buffer.getWritePointer(c) + off;
         LayerEngine::Block b;
-        b.input = mono_.data();
+        b.inputs[0] = mono_.data();
+        b.inputs[1] = stereoLayer ? right_.data() : nullptr;
+        b.numInputs = stereoLayer ? 2 : 1;
         b.outputs = outs;
         b.numOutputs = no;
         b.numFrames = k;

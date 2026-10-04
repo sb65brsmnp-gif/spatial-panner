@@ -42,7 +42,27 @@ struct Layer {
     float occlusionRadius = 0.5f;
     float startTime = 0;            // seconds on the timeline when the audio starts
     bool loop = false;
+
+    // Stereo layers (`channels` = 2) are two emitters, left and right, fed by
+    // the two channels of the layer's audio. `position` is the centre of the
+    // pair; the ends sit stereo.width / 2 either side of it along a bar that
+    // lies on +X when stereo.rotationDeg is 0 (left on -X, right on +X), turned
+    // about +Y by rotationDeg (positive turns the right end towards -Z) and
+    // tilted by elevationDeg (positive raises the right end). stereo.mono sums
+    // both channels at half level and plays them from the centre.
+    int channels = 1;
+    struct Stereo {
+        float width = 2.0f;         // metres between left and right
+        float rotationDeg = 0;
+        float elevationDeg = 0;
+        bool mono = false;
+    } stereo;
 };
+
+// Half-vector from a stereo layer's centre to its right end (left = -offset).
+Vec3 stereoOffset(float width, float rotationDeg, float elevationDeg);
+// Centre, width, rotation and elevation that put the ends at `left`/`right`.
+void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::Stereo& stereo);
 
 // -------------------------------------------------------------------- Room
 
@@ -232,5 +252,8 @@ struct Scene {
     Environment environment;
     double duration = 0;  // seconds; 0 = derived from the audio by the tools
 };
+
+// Sum of `channels` over the layers: the number of audio inputs the renderer takes.
+int inputChannels(const Scene& scene);
 
 }  // namespace sp

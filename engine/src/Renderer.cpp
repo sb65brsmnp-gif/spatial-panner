@@ -77,7 +77,11 @@ struct Tap {
 
 struct Voice {
     const Layer* layer = nullptr;   // points into Impl::scene.layers
-    Vec3 position;                  // layer position, slewed towards layer->position after live edits
+    int layerIndex = 0;
+    int channel = 0;                // 0, or 1 for the right end of a stereo layer
+    int inputIndex = 0;             // this emitter's input buffer
+    Vec3 position;                  // emitter position, slewed towards its target after live edits
+    float monoCur = 0, monoTarget = 0;  // stereo layers: 1 = both channels summed at the centre
     LayerControls controls;
     DelayLine delay;
     std::vector<Tap> taps;  // taps[0] is the direct path
@@ -111,7 +115,13 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
     std::vector<std::vector<ImageSource>> images;
     for (const auto& l : scene.layers) {
         const int lo = l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
-        images.push_back(computeImages(scene.room, l.position, lo));
+        if (l.channels == 2) {
+            const Vec3 d = stereoOffset(l.stereo.width, l.stereo.rotationDeg, l.stereo.elevationDeg);
+            images.push_back(computeImages(scene.room, l.position - d, lo));
+            images.push_back(computeImages(scene.room, l.position + d, lo));
+        } else {
+            images.push_back(computeImages(scene.room, l.position, lo));
+        }
     }
     for (int i = 0; i < steps; ++i) {
         const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1), controls);
@@ -150,6 +160,14 @@ bool sameRoom(const Room& a, const Room& b) {
         return false;
     for (int w = 0; w < kNumWalls; ++w)
         if (!sameMaterial(a.materials[w], b.materials[w])) return false;
+    return true;
+}
+
+// Layer counts and channel counts decide the number of voices and inputs.
+bool sameLayerLayout(const Scene& a, const Scene& b) {
+    if (a.layers.size() != b.layers.size()) return false;
+    for (size_t i = 0; i < a.layers.size(); ++i)
+        if (a.layers[i].channels != b.layers[i].channels) return false;
     return true;
 }
 
@@ -238,6 +256,7 @@ struct Renderer::Impl {
 
     Impl(const Scene& s, const RenderConfig& c, double dur);
     void initVoices();
+    Vec3 emitterTarget(const Voice& v) const;
     void initRoom();
     void initBackend();
     float estimateIrSeconds() const;
@@ -332,7 +351,7 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
     tmpBlock.assign(B, 0.0f);
     tapBuf.assign(B, 0.0f);
     outBlock.assign(static_cast<size_t>(nOut) * B, 0.0f);
-    inFifo.assign(static_cast<size_t>(std::max<size_t>(1, scene.layers.size())) * B, 0.0f);
+    inFifo.assign(static_cast<size_t>(std::max(1, inputChannels(scene))) * B, 0.0f);
     outFifo.assign(static_cast<size_t>(nOut) * B, 0.0f);
     fifoFill = 0;
     first = true;
@@ -432,7 +451,7 @@ void Renderer::Impl::initBackend() {
             st.sampleRate = fs;
             st.subBlock = B;
             st.ambiOrder = order;
-            st.numSources = static_cast<int>(scene.layers.size());
+            st.numSources = inputChannels(scene);  // one ray-traced source per emitter
             st.steam = cfg.steam;
             st.irSeconds = cfg.steam.irSeconds > 0 ? cfg.steam.irSeconds : estimateIrSeconds();
             st.speedOfSound = speedOfSound;
@@ -451,14 +470,36 @@ void Renderer::Impl::initBackend() {
     if (useSteam) fdnEnabled = false;  // the traced IR carries the whole tail
 }
 
+// Where a voice should sit: the layer position, or a stereo layer's left or
+// right end (both at the centre when the layer is folded to mono).
+Vec3 Renderer::Impl::emitterTarget(const Voice& v) const {
+    const Layer& L = *v.layer;
+    if (L.channels != 2) return L.position;
+    const bool mono = v.controls.mono.value_or(L.stereo.mono);
+    if (mono) return L.position;
+    const Vec3 d = stereoOffset(L.stereo.width * std::max(v.controls.stereoWidthScale, 0.0f),
+                                L.stereo.rotationDeg + v.controls.stereoRotationOffsetDeg, L.stereo.elevationDeg);
+    return v.channel == 0 ? L.position - d : L.position + d;
+}
+
 void Renderer::Impl::initVoices() {
     voices.clear();
-    voices.resize(scene.layers.size());
+    voices.resize(static_cast<size_t>(inputChannels(scene)));
     const int maxDelay = static_cast<int>(maxDistance / speedOfSound * fs) + 16;
+    size_t vi = 0;
+    for (size_t li = 0; li < scene.layers.size(); ++li) {
+        const int nch = std::max(1, std::min(scene.layers[li].channels, 2));
+        for (int ch = 0; ch < nch; ++ch, ++vi) {
+            Voice& v = voices[vi];
+            v.layer = &scene.layers[li];
+            v.layerIndex = static_cast<int>(li);
+            v.channel = ch;
+            v.inputIndex = static_cast<int>(vi);
+        }
+    }
     for (size_t i = 0; i < voices.size(); ++i) {
         Voice& v = voices[i];
-        v.layer = &scene.layers[i];
-        v.position = v.layer->position;
+        v.position = emitterTarget(v);
         v.delay.init(maxDelay);
         rebuildTaps(v, v.position);
         // Steam Audio's reconstructed IRs come out below the diffuse-field
@@ -548,18 +589,21 @@ void Renderer::Impl::rebuildTaps(Voice& v, const Vec3& srcPos) {
 
 void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/) {
     const Layer& L = *v.layer;
-    // A layer moved by a live scene update glides to its new position (time
-    // constant 40 ms) instead of jumping, so dragging it in the editor does
-    // not produce a burst of Doppler shift. Static scenes never move.
+    // A layer moved by a live scene update (or a stereo end moved by its
+    // width/rotation/mono controls) glides to its new position (time constant
+    // 40 ms) instead of jumping, so dragging it in the editor does not produce
+    // a burst of Doppler shift. Static scenes never move.
+    const Vec3 target = emitterTarget(v);
     if (first) {
-        v.position = L.position;
-    } else if ((L.position - v.position).lengthSquared() > 1e-8f) {
+        v.position = target;
+    } else if ((target - v.position).lengthSquared() > 1e-8f) {
         const float a = 1.0f - std::exp(-static_cast<float>(B) / (0.04f * fs));
-        v.position = v.position + (L.position - v.position) * a;
+        v.position = v.position + (target - v.position) * a;
     } else {
-        v.position = L.position;
+        v.position = target;
     }
     const Vec3 srcPos = v.position + v.controls.positionOffset;
+    v.monoTarget = (L.channels == 2 && v.controls.mono.value_or(L.stereo.mono)) ? 1.0f : 0.0f;
 
     // (Re)build the image set when the source moved.
     if ((srcPos - v.imagesForPosition).lengthSquared() > 1e-10f) rebuildTaps(v, srcPos);
@@ -644,6 +688,7 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
         v.levelCur = v.levelTarget;
         v.sendCur = v.sendTarget;
         v.steamFeedCur = v.steamFeedTarget;
+        v.monoCur = v.monoTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
         if (!v.spkCur.empty()) v.spkCur = v.spkTarget;
     }
@@ -679,9 +724,14 @@ void Renderer::Impl::renderSubBlock(double time) {
 
     for (size_t li = 0; li < voices.size(); ++li) {
         Voice& v = voices[li];
-        const float* in = inFifo.data() + li * B;
+        const float* in = inFifo.data() + static_cast<size_t>(v.inputIndex) * B;
+        // Stereo layers folded to mono: each end plays (L + R) / 4, so the pair
+        // at the centre sums to (L + R) / 2. The fold ramps over the sub-block.
+        const float* other = v.layer->channels == 2
+            ? inFifo.data() + static_cast<size_t>(v.inputIndex + (v.channel == 0 ? 1 : -1)) * B : nullptr;
+        const float dMono = (v.monoTarget - v.monoCur) * invB;
+        float mono = v.monoCur;
 
-        // Skip silent, inactive layers entirely once their tails have gone.
         const float dLevel = (v.levelTarget - v.levelCur) * invB;
         const float dSend = (v.sendTarget - v.sendCur) * invB;
         const float dFeed = (v.steamFeedTarget - v.steamFeedCur) * invB;
@@ -694,7 +744,12 @@ void Renderer::Impl::renderSubBlock(double time) {
             level += dLevel;
             send += dSend;
             feed += dFeed;
-            const float x = in[i] * level;
+            float smpIn = in[i];
+            if (other) {
+                mono += dMono;
+                smpIn = smpIn * (1.0f - mono) + 0.25f * (smpIn + other[i]) * mono;
+            }
+            const float x = smpIn * level;
             v.delay.write(x);
             revIn[i] += x * send;
             steamIn[i] = feed;  // gain ramp; the signal is taken at the direct tap below
@@ -737,6 +792,7 @@ void Renderer::Impl::renderSubBlock(double time) {
         v.levelCur = v.levelTarget;
         v.sendCur = v.sendTarget;
         v.steamFeedCur = v.steamFeedTarget;
+        v.monoCur = v.monoTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
 #ifdef SP_HAVE_STEAM_AUDIO
         if (useSteam && steam) steam->pushDry(static_cast<int>(li), steamIn.data());
@@ -863,7 +919,14 @@ Renderer::Renderer(const Scene& scene, const RenderConfig& config, double durati
 
 Renderer::~Renderer() = default;
 
-int Renderer::numInputs() const { return static_cast<int>(impl_->scene.layers.size()); }
+int Renderer::numInputs() const { return static_cast<int>(impl_->voices.size()); }
+int Renderer::numLayers() const { return static_cast<int>(impl_->scene.layers.size()); }
+int Renderer::inputIndex(int layer) const {
+    int n = 0;
+    for (int i = 0; i < layer && i < static_cast<int>(impl_->scene.layers.size()); ++i)
+        n += std::max(1, std::min(impl_->scene.layers[static_cast<size_t>(i)].channels, 2));
+    return n;
+}
 int Renderer::numOutputs() const { return impl_->nOut; }
 int Renderer::latencySamples() const { return impl_->B; }
 const RenderConfig& Renderer::config() const { return impl_->cfg; }
@@ -874,7 +937,8 @@ void Renderer::setListenerControls(const ListenerControls& c) { impl_->listenerC
 void Renderer::reset() { impl_->resetState(); }
 
 void Renderer::setLayerControls(int layer, const LayerControls& c) {
-    if (layer >= 0 && layer < static_cast<int>(impl_->voices.size())) impl_->voices[layer].controls = c;
+    for (auto& v : impl_->voices)
+        if (v.layerIndex == layer) v.controls = c;
 }
 
 std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
@@ -882,7 +946,7 @@ std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
     // environment, duration, maxDistance), so this may run concurrently with
     // process() and applyUpdate().
     const Impl& im = *impl_;
-    if (scene.layers.size() != im.voices.size()) return nullptr;
+    if (!sameLayerLayout(scene, im.scene)) return nullptr;
     if (!sameRoom(scene.room, im.scene.room) || !sameEnvironment(scene.environment, im.scene.environment))
         return nullptr;
     auto u = std::make_unique<SceneUpdate>();
@@ -894,13 +958,13 @@ std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
 
 void Renderer::applyUpdate(SceneUpdate& u) {
     Impl& im = *impl_;
-    if (u.scene.layers.size() != im.voices.size()) return;
+    if (!sameLayerLayout(u.scene, im.scene)) return;
     // Vector and object swaps exchange heap buffers without allocating.
     std::swap(im.scene.layers, u.scene.layers);
     std::swap(im.scene.listener, u.scene.listener);
     std::swap(im.scene.name, u.scene.name);
     std::swap(im.poses, u.poses);
-    for (size_t i = 0; i < im.voices.size(); ++i) im.voices[i].layer = &im.scene.layers[i];
+    for (auto& v : im.voices) v.layer = &im.scene.layers[static_cast<size_t>(v.layerIndex)];
 }
 
 bool Renderer::steamAudioAvailable() {
@@ -934,7 +998,7 @@ void Renderer::process(const float* const* inputs, float* const* outputs, int nu
     DenormalGuard denormals;
     Impl& im = *impl_;
     const int B = im.B;
-    const size_t nLayers = im.voices.size();
+    const size_t nInputs = im.voices.size();
     int done = 0;
     while (done < numFrames) {
         if (im.fifoFill == 0) im.subBlockStartTime = timeSeconds + static_cast<double>(done) / im.cfg.sampleRate;
@@ -944,7 +1008,7 @@ void Renderer::process(const float* const* inputs, float* const* outputs, int nu
             if (!outputs[ch]) continue;
             std::memcpy(outputs[ch] + done, im.outFifo.data() + static_cast<size_t>(ch) * B + im.fifoFill, sizeof(float) * k);
         }
-        for (size_t l = 0; l < nLayers; ++l) {
+        for (size_t l = 0; l < nInputs; ++l) {
             float* dst = im.inFifo.data() + l * B + im.fifoFill;
             if (inputs && inputs[l]) std::memcpy(dst, inputs[l] + done, sizeof(float) * k);
             else std::fill(dst, dst + k, 0.0f);

@@ -82,6 +82,31 @@ float MeshGeometry::surfaceArea() const {
     return a;
 }
 
+// ---- stereo layers
+
+Vec3 stereoOffset(float width, float rotationDeg, float elevationDeg) {
+    const float h = 0.5f * std::max(width, 0.0f);
+    const float yaw = degToRad(rotationDeg), el = degToRad(elevationDeg);
+    // The bar lies on +X at zero rotation; yaw about +Y turns +X towards -Z.
+    return {h * std::cos(el) * std::cos(yaw), h * std::sin(el), -h * std::cos(el) * std::sin(yaw)};
+}
+
+void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::Stereo& stereo) {
+    centre = (left + right) * 0.5f;
+    const Vec3 d = (right - left) * 0.5f;
+    const float h = d.length();
+    stereo.width = 2.0f * h;
+    if (h < 1e-6f) return;  // ends coincide: keep the previous angles
+    stereo.elevationDeg = radToDeg(std::asin(clamp(d.y / h, -1.0f, 1.0f)));
+    stereo.rotationDeg = radToDeg(std::atan2(-d.z, d.x));
+}
+
+int inputChannels(const Scene& scene) {
+    int n = 0;
+    for (const auto& l : scene.layers) n += std::max(1, std::min(l.channels, 2));
+    return n;
+}
+
 MeshGeometry roomGeometry(const Room& room) {
     MeshGeometry g;
     switch (room.type) {

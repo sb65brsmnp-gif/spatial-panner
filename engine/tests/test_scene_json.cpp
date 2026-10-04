@@ -15,6 +15,13 @@ TEST_CASE("Scene JSON round trip") {
     l.levelDb = -6;
     l.directivity = 0.5f;
     s.layers.push_back(l);
+    Layer st;
+    st.name = "pad";
+    st.channels = 2;
+    st.stereo.width = 3.5f;
+    st.stereo.rotationDeg = 45;
+    st.stereo.mono = true;
+    s.layers.push_back(st);
     s.room.size = {5, 3, 7};
     s.room.materials[WallNegY] = materials::byName("carpet");
     Path p;
@@ -29,8 +36,14 @@ TEST_CASE("Scene JSON round trip") {
 
     const std::string text = sceneToJson(s);
     const Scene back = sceneFromJson(text);
-    REQUIRE(back.layers.size() == 1);
+    REQUIRE(back.layers.size() == 2);
     CHECK(back.layers[0].name == "voice");
+    CHECK(back.layers[0].channels == 1);
+    CHECK(back.layers[1].channels == 2);
+    CHECK(back.layers[1].stereo.width == Approx(3.5f));
+    CHECK(back.layers[1].stereo.rotationDeg == Approx(45));
+    CHECK(back.layers[1].stereo.mono);
+    CHECK(sceneFromJson(R"({"layers":[{"name":"old"}]})").layers[0].channels == 1);  // files without the key
     CHECK(back.layers[0].position.z == Approx(-3));
     CHECK(back.layers[0].levelDb == Approx(-6));
     CHECK(back.layers[0].directivity == Approx(0.5));

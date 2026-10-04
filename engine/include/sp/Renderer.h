@@ -79,6 +79,11 @@ struct LayerControls {
     Vec3 positionOffset;
     std::optional<float> dopplerAmount;
     std::optional<float> spreadDeg;
+    // Stereo layers: the width is multiplied, the rotation added, and `mono`
+    // (when set) replaces Layer::stereo.mono.
+    float stereoWidthScale = 1.0f;
+    float stereoRotationOffsetDeg = 0;
+    std::optional<bool> mono;
 };
 
 // A scene edit prepared off the audio thread by Renderer::prepareUpdate and
@@ -97,14 +102,20 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    int numInputs() const;    // = scene.layers.size()
+    // Inputs are one mono buffer per layer channel, layer by layer: layer i
+    // takes inputs[inputIndex(i)] .. inputs[inputIndex(i) + channels - 1]
+    // (left then right for a stereo layer). numInputs() = inputChannels(scene).
+    int numInputs() const;
+    int numLayers() const;    // = scene.layers.size()
+    int inputIndex(int layer) const;
     int numOutputs() const;   // 2, layout channels, or (order+1)^2
     int latencySamples() const;
     const RenderConfig& config() const;
 
-    // Render `numFrames` samples. `inputs[i]` is layer i's mono audio (may be
-    // null for silence). `outputs[c]` receives channel c. `timeSeconds` is the
-    // timeline time of the first frame. Any frame count is accepted.
+    // Render `numFrames` samples. `inputs[k]` is input channel k (see
+    // inputIndex(); may be null for silence). `outputs[c]` receives channel c.
+    // `timeSeconds` is the timeline time of the first frame. Any frame count
+    // is accepted.
     void process(const float* const* inputs, float* const* outputs, int numFrames, double timeSeconds);
 
     // Live controls, safe to call between process() calls.
@@ -124,8 +135,9 @@ public:
     // prepareUpdate() builds what applyUpdate() needs from an edited scene.
     // It allocates, so call it off the audio thread; it is safe to call while
     // process() runs on another thread. It returns null when the edit needs a
-    // new Renderer instead: a different number of layers, any change to the
-    // room or environment, or layers/paths reaching beyond the delay lines.
+    // new Renderer instead: a different number of layers or layer channels,
+    // any change to the room or environment, or layers/paths reaching beyond
+    // the delay lines.
     // Everything else (layer positions, levels, directivity, spread, Doppler,
     // distance model, sends, paths, speed curve, head track) updates live.
     //

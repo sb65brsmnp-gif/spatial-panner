@@ -198,6 +198,10 @@ json layerToJson(const Layer& l) {
     j["occlusion_radius"] = l.occlusionRadius;
     j["start_time"] = l.startTime;
     j["loop"] = l.loop;
+    j["channels"] = l.channels;
+    if (l.channels == 2)
+        j["stereo"] = json{{"width", l.stereo.width}, {"rotation", l.stereo.rotationDeg},
+                           {"elevation", l.stereo.elevationDeg}, {"mono", l.stereo.mono}};
     return j;
 }
 
@@ -221,6 +225,15 @@ Layer layerFromJson(const json& j) {
     l.occlusionRadius = j.value("occlusion_radius", l.occlusionRadius);
     l.startTime = j.value("start_time", l.startTime);
     l.loop = j.value("loop", l.loop);
+    l.channels = j.value("channels", l.channels);
+    if (l.channels != 1 && l.channels != 2) throw std::runtime_error("layer \"" + l.name + "\": channels must be 1 or 2");
+    if (j.contains("stereo") && j["stereo"].is_object()) {
+        const json& st = j["stereo"];
+        l.stereo.width = st.value("width", l.stereo.width);
+        l.stereo.rotationDeg = st.value("rotation", l.stereo.rotationDeg);
+        l.stereo.elevationDeg = st.value("elevation", l.stereo.elevationDeg);
+        l.stereo.mono = st.value("mono", l.stereo.mono);
+    }
     return l;
 }
 

@@ -8,7 +8,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import type { LayerDoc, PathDoc, V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
 
@@ -22,7 +22,10 @@ export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number
   return new THREE.Quaternion().setFromEuler(new THREE.Euler(pitchDeg * d, yawDeg * d, -rollDeg * d, 'YXZ'));
 }
 
-interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; arrow: THREE.ArrowHelper; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+// A layer is a ball on a stem; a stereo layer is two balls (left, right) on
+// stems joined by a bar, with the label at the centre.
+interface LayerEnd { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; tag: CSS2DObject }
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; right: LayerEnd; bar: THREE.Mesh; arrow: THREE.ArrowHelper; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
@@ -136,10 +139,9 @@ export class SceneView {
     this.updateLayers();
   }
 
-  private makeLayer(_l: LayerDoc, index: number): LayerObj {
-    const group = new THREE.Group();
+  private makeEnd(group: THREE.Group, index: number, end: 'L' | 'R' | 'centre'): LayerEnd {
     const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4 }));
-    ball.userData = { kind: 'layer', index };
+    ball.userData = { kind: 'layer', index, end };
     group.add(ball);
     const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -1, 0)]),
       new THREE.LineDashedMaterial({ color: 0x8a94a6, dashSize: 0.1, gapSize: 0.08 }));
@@ -147,6 +149,22 @@ export class SceneView {
     const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.24, 32), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: 0.6 }));
     ring.rotation.x = -Math.PI / 2;
     group.add(ring);
+    const tag = makeLabel(end === 'R' ? 'R' : 'L', 'layer-end');
+    tag.position.set(0, -LAYER_RADIUS - 0.18, 0);
+    group.add(tag);
+    return { ball, stem, ring, tag };
+  }
+
+  private makeLayer(_l: LayerDoc, index: number): LayerObj {
+    const group = new THREE.Group();
+    const left = this.makeEnd(group, index, 'centre');
+    const { ball, stem, ring } = left;
+    group.userData.leftTag = left.tag;
+    const right = this.makeEnd(group, index, 'R');
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1, 12, 1),
+      new THREE.MeshStandardMaterial({ roughness: 0.6, transparent: true, opacity: 0.85 }));
+    bar.userData = { kind: 'layer', index, end: 'centre' };
+    group.add(bar);
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 0.7, 0xffffff, 0.18, 0.12);
     group.add(arrow);
     const div = document.createElement('div');
@@ -161,7 +179,17 @@ export class SceneView {
     label.position.set(0, LAYER_RADIUS + 0.25, 0);
     group.add(label);
     this.layerGroup.add(group);
-    return { group, ball, stem, ring, arrow, label, meter, name };
+    return { group, ball, stem, ring, right, bar, arrow, label, meter, name };
+  }
+
+  // Places a ball and its stem and floor ring at `p` (group-local).
+  private placeEnd(e: { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh }, p: THREE.Vector3, floorY: number, color: THREE.Color): void {
+    e.ball.position.copy(p);
+    const h = p.y - floorY;
+    (e.stem.geometry as THREE.BufferGeometry).setFromPoints([p, new THREE.Vector3(p.x, p.y - h, p.z)]);
+    e.stem.computeLineDistances();
+    e.ring.position.set(p.x, p.y - h + 0.01, p.z);
+    (e.ring.material as THREE.MeshBasicMaterial).color.copy(color);
   }
 
   updateLayers(): void {
@@ -181,11 +209,33 @@ export class SceneView {
       mat.emissive.copy(selected ? color : new THREE.Color(0));
       mat.emissiveIntensity = selected ? 0.6 : 0;
       o.ball.scale.setScalar(selected ? 1.25 : 1);
-      const h = l.position[1] - floorY;
-      (o.stem.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -h, 0)]);
-      o.stem.computeLineDistances();
-      o.ring.position.y = -h + 0.01;
-      (o.ring.material as THREE.MeshBasicMaterial).color.copy(color);
+      // Stereo: left and right ends either side of the centre, joined by a
+      // bar; folded to mono, the pair collapses to one ball at the centre.
+      const stereo = isStereo(l);
+      const st = l.stereo ?? defaultStereo();
+      const spread = stereo && !st.mono;
+      const d = spread ? stereoOffset(st) : [0, 0, 0];
+      const floor = floorY - l.position[1];  // group-local floor height
+      this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color);
+      o.ball.userData.end = stereo ? 'L' : 'centre';
+      o.right.ball.visible = o.right.stem.visible = o.right.ring.visible = spread;
+      o.right.tag.visible = spread;
+      (o.group.userData.leftTag as CSS2DObject).visible = spread;
+      if (spread) {
+        this.placeEnd(o.right, new THREE.Vector3(d[0], d[1], d[2]), floor, color);
+        const rm = o.right.ball.material as THREE.MeshStandardMaterial;
+        rm.color.copy(mat.color);
+        rm.emissive.copy(mat.emissive);
+        rm.emissiveIntensity = mat.emissiveIntensity;
+        o.right.ball.scale.setScalar(selected ? 1.25 : 1);
+        const len = 2 * Math.hypot(d[0], d[1], d[2]);
+        o.bar.visible = len > 2 * LAYER_RADIUS;
+        o.bar.scale.set(1, Math.max(0.01, len - 2 * LAYER_RADIUS * 0.9), 1);
+        o.bar.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(d[0], d[1], d[2]).normalize());
+        (o.bar.material as THREE.MeshStandardMaterial).color.copy(silent ? color.clone().multiplyScalar(0.35) : color);
+      } else {
+        o.bar.visible = false;
+      }
       o.arrow.visible = l.directivity > 0.01;
       const f = v3(l.directivity_forward);
       if (f.lengthSq() > 1e-9) o.arrow.setDirection(f.normalize());
@@ -364,7 +414,14 @@ export class SceneView {
 
   clearPreview(): void { this.setPreview([]); }
 
-  pickableLayers(): THREE.Object3D[] { return this.layers.map((l) => l.ball); }
+  pickableLayers(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [];
+    for (const l of this.layers) {
+      out.push(l.ball);
+      if (l.right.ball.visible) out.push(l.right.ball, l.bar);
+    }
+    return out;
+  }
 }
 
 function makeLabel(text: string, cls: string): CSS2DObject {
@@ -382,6 +439,7 @@ function endMarker(p: V3, color: number): THREE.Mesh {
 
 function disposeLayer(l: LayerObj): void {
   l.label.element.remove();
+  l.right.tag.element.remove();
 }
 
 function clear(g: THREE.Object3D): void {

@@ -138,12 +138,14 @@ private:
     // offline renderer so the bounce is deterministic.
     std::atomic<bool> awaitOfflineProgram_{false};
     std::atomic<float> docLevelGain_{1.0f}, docDoppler_{1.0f}, docSpread_{0.0f};
+    std::atomic<int> docChannels_{1};   // the layer's channels in the scene document
 
     // audio thread
     double sampleRate_ = 48000;
     juce::int64 expected_ = -1;
     juce::int64 freeRun_ = 0;
-    std::vector<float> mono_;
+    std::vector<float> mono_, right_;   // copies of the track's input (the outputs overwrite the buffer)
+    int slotChannels_ = 0;
     std::atomic<double> lastTime_{0};
     std::atomic<bool> lastPlaying_{false};
     std::atomic<float> cpu_{0};
@@ -158,6 +160,9 @@ private:
     std::atomic<float>* pMute_;
     std::atomic<float>* pDoppler_;
     std::atomic<float>* pWidth_;
+    std::atomic<float>* pStereoWidth_;
+    std::atomic<float>* pStereoRotation_;
+    std::atomic<float>* pMono_;
     std::atomic<float>* pX_;
     std::atomic<float>* pY_;
     std::atomic<float>* pZ_;
