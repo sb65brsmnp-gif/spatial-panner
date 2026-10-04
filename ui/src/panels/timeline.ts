@@ -3,8 +3,12 @@
 //
 // Keys: drag to move, double-click a lane to add, Delete to remove, the key
 // bar edits the selected key's exact values and easing.
-import type { Store } from '../model/store';
-import { EASINGS, headKeyAt, sortKeys, speedAt, type Easing, type HeadKey, type SpeedKey } from '../model/scene';
+//
+// Transport: beginning of path (Enter), back and forward (a click jumps 5 s,
+// holding scrubs at 4x), stop, play/pause (Space), end of path; , and . step
+// the playhead 1 s (0.1 s with Shift).
+import type { Analysis, Store } from '../model/store';
+import { EASINGS, headKeyAt, sortKeys, speedAt, type Easing, type HeadKey, type SceneDoc, type SpeedKey } from '../model/scene';
 import type { Backend } from '../bridge/backend';
 import { el, fmtTime, numberInput, select } from './dom';
 
@@ -14,6 +18,45 @@ interface KeySel { lane: LaneId; index: number }
 
 const GUTTER = 96;
 const RULER = 22;
+
+export const STEP = 1;            // , and . (seconds)
+export const FINE_STEP = 0.1;     // with Shift
+export const JUMP = 5;            // a click on back / forward
+export const SCRUB_RATE = 4;      // holding back / forward: playhead seconds per real second
+export const HOLD_MS = 250;       // holding longer than this scrubs instead of jumping
+
+export type TransportKeyAction = { kind: 'start' } | { kind: 'step'; seconds: number };
+
+// What a key does to the transport: Enter returns to the start of the path,
+// , and . step back and forward (Shift: a fine step; on US layouts Shift
+// turns them into < and >). Null for any other key.
+export function transportKeyAction(e: { key: string; shiftKey: boolean }): TransportKeyAction | null {
+  if (e.key === 'Enter') return { kind: 'start' };
+  const step = e.shiftKey ? FINE_STEP : STEP;
+  if (e.key === ',' || e.key === '<') return { kind: 'step', seconds: -step };
+  if (e.key === '.' || e.key === '>') return { kind: 'step', seconds: step };
+  return null;
+}
+
+// When the listener starts along the path (0 when unset).
+export function pathStartTime(scene: SceneDoc): number {
+  const t = scene.listener.path_start_time;
+  return Number.isFinite(t) && t > 0 ? t : 0;
+}
+
+// When the listener reaches the end of the path, as analysed by the engine;
+// the end of the scene until the analysis says.
+export function pathEndTime(analysis: Analysis | null, duration: number): number {
+  const t = analysis && analysis.arrival_time > 0 ? analysis.arrival_time : duration;
+  return Math.max(0, Math.min(duration, t));
+}
+
+// The playhead moved by `seconds`, kept inside the scene and free of
+// floating-point dust (ten 0.1 s steps land on a whole second).
+export function steppedTime(time: number, seconds: number, duration: number): number {
+  const t = Math.round((time + seconds) * 1000) / 1000;
+  return Math.max(0, Math.min(duration, t));
+}
 
 export class Timeline {
   readonly root: HTMLElement;
@@ -31,6 +74,9 @@ export class Timeline {
   private durationInput: HTMLInputElement;
   private lastSeek = 0;
   private focused = false;
+  // Back / forward button held down: a timer until the hold becomes a scrub,
+  // then the scrub itself (direction, whether to resume playing on release).
+  private hold: { timer: number; dir: -1 | 1; scrub: { wasPlaying: boolean; last: number; frame: number } | null } | null = null;
 
   constructor(private store: Store, private backend: Backend) {
     this.root = el('div', { id: 'timeline' });
@@ -40,8 +86,12 @@ export class Timeline {
       b.addEventListener('click', fn);
       return b;
     };
+    const startBtn = btn('❚◀', 'Beginning of path (Enter)', () => this.goToPathStart());
+    const backBtn = this.holdButton('◀◀', `Back ${JUMP} s; hold to scrub back. Step back: , (${STEP} s), Shift+, (${FINE_STEP} s)`, -1);
     const stopBtn = btn('■', 'Stop and return to start', () => this.transport('stop'));
     this.playBtn = btn('▶', 'Play / pause (Space)', () => this.togglePlay());
+    const fwdBtn = this.holdButton('▶▶', `Forward ${JUMP} s; hold to scrub forward. Step forward: . (${STEP} s), Shift+. (${FINE_STEP} s)`, 1);
+    const endBtn = btn('▶❚', 'End of path', () => this.goToPathEnd());
     this.loopBtn = btn('⟲', 'Loop', () => {
       this.store.loop = !this.store.loop;
       this.backend.transport({ action: 'loop', loop: this.store.loop });
@@ -51,8 +101,11 @@ export class Timeline {
     this.durationInput = numberInput(0, (v) => this.store.update((s) => { s.duration = Math.max(0, v); }), { step: 1, min: 0, width: 56 });
     this.durationInput.title = 'Scene length in seconds (0 = automatic: longest non-looping audio, or the path)';
     this.keyBar = el('div', { class: 'tl-keybar' });
-    if (backend.kind === 'plugin') for (const b of [stopBtn, this.playBtn, this.loopBtn]) b.style.display = 'none';
-    bar.append(stopBtn, this.playBtn, this.loopBtn, this.timeLabel, el('span', { class: 'tl-sep' }, 'Length'), this.durationInput,
+    const transport = [startBtn, backBtn, stopBtn, this.playBtn, fwdBtn, endBtn, this.loopBtn];
+    for (const b of transport) b.classList.add('transport');
+    // Plugin: Logic owns the transport; the playhead here follows Logic's.
+    if (backend.kind === 'plugin') for (const b of transport) b.style.display = 'none';
+    bar.append(...transport, this.timeLabel, el('span', { class: 'tl-sep' }, 'Length'), this.durationInput,
       el('span', { class: 'tl-unit' }, 's'), this.keyBar);
     this.canvas = el('canvas', { class: 'tl-canvas' }) as HTMLCanvasElement;
     this.ctx = this.canvas.getContext('2d')!;
@@ -320,6 +373,25 @@ export class Timeline {
     this.refreshBar();
   }
 
+  // Where the listener starts along the path (Enter, the ❚◀ button).
+  goToPathStart(): void { this.jumpTo(pathStartTime(this.store.scene)); }
+
+  // Where the listener arrives at the end of the path (the ▶❚ button).
+  goToPathEnd(): void { this.jumpTo(pathEndTime(this.store.analysis, this.store.duration)); }
+
+  // Moves the playhead by `seconds` (, and . keys).
+  nudge(seconds: number): void { this.jumpTo(steppedTime(this.store.time, seconds, this.store.duration)); }
+
+  // A discrete jump: the engine always gets this seek (unlike a drag's, which
+  // is rate-limited), and playing goes on from the new time.
+  private jumpTo(t: number): void {
+    if (this.hostTransport()) return;
+    t = Math.max(0, Math.min(this.store.duration, t));
+    this.store.setTime(t);
+    this.lastSeek = performance.now();
+    this.backend.transport({ action: 'seek', time: t });
+  }
+
   private scrubTo(t: number): void {
     if (this.hostTransport()) return;
     t = Math.max(0, Math.min(this.store.duration, t));
@@ -329,6 +401,53 @@ export class Timeline {
       this.lastSeek = now;
       this.backend.transport({ action: 'seek', time: t });
     }
+  }
+
+  // Back / forward: a click jumps JUMP seconds; holding the button longer
+  // than HOLD_MS scrubs the playhead at SCRUB_RATE times real time (audio
+  // paused meanwhile) and, if it was playing, plays on from where it lands.
+  private holdButton(label: string, title: string, dir: -1 | 1): HTMLButtonElement {
+    const b = el('button', { class: 'tbtn', title }, label) as HTMLButtonElement;
+    b.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || this.hold) return;
+      e.preventDefault();
+      b.setPointerCapture(e.pointerId);
+      const timer = window.setTimeout(() => this.beginScrub(), HOLD_MS);
+      this.hold = { timer, dir, scrub: null };
+    });
+    const release = () => this.releaseHold();
+    b.addEventListener('pointerup', release);
+    b.addEventListener('pointercancel', release);
+    b.addEventListener('lostpointercapture', release);
+    return b;
+  }
+
+  private beginScrub(): void {
+    const h = this.hold;
+    if (!h || h.scrub) return;
+    const wasPlaying = this.store.playing;
+    if (wasPlaying) this.transport('pause');
+    h.scrub = { wasPlaying, last: performance.now(), frame: 0 };
+    const frame = () => {
+      const s = this.hold?.scrub;
+      if (!s) return;
+      const now = performance.now();
+      this.scrubTo(this.store.time + h.dir * SCRUB_RATE * (now - s.last) / 1000);
+      s.last = now;
+      s.frame = requestAnimationFrame(frame);
+    };
+    frame();
+  }
+
+  private releaseHold(): void {
+    const h = this.hold;
+    if (!h) return;
+    this.hold = null;
+    window.clearTimeout(h.timer);
+    if (!h.scrub) { this.jumpTo(this.store.time + h.dir * JUMP); return; }
+    cancelAnimationFrame(h.scrub.frame);
+    this.jumpTo(this.store.time);
+    if (h.scrub.wasPlaying) this.transport('play');
   }
 
   private hitKey(x: number, y: number): KeySel | null {

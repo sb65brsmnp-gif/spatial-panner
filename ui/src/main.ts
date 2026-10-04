@@ -9,7 +9,7 @@ import { SceneView } from './view/sceneView';
 import { Interaction, type ToolName } from './view/interaction';
 import { Toolbar } from './panels/toolbar';
 import { Sidebar } from './panels/sidebar';
-import { Timeline } from './panels/timeline';
+import { Timeline, transportKeyAction } from './panels/timeline';
 import { el, fmtTime } from './panels/dom';
 
 const backend = createBackend();
@@ -272,6 +272,17 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveScene(e.shiftKey); return; }
   if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openScene(); return; }
   if (typing || mod) return;
+  // Transport: Enter returns to the beginning of the path, , and . step the
+  // playhead (Space, play/pause, is the timeline's). While a line is being
+  // drawn, Enter finishes it instead (the drawing tools run first and mark
+  // the event handled).
+  const transport = transportKeyAction(e);
+  if (transport) {
+    if (transport.kind === 'start') { if (e.defaultPrevented || tools.drawing) return; timeline.goToPathStart(); }
+    else timeline.nudge(transport.seconds);
+    e.preventDefault();
+    return;
+  }
   const toolKeys: Record<string, ToolName> = { v: 'select', f: 'freehand', l: 'polyline', c: 'curve', p: 'pen', s: 'shape' };
   const viewKeys: Record<string, ViewName> = { '1': 'persp', '2': 'top', '3': 'front', '4': 'side', '5': 'listener' };
   const k = e.key.toLowerCase();

@@ -98,6 +98,7 @@ input.num { width: 64px; }
 /* timeline */
 #timeline { display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--line); min-height: 0; }
 .tl-bar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tl-bar .transport { min-width: 34px; padding-left: 6px; padding-right: 6px; text-align: center; touch-action: none; }
 .tl-time { font-variant-numeric: tabular-nums; min-width: 100px; padding: 0 6px; }
 .tl-sep { color: var(--muted); margin-left: 8px; }
 .tl-unit { color: var(--muted); }

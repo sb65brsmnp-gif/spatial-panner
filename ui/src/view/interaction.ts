@@ -49,6 +49,9 @@ export class Interaction {
   onToolChange: () => void = () => {};
   blockDelete: () => boolean = () => false;
 
+  // A point-to-point, curve or pen line is being drawn (Enter finishes it).
+  get drawing(): boolean { return this.clicks.length > 0 || this.pen.length > 0; }
+
   constructor(private vp: Viewport, private view: SceneView, private store: Store) {
     const el = vp.renderer.domElement;
     // Capture phase on the container so a hit can switch orbit controls off
