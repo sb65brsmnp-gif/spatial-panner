@@ -5,6 +5,7 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_extra/juce_gui_extra.h>
+#include <nlohmann/json.hpp>
 
 #include "Session.h"
 
@@ -35,16 +36,21 @@ private:
 
     void emit(const juce::Identifier& id, const std::string& json);
     void chooseAudioFiles(std::function<void(std::string)> done);
+    void chooseFile(const nlohmann::json& args, std::function<void(std::string)> done);
     void openScene(std::function<void(std::string)> done);
     std::string readScene(const juce::File& f);
     void saveScene(const std::string& arg, std::function<void(std::string)> done);
     void bounce(const std::string& arg, std::function<void(std::string)> done);
+    void confirm(const nlohmann::json& args, std::function<void(std::string)> done);
+    bool beginChooser(std::unique_ptr<juce::FileChooser> chooser, int flags, std::function<void(const juce::FileChooser&)> fn,
+                      const std::function<void(std::string)>& done);
     void showAudioSettings();
 
     Session& session_;
     juce::AudioDeviceManager& devices_;
     juce::WebBrowserComponent* browser_ = nullptr;
     std::unique_ptr<juce::FileChooser> chooser_;
+    bool chooserOpen_ = false;
     juce::File lastDir_;
     juce::File pendingOpen_;
     bool pageReady_ = false;

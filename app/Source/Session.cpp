@@ -19,6 +19,7 @@ struct LayerData {
     std::vector<juce::int64> start;   // samples
     std::vector<char> loop;
     std::vector<float> meterGain;     // level and mute, so the meters show what the layer contributes
+    std::vector<int> channels;        // 1 or 2 renderer inputs per layer, in order
 };
 
 struct Program {
@@ -134,12 +135,14 @@ void Session::fillLayerData(LayerData& d, const sp::Scene& s, double rate) {
     d.start.resize(n);
     d.loop.resize(n);
     d.meterGain.resize(n);
+    d.channels.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const auto& l = s.layers[i];
         d.audio[i] = library_.get(juce::String(l.audioFile));
         d.start[i] = static_cast<juce::int64>(std::llround(l.startTime * rate));
         d.loop[i] = l.loop ? 1 : 0;
         d.meterGain[i] = l.mute ? 0.0f : sp::dbToGain(l.levelDb);
+        d.channels[i] = std::max(1, std::min(l.channels, 2));
     }
 }
 
@@ -147,7 +150,7 @@ void Session::tryUpdate() {
     if (!haveScene_ || building_) return;
     const double rate = deviceRate_.load();
     if (published_ && std::abs(published_->sampleRate - rate) < 0.5 &&
-        published_->renderer->numInputs() == static_cast<int>(scene_.layers.size())) {
+        published_->renderer->numInputs() == sp::inputChannels(scene_)) {
         if (auto u = published_->renderer->prepareUpdate(scene_)) {
             auto* p = new Patch;
             p->target = published_;
@@ -242,7 +245,8 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
     const sp::Scene scene = scene_;
     const double duration = duration_;
     auto alive = alive_;
-    t->body = [raw, scene, duration, out, start, end, rate, file, progress, done, alive] {
+    const juce::File partial = file.getSiblingFile("." + file.getFileNameWithoutExtension() + ".partial.wav");
+    t->body = [raw, scene, duration, out, start, end, rate, file, partial, progress, done, alive] {
         juce::String error;
         auto report = [alive](std::function<void()> f) {
             juce::MessageManager::callAsync([alive, f] { if (*alive) f(); });
@@ -263,13 +267,16 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
             const auto pre = static_cast<juce::int64>(std::min(start, 3.0) * rate);
             const auto first = static_cast<juce::int64>(start * rate) - pre;
             const auto total = static_cast<juce::int64>((t1 - start) * rate);
-            file.deleteFile();
-            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(file);
-            if (static_cast<juce::FileOutputStream*>(os.get())->failedToOpen()) throw std::runtime_error("Cannot write " + file.getFullPathName().toStdString());
+            // Render into a hidden file next to the target and move it into
+            // place at the end, so the chosen name only ever holds a complete
+            // bounce (a failed or cancelled one leaves nothing behind).
+            partial.deleteFile();
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(partial);
+            if (static_cast<juce::FileOutputStream*>(os.get())->failedToOpen()) throw std::runtime_error("Cannot write in " + file.getParentDirectory().getFullPathName().toStdString());
             juce::WavAudioFormat wav;
             auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions{}.withSampleRate(rate).withNumChannels(nOut).withBitsPerSample(24));
             if (!writer) throw std::runtime_error("Cannot create a WAV writer for " + std::to_string(nOut) + " channels");
-            std::vector<std::vector<float>> in(scene.layers.size(), std::vector<float>(block)), o(static_cast<size_t>(nOut), std::vector<float>(block));
+            std::vector<std::vector<float>> in(static_cast<size_t>(r.numInputs()), std::vector<float>(block)), o(static_cast<size_t>(nOut), std::vector<float>(block));
             std::vector<const float*> ip(in.size());
             std::vector<float*> op(o.size());
             for (size_t i = 0; i < in.size(); ++i) ip[i] = in[i].data();
@@ -278,19 +285,24 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
             float lastReported = -1;
             while (written < total) {
                 if (raw->threadShouldExit()) throw std::runtime_error("Bounce cancelled");
-                for (size_t i = 0; i < in.size(); ++i) {
+                size_t input = 0;
+                for (size_t i = 0; i < scene.layers.size(); ++i) {
                     const auto& l = scene.layers[i];
                     const LayerAudio* a = audio[i].get();
                     const auto st = static_cast<juce::int64>(std::llround(l.startTime * rate));
-                    for (int k = 0; k < block; ++k) {
-                        juce::int64 idx = pos + k - st;
-                        float v = 0;
-                        if (a && !a->samples.empty() && idx >= 0) {
-                            const auto size = static_cast<juce::int64>(a->samples.size());
-                            if (l.loop) idx %= size;
-                            if (idx < size) v = a->samples[static_cast<size_t>(idx)];
+                    const int nch = std::max(1, std::min(l.channels, 2));
+                    for (int c = 0; c < nch; ++c, ++input) {
+                        const std::vector<float>* smp = a && a->numChannels() > 0 ? &a->channel(c) : nullptr;
+                        for (int k = 0; k < block; ++k) {
+                            juce::int64 idx = pos + k - st;
+                            float v = 0;
+                            if (smp && !smp->empty() && idx >= 0) {
+                                const auto size = static_cast<juce::int64>(smp->size());
+                                if (l.loop) idx %= size;
+                                if (idx < size) v = (*smp)[static_cast<size_t>(idx)];
+                            }
+                            in[input][static_cast<size_t>(k)] = v;
                         }
-                        in[i][static_cast<size_t>(k)] = v;
                     }
                 }
                 r.process(ip.data(), op.data(), block, static_cast<double>(pos) / rate);
@@ -308,8 +320,10 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
                 if (pr - lastReported > 0.01f) { lastReported = pr; report([progress, pr] { progress(pr); }); }
             }
             writer.reset();
+            if (!partial.moveFileTo(file)) throw std::runtime_error("Cannot write " + file.getFullPathName().toStdString());
         } catch (const std::exception& e) {
             error = e.what();
+            partial.deleteFile();
         }
         report([done, error] { done(error); });
     };
@@ -469,28 +483,34 @@ void Session::handleCommands() {
 
 void Session::fillInputs(Program& p, int n, float gainStart, float gainStep, bool metering) {
     const auto& L = p.layers;
-    const size_t nl = p.in.size();
-    for (size_t i = 0; i < nl; ++i) {
-        float* dst = p.in[i].data();
+    const size_t nl = L.channels.size();
+    size_t input = 0;
+    for (size_t i = 0; i < nl && input < p.in.size(); ++i) {
         const LayerAudio* a = i < L.audio.size() ? L.audio[i].get() : nullptr;
-        if (!a || a->samples.empty() || (gainStart <= 0 && gainStep <= 0)) {
-            std::fill(dst, dst + n, 0.0f);
-            continue;
-        }
-        const auto size = static_cast<juce::int64>(a->samples.size());
-        const juce::int64 base = pos_ - L.start[i];
-        float g = gainStart, peak = 0;
-        for (int k = 0; k < n; ++k) {
-            juce::int64 idx = base + k;
-            float v = 0;
-            if (idx >= 0) {
-                if (L.loop[i]) idx %= size;
-                if (idx < size) v = a->samples[static_cast<size_t>(idx)];
+        const int nch = L.channels[i];
+        float peak = 0;
+        for (int c = 0; c < nch && input < p.in.size(); ++c, ++input) {
+            float* dst = p.in[input].data();
+            if (!a || a->numSamples() == 0 || (gainStart <= 0 && gainStep <= 0)) {
+                std::fill(dst, dst + n, 0.0f);
+                continue;
             }
-            g += gainStep;
-            v *= g;
-            dst[k] = v;
-            peak = std::max(peak, std::abs(v));
+            const auto& smp = a->channel(c);
+            const auto size = static_cast<juce::int64>(smp.size());
+            const juce::int64 base = pos_ - L.start[i];
+            float g = gainStart;
+            for (int k = 0; k < n; ++k) {
+                juce::int64 idx = base + k;
+                float v = 0;
+                if (idx >= 0) {
+                    if (L.loop[i]) idx %= size;
+                    if (idx < size) v = smp[static_cast<size_t>(idx)];
+                }
+                g += gainStep;
+                v *= g;
+                dst[k] = v;
+                peak = std::max(peak, std::abs(v));
+            }
         }
         if (metering && i < static_cast<size_t>(kMaxMeters)) {
             const float m = peak * L.meterGain[i];
@@ -498,6 +518,7 @@ void Session::fillInputs(Program& p, int n, float gainStart, float gainStep, boo
             while (m > prev && !meters_[i].compare_exchange_weak(prev, m)) {}
         }
     }
+    for (; input < p.in.size(); ++input) std::fill(p.in[input].begin(), p.in[input].begin() + n, 0.0f);
 }
 
 void Session::renderChunk(float* const* out, int numOut, int offset, int n) {

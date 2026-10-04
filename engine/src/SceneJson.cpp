@@ -198,6 +198,10 @@ json layerToJson(const Layer& l) {
     j["occlusion_radius"] = l.occlusionRadius;
     j["start_time"] = l.startTime;
     j["loop"] = l.loop;
+    j["channels"] = l.channels;
+    if (l.channels == 2)
+        j["stereo"] = json{{"width", l.stereo.width}, {"rotation", l.stereo.rotationDeg},
+                           {"elevation", l.stereo.elevationDeg}, {"mono", l.stereo.mono}};
     return j;
 }
 
@@ -221,6 +225,15 @@ Layer layerFromJson(const json& j) {
     l.occlusionRadius = j.value("occlusion_radius", l.occlusionRadius);
     l.startTime = j.value("start_time", l.startTime);
     l.loop = j.value("loop", l.loop);
+    l.channels = j.value("channels", l.channels);
+    if (l.channels != 1 && l.channels != 2) throw std::runtime_error("layer \"" + l.name + "\": channels must be 1 or 2");
+    if (j.contains("stereo") && j["stereo"].is_object()) {
+        const json& st = j["stereo"];
+        l.stereo.width = st.value("width", l.stereo.width);
+        l.stereo.rotationDeg = st.value("rotation", l.stereo.rotationDeg);
+        l.stereo.elevationDeg = st.value("elevation", l.stereo.elevationDeg);
+        l.stereo.mono = st.value("mono", l.stereo.mono);
+    }
     return l;
 }
 
@@ -245,6 +258,10 @@ json roomToJson(const Room& r) {
     j["reverb_time_scale"] = r.reverbTimeScale;
     j["reflections"] = r.reflectionsEnabled;
     j["reverb"] = r.reverbEnabled;
+    if (!r.impulseResponse.file.empty()) {
+        const auto& ir = r.impulseResponse;
+        j["impulse_response"] = json{{"file", ir.file}, {"gain_db", ir.gainDb}, {"channels", ir.channels}, {"enabled", ir.enabled}};
+    }
     if (r.type == RoomType::Mesh) {
         if (!r.meshFile.empty()) j["mesh"] = json{{"file", r.meshFile}};
         else j["mesh"] = meshToJson(r.mesh);
@@ -283,6 +300,23 @@ Room roomFromJson(const json& j, const std::string& baseDir) {
     r.reverbTimeScale = j.value("reverb_time_scale", r.reverbTimeScale);
     r.reflectionsEnabled = j.value("reflections", r.reflectionsEnabled);
     r.reverbEnabled = j.value("reverb", r.reverbEnabled);
+    if (j.contains("impulse_response")) {
+        // {"file": "hall.wav", "gain_db": 0, "channels": 0, "enabled": true}, or just the file name.
+        const auto& ir = j.at("impulse_response");
+        auto& out = r.impulseResponse;
+        if (ir.is_string()) {
+            out.file = ir.get<std::string>();
+        } else if (ir.is_object()) {
+            out.file = ir.value("file", "");
+            out.gainDb = ir.value("gain_db", out.gainDb);
+            out.channels = ir.value("channels", out.channels);
+            out.enabled = ir.value("enabled", out.enabled);
+        }
+        if (out.channels != 0 && out.channels != 1 && out.channels != 2 && out.channels != 4)
+            throw std::runtime_error("impulse_response.channels must be 0 (from the file), 1, 2 or 4");
+        if (!out.file.empty() && !baseDir.empty() && !std::filesystem::path(out.file).is_absolute())
+            out.file = (std::filesystem::path(baseDir) / out.file).lexically_normal().string();
+    }
     if (j.contains("mesh")) {
         const auto& m = j.at("mesh");
         // {"file": "room.obj", "materials": {"usemtl-name": material, ...}} or inline geometry.

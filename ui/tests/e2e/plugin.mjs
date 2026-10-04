@@ -26,7 +26,7 @@ await page.addInitScript(() => {
   const on = (id, fn) => { if (!listeners.has(id)) listeners.set(id, []); listeners.get(id).push(fn); };
   const fire = (id, payload) => { for (const fn of listeners.get(id) ?? []) fn(payload); };
   const host = {
-    time: 0, playing: false, yaw: 0, calls: [],
+    time: 0, playing: false, yaw: 0, calls: [], confirms: [], confirmAnswer: false,
     tracks: [{ id: 't-vox', name: 'Vox' }, { id: 't-gtr', name: 'Guitar' }],
     doc: null,
   };
@@ -73,7 +73,11 @@ await page.addInitScript(() => {
     },
     audioInfo() { return []; },
     chooseAudioFiles() { return []; },
+    confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
   };
+  // Like WKWebView in JUCE on macOS: window.confirm answers Cancel without
+  // showing anything, so the editor must ask through the native side.
+  window.confirm = () => false;
   window.__JUCE__ = {
     initialisationData: { spHost: ['plugin'] },
     backend: {
@@ -156,6 +160,17 @@ await check('scrubbing asks for Logic instead of moving the playhead', async () 
   await page.mouse.click(box.x + box.width * 0.6, box.y + 8);
   await page.waitForFunction(() => window.__toasts.some((t) => t.includes('playhead')), null, { timeout: 5000 });
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'time moved');
+});
+
+await check('Clear asks through the plugin and only clears on OK', async () => {
+  await page.locator('#toolbar >> text=Clear').click();
+  await page.waitForFunction(() => window.__host.confirms.length === 1);
+  await page.waitForTimeout(200);
+  assert(await ed(() => window.spEditor.store.scene.layers[0].position[2]) === -4, 'cleared on Cancel');
+  await ed(() => { window.__host.confirmAnswer = true; });
+  await page.locator('#toolbar >> text=Clear').click();
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 3 && window.spEditor.store.scene.layers[0].position[2] === -3,
+    null, { timeout: 5000 });
 });
 
 await page.screenshot({ path: resolve(outDir, 'plugin-mode.png') });

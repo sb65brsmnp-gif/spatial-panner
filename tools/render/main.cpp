@@ -39,6 +39,8 @@ void usage() {
                  "  --normalize                      scale the output so its peak is -1 dBFS\n"
                  "  --bench                          print CPU usage (realtime factor)\n"
                  "  --no-reflections / --no-reverb   disable room parts\n"
+                 "  --ir FILE.wav                    use this impulse response as the late reverb (overrides the scene's)\n"
+                 "  --ir-gain DB / --ir-channels N   trim and interpretation (0 = from the file, 1 mono, 2 stereo, 4 ambiX)\n"
                  "  --reflections auto|builtin|steam reflections back-end (default auto: steam for mesh rooms/objects)\n"
                  "  --steam-rays N / --steam-bounces N   ray tracing effort (default 4096 / enough for the IR, max 96)\n"
                  "  --steam-block N                  reflection convolution block (default 256; smaller = costlier, less lag)\n"
@@ -70,7 +72,9 @@ int main(int argc, char** argv) {
     int order = 3, rate = 48000, block = 512;
     double duration = 0;
     bool floatOut = false, bench = false, noRefl = false, noReverb = false, normalize = false;
-    std::string reflections = "auto", steamReverb = "convolution";
+    std::string reflections = "auto", steamReverb = "convolution", irFile;
+    double irGain = 0;
+    int irChannels = -1;
     int steamRays = -1, steamBounces = -1, steamThreads = -1, steamBlock = -1;
     double steamIr = -1, steamInterval = -1;
     for (int i = 1; i < argc; ++i) {
@@ -92,6 +96,9 @@ int main(int argc, char** argv) {
         else if (a == "--bench") bench = true;
         else if (a == "--no-reflections") noRefl = true;
         else if (a == "--no-reverb") noReverb = true;
+        else if (a == "--ir") irFile = next("--ir");
+        else if (a == "--ir-gain") irGain = std::stod(next("--ir-gain"));
+        else if (a == "--ir-channels") irChannels = std::stoi(next("--ir-channels"));
         else if (a == "--reflections") reflections = next("--reflections");
         else if (a == "--steam-rays") steamRays = std::stoi(next("--steam-rays"));
         else if (a == "--steam-bounces") steamBounces = std::stoi(next("--steam-bounces"));
@@ -110,6 +117,12 @@ int main(int argc, char** argv) {
         Scene scene = loadSceneFile(scenePath);
         if (noRefl) scene.room.reflectionsEnabled = false;
         if (noReverb) scene.room.reverbEnabled = false;
+        if (!irFile.empty()) {
+            scene.room.impulseResponse.file = fs::absolute(irFile).string();
+            scene.room.impulseResponse.gainDb = static_cast<float>(irGain);
+            scene.room.impulseResponse.enabled = true;
+        }
+        if (irChannels >= 0) scene.room.impulseResponse.channels = irChannels;
 
         RenderConfig cfg;
         cfg.sampleRate = rate;
@@ -145,23 +158,34 @@ int main(int argc, char** argv) {
 
         // Load layer audio.
         const fs::path sceneDir = fs::absolute(scenePath).parent_path();
-        std::vector<std::vector<float>> audio(scene.layers.size());
+        // One buffer per renderer input: a layer's channels in order (a mono
+        // layer sums the file's channels; a stereo layer takes left and right).
+        std::vector<std::vector<float>> audio(static_cast<size_t>(inputChannels(scene)));
+        std::vector<size_t> firstInput(scene.layers.size());
         size_t longest = 0;
-        for (size_t i = 0; i < scene.layers.size(); ++i) {
+        for (size_t i = 0, input = 0; i < scene.layers.size(); ++i) {
             const Layer& l = scene.layers[i];
+            const int nch = std::max(1, std::min(l.channels, 2));
+            firstInput[i] = input;
+            input += static_cast<size_t>(nch);
             if (l.audioFile.empty()) continue;
             fs::path p = l.audioFile;
             if (p.is_relative()) p = sceneDir / p;
             tools::AudioFile f = tools::readWav(p.string());
-            // Mono mix.
-            std::vector<float> mono(f.frames(), 0.0f);
-            for (int c = 0; c < f.channels; ++c)
-                for (size_t n = 0; n < mono.size(); ++n) mono[n] += f.data[c][n] / f.channels;
-            audio[i] = resampleLinear(mono, f.sampleRate, rate);
-            const size_t end = static_cast<size_t>(l.startTime * rate) + audio[i].size();
+            for (int c = 0; c < nch; ++c) {
+                std::vector<float> ch(f.frames(), 0.0f);
+                if (nch == 1) {
+                    for (int fc = 0; fc < f.channels; ++fc)
+                        for (size_t n = 0; n < ch.size(); ++n) ch[n] += f.data[fc][n] / f.channels;
+                } else {
+                    ch = f.data[static_cast<size_t>(std::min(c, f.channels - 1))];
+                }
+                audio[firstInput[i] + static_cast<size_t>(c)] = resampleLinear(ch, f.sampleRate, rate);
+            }
+            const size_t end = static_cast<size_t>(l.startTime * rate) + audio[firstInput[i]].size();
             if (!l.loop) longest = std::max(longest, end);
-            std::fprintf(stderr, "layer %-16s %s (%.1f s)\n", l.name.c_str(), p.filename().string().c_str(),
-                         audio[i].size() / static_cast<double>(rate));
+            std::fprintf(stderr, "layer %-16s %s (%.1f s%s)\n", l.name.c_str(), p.filename().string().c_str(),
+                         audio[firstInput[i]].size() / static_cast<double>(rate), nch == 2 ? ", stereo" : "");
         }
         if (duration <= 0) duration = scene.duration;
         if (duration <= 0) duration = longest / static_cast<double>(rate);
@@ -173,6 +197,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; Steam Audio reflections (%d triangles, IR %.2f s, %d rays x %d bounces every %.0f ms, block %d), delay line %.0f m\n",
                          modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numTriangles, st.irSeconds,
                          cfg.steam.rays, st.bounces, cfg.steam.updateInterval * 1000, cfg.steam.frameSize, st.maxDistance);
+        else if (st.irChannels > 0)
+            std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; built-in reflections, %d images/layer, impulse-response reverb (%d ch, %.2f s, %s, lags %d samples), delay line %.0f m\n",
+                         modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.irChannels, st.irSeconds,
+                         st.irChannels == 1 ? "mono, diffuse" : st.irChannels == 2 ? "stereo L/R" : "ambiX, world-fixed", st.reflectionLatency,
+                         st.maxDistance);
         else
             std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; built-in reflections, %d images/layer, RT60 mid %.2f s, delay line %.0f m\n",
                          modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.reverbRt60Mid,
@@ -182,8 +211,8 @@ int main(int argc, char** argv) {
         const int latency = renderer.latencySamples();
         const size_t totalFrames = static_cast<size_t>(duration * rate);
         std::vector<std::vector<float>> out(renderer.numOutputs(), std::vector<float>(totalFrames + latency, 0.0f));
-        std::vector<float> inBlock(static_cast<size_t>(scene.layers.size()) * block);
-        std::vector<const float*> inPtrs(scene.layers.size());
+        std::vector<float> inBlock(audio.size() * block);
+        std::vector<const float*> inPtrs(audio.size());
         std::vector<float*> outPtrs(renderer.numOutputs());
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -191,20 +220,24 @@ int main(int argc, char** argv) {
         while (pos < totalFrames + latency) {
             const int n = static_cast<int>(std::min<size_t>(block, totalFrames + latency - pos));
             for (size_t i = 0; i < scene.layers.size(); ++i) {
-                float* dst = inBlock.data() + i * block;
                 const Layer& l = scene.layers[i];
-                const auto& a = audio[i];
+                const int nch = std::max(1, std::min(l.channels, 2));
                 const long start = static_cast<long>(l.startTime * rate);
-                for (int k = 0; k < n; ++k) {
-                    long idx = static_cast<long>(pos + k) - start;
-                    float v = 0;
-                    if (!a.empty() && idx >= 0) {
-                        if (l.loop) idx %= static_cast<long>(a.size());
-                        if (idx < static_cast<long>(a.size())) v = a[idx];
+                for (int c = 0; c < nch; ++c) {
+                    const size_t in = firstInput[i] + static_cast<size_t>(c);
+                    float* dst = inBlock.data() + in * block;
+                    const auto& a = audio[in];
+                    for (int k = 0; k < n; ++k) {
+                        long idx = static_cast<long>(pos + k) - start;
+                        float v = 0;
+                        if (!a.empty() && idx >= 0) {
+                            if (l.loop) idx %= static_cast<long>(a.size());
+                            if (idx < static_cast<long>(a.size())) v = a[idx];
+                        }
+                        dst[k] = v;
                     }
-                    dst[k] = v;
+                    inPtrs[in] = dst;
                 }
-                inPtrs[i] = dst;
             }
             for (int c = 0; c < renderer.numOutputs(); ++c) outPtrs[c] = out[c].data() + pos;
             renderer.process(inPtrs.data(), outPtrs.data(), n, pos / static_cast<double>(rate));

@@ -51,10 +51,11 @@ struct FreshSession {
     }
 };
 
-std::unique_ptr<SpatialPannerProcessor> makeInstance(PlayHead& ph, juce::AudioChannelSet out = juce::AudioChannelSet::stereo()) {
+std::unique_ptr<SpatialPannerProcessor> makeInstance(PlayHead& ph, juce::AudioChannelSet out = juce::AudioChannelSet::stereo(),
+                                                     juce::AudioChannelSet in = juce::AudioChannelSet::mono()) {
     auto p = std::make_unique<SpatialPannerProcessor>();
     juce::AudioProcessor::BusesLayout layout;
-    layout.inputBuses.add(juce::AudioChannelSet::mono());
+    layout.inputBuses.add(in);
     layout.outputBuses.add(out);
     REQUIRE(p->setBusesLayout(layout));
     p->setPlayHead(&ph);
@@ -270,6 +271,61 @@ SumResult renderBothWays(json d, int seconds) {
 }
 
 }  // namespace
+
+TEST_CASE("A stereo track's layer is a left/right pair; the Mono parameter folds it to the centre") {
+    FreshSession fs;
+    PlayHead ph;
+    auto scene = makeInstance(ph);
+    scene->setRole(SpatialPannerProcessor::Role::Scene, false);
+    auto layer = makeInstance(ph, juce::AudioChannelSet::stereo(), juce::AudioChannelSet::stereo());
+    layer->setRole(SpatialPannerProcessor::Role::Layer);
+    std::vector<SpatialPannerProcessor*> all{scene.get(), layer.get()};
+    tickAll(all, 3);
+    pump(50);
+    tickAll(all, 2);
+
+    // The track's two channels reach the scene document as a stereo layer.
+    json d = scene->sceneDoc();
+    REQUIRE(d["layers"].size() == 1);
+    CHECK(d["layers"][0].value("channels", 1) == 2);
+    d["room"]["type"] = "none";
+    d["listener"]["paths"] = json::array();
+    d["listener"]["static_position"] = {0, 1.6, 0};
+    d["layers"][0]["position"] = {0, 1.6, -2};
+    d["layers"][0]["stereo"] = {{"width", 4.0}, {"rotation", 0}, {"elevation", 0}, {"mono", false}};
+    std::string error;
+    REQUIRE(scene->setSceneDoc(d, error));
+    tickAll(all, 2);
+    waitEngines(all);
+
+    // Noise on the left channel only: the left ear hears much more than the right.
+    const int total = static_cast<int>(kRate) * 2;
+    const auto in = noise(1, total);
+    auto renderEars = [&](bool mono) {
+        if (auto* p = layer->parametersForTesting().getParameter("mono")) p->setValueNotifyingHost(mono ? 1.0f : 0.0f);
+        juce::AudioBuffer<float> buf(2, kBlock);
+        juce::MidiBuffer midi;
+        ph.pos = static_cast<juce::int64>(20 * kRate);
+        buf.clear();
+        layer->processBlock(buf, midi);
+        double l = 0, r = 0;
+        for (int pos = 0; pos < total; pos += kBlock) {
+            ph.pos = pos;
+            buf.clear();
+            buf.copyFrom(0, 0, in[0].data() + pos, kBlock);
+            layer->processBlock(buf, midi);
+            if (pos < static_cast<int>(kRate) / 2) continue;  // let the fold settle
+            for (int k = 0; k < kBlock; ++k) { l += std::pow(buf.getSample(0, k), 2); r += std::pow(buf.getSample(1, k), 2); }
+        }
+        return std::make_pair(l, r);
+    };
+    const auto spread = renderEars(false);
+    REQUIRE(spread.first > 1e-6);
+    CHECK(10 * std::log10(spread.first / spread.second) > 6);
+    // Folded to mono the pair plays from the centre: both ears alike.
+    const auto folded = renderEars(true);
+    CHECK(std::abs(10 * std::log10(folded.first / folded.second)) < 1.5);
+}
 
 TEST_CASE("Layer instances on separate tracks sum to the engine rendering all layers at once") {
     json d = loadDoc("room_walk.json");

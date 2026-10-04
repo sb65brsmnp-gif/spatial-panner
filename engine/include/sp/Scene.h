@@ -42,7 +42,27 @@ struct Layer {
     float occlusionRadius = 0.5f;
     float startTime = 0;            // seconds on the timeline when the audio starts
     bool loop = false;
+
+    // Stereo layers (`channels` = 2) are two emitters, left and right, fed by
+    // the two channels of the layer's audio. `position` is the centre of the
+    // pair; the ends sit stereo.width / 2 either side of it along a bar that
+    // lies on +X when stereo.rotationDeg is 0 (left on -X, right on +X), turned
+    // about +Y by rotationDeg (positive turns the right end towards -Z) and
+    // tilted by elevationDeg (positive raises the right end). stereo.mono sums
+    // both channels at half level and plays them from the centre.
+    int channels = 1;
+    struct Stereo {
+        float width = 2.0f;         // metres between left and right
+        float rotationDeg = 0;
+        float elevationDeg = 0;
+        bool mono = false;
+    } stereo;
 };
+
+// Half-vector from a stereo layer's centre to its right end (left = -offset).
+Vec3 stereoOffset(float width, float rotationDeg, float elevationDeg);
+// Centre, width, rotation and elevation that put the ends at `left`/`right`.
+void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::Stereo& stereo);
 
 // -------------------------------------------------------------------- Room
 
@@ -95,6 +115,19 @@ struct SceneObject {
 // Walls of a box room, indexed by the axis they are perpendicular to.
 enum Wall : int { WallNegX = 0, WallPosX, WallNegY /*floor*/, WallPosY /*ceiling*/, WallNegZ, WallPosZ, kNumWalls };
 
+// A measured or library impulse response as the late reverb of a box room,
+// in place of the built-in FDN. The moving image-source reflections stay
+// (turn `reflectionsEnabled` off if the IR carries its own early part). The
+// IR is normalised to unit energy, so the room's calibrated reverb level and
+// the per-layer sends still apply and `gainDb` is a trim.
+struct ImpulseResponse {
+    std::string file;       // WAV; a relative path is resolved against the scene file when loaded from JSON
+    float gainDb = 0;
+    int channels = 0;       // 0 = from the file; 1 mono (diffuse), 2 stereo L/R (head-relative), 4 first-order ambiX (ACN/SN3D, world-fixed)
+    bool enabled = true;    // false keeps the file in the scene but plays the built-in reverb
+    bool active() const { return enabled && !file.empty(); }
+};
+
 struct Room {
     RoomType type = RoomType::Box;
     Vec3 size{8, 3, 10};            // width (x), height (y), depth (z) in metres
@@ -109,6 +142,7 @@ struct Room {
     float reverbTimeScale = 1.0f;   // multiplies the Eyring RT60
     bool reflectionsEnabled = true;
     bool reverbEnabled = true;
+    ImpulseResponse impulseResponse;  // optional; replaces the FDN when active() and the file loads
 
     // RoomType::Mesh: the enclosure as a triangle mesh, loaded by SceneJson
     // from `meshFile` (Wavefront OBJ, `usemtl` names pick materials) or
@@ -232,5 +266,8 @@ struct Scene {
     Environment environment;
     double duration = 0;  // seconds; 0 = derived from the audio by the tools
 };
+
+// Sum of `channels` over the layers: the number of audio inputs the renderer takes.
+int inputChannels(const Scene& scene);
 
 }  // namespace sp

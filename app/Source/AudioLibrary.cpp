@@ -32,28 +32,29 @@ std::shared_ptr<const LayerAudio> AudioLibrary::decode(juce::AudioFormatManager&
     std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(juce::File(path)));
     if (!r) { error = juce::File(path).existsAsFile() ? "Unsupported audio format" : "File not found"; return nullptr; }
     const auto n = static_cast<int>(std::min<juce::int64>(r->lengthInSamples, std::numeric_limits<int>::max() / 2));
-    const int ch = static_cast<int>(r->numChannels);
-    juce::AudioBuffer<float> buf(ch, n);
+    const int fileCh = static_cast<int>(r->numChannels);
+    const int ch = std::min(fileCh, 2);  // mono, or left and right
+    juce::AudioBuffer<float> buf(fileCh, n);
     r->read(&buf, 0, n, 0, true, true);
-    std::vector<float> mono(static_cast<size_t>(n), 0.0f);
-    for (int c = 0; c < ch; ++c) {
-        const float* s = buf.getReadPointer(c);
-        for (int i = 0; i < n; ++i) mono[static_cast<size_t>(i)] += s[i] / static_cast<float>(ch);
-    }
     auto out = std::make_shared<LayerAudio>();
     out->sampleRate = rate;
+    out->channels.resize(static_cast<size_t>(ch));
     const int from = static_cast<int>(std::lround(r->sampleRate)), to = static_cast<int>(std::lround(rate));
-    if (from == to || from <= 0) {
-        out->samples = std::move(mono);
-    } else {
+    for (int c = 0; c < ch; ++c) {
+        const float* src = buf.getReadPointer(c);
+        auto& dst = out->channels[static_cast<size_t>(c)];
+        if (from == to || from <= 0) {
+            dst.assign(src, src + n);
+            continue;
+        }
         int err = 0;
         SpeexResamplerState* st = speex_resampler_init(1, static_cast<spx_uint32_t>(from), static_cast<spx_uint32_t>(to), 8, &err);
         if (!st) { error = "Resampler failed"; return nullptr; }
-        out->samples.resize(static_cast<size_t>(std::ceil(n * static_cast<double>(to) / from)) + 64);
-        spx_uint32_t il = static_cast<spx_uint32_t>(n), ol = static_cast<spx_uint32_t>(out->samples.size());
-        speex_resampler_process_float(st, 0, mono.data(), &il, out->samples.data(), &ol);
+        dst.resize(static_cast<size_t>(std::ceil(n * static_cast<double>(to) / from)) + 64);
+        spx_uint32_t il = static_cast<spx_uint32_t>(n), ol = static_cast<spx_uint32_t>(dst.size());
+        speex_resampler_process_float(st, 0, src, &il, dst.data(), &ol);
         speex_resampler_destroy(st);
-        out->samples.resize(ol);
+        dst.resize(ol);
     }
     return out;
 }

@@ -91,6 +91,11 @@ bool reconcile(json& doc, const std::vector<SharedSession::LayerInfo>& live) {
                 l["name"] = info.name;
                 changed = true;
             }
+            // A stereo track plays its layer as a left/right pair.
+            if (l.value("channels", 1) != info.channels) {
+                l["channels"] = info.channels;
+                changed = true;
+            }
             continue;
         }
         auto& layers = doc["layers"];
@@ -122,6 +127,7 @@ bool reconcile(json& doc, const std::vector<SharedSession::LayerInfo>& live) {
         }
         layer["host_id"] = info.id;
         if (!info.name.empty()) layer["name"] = info.name;
+        layer["channels"] = info.channels;
         layers.push_back(layer);
         changed = true;
     }

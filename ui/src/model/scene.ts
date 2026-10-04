@@ -7,9 +7,19 @@ export type V3 = [number, number, number];
 export type Easing = 'linear' | 'smooth' | 'ease_in' | 'ease_out' | 'hold';
 export const EASINGS: Easing[] = ['linear', 'smooth', 'ease_in', 'ease_out', 'hold'];
 
+// A stereo layer (channels = 2) is a left/right pair of emitters. `position`
+// is the centre; the ends sit width / 2 either side along a bar that lies on
+// +X at rotation 0 (left on -X), turned about +Y by `rotation` (positive turns
+// the right end towards -Z) and tilted by `elevation` (positive raises the
+// right end). `mono` sums both channels at half level and plays them from the
+// centre. Same conventions as the engine (sp::stereoOffset).
+export interface StereoDoc { width: number; rotation: number; elevation: number; mono: boolean }
+
 export interface LayerDoc {
   name: string;
   audio: string;
+  channels?: number;   // 1 (default) or 2
+  stereo?: StereoDoc;
   position: V3;
   level_db: number;
   mute: boolean;
@@ -89,6 +99,16 @@ export interface ObjectDoc {
   material: MaterialDoc;
 }
 
+// A WAV impulse response as the late reverb of a box room instead of the
+// built-in reverb (docs/engine.md). `file` is absolute in the editor and
+// relative to the scene file on disk, like layer audio.
+export interface ImpulseResponseDoc {
+  file: string;
+  gain_db: number;
+  channels: number;   // 0 = from the file, 1 mono (diffuse), 2 stereo L/R, 4 first-order ambiX
+  enabled: boolean;   // false: keep the file but play the built-in reverb
+}
+
 export interface RoomDoc {
   // 'mesh': the room is a triangle mesh (an OBJ file or inline), ray-traced.
   type: 'box' | 'outdoor' | 'none' | 'mesh';
@@ -103,6 +123,7 @@ export interface RoomDoc {
   reverb_time_scale: number;
   reflections: boolean;
   reverb: boolean;
+  impulse_response?: ImpulseResponseDoc;
 }
 
 export interface EnvironmentDoc {
@@ -143,10 +164,46 @@ export function layerColor(index: number): string {
   return PALETTE[index % PALETTE.length];
 }
 
+export function defaultStereo(): StereoDoc {
+  return { width: 2, rotation: 0, elevation: 0, mono: false };
+}
+
+export function isStereo(l: LayerDoc): boolean { return l.channels === 2; }
+
+// Half-vector from the centre to the right end.
+export function stereoOffset(st: StereoDoc): V3 {
+  const h = Math.max(0, st.width) / 2;
+  const yaw = st.rotation * Math.PI / 180, el = st.elevation * Math.PI / 180;
+  return [h * Math.cos(el) * Math.cos(yaw), h * Math.sin(el), -h * Math.cos(el) * Math.sin(yaw)];
+}
+
+// Left and right end positions of a stereo layer (ignoring the mono fold).
+export function stereoEnds(l: LayerDoc): [V3, V3] {
+  const d = stereoOffset(l.stereo ?? defaultStereo());
+  const p = l.position;
+  return [[p[0] - d[0], p[1] - d[1], p[2] - d[2]], [p[0] + d[0], p[1] + d[1], p[2] + d[2]]];
+}
+
+// Centre and stereo settings that put the ends at `left` and `right`. When the
+// ends coincide the previous angles are kept.
+export function stereoFromEnds(left: V3, right: V3, prev: StereoDoc): { position: V3; stereo: StereoDoc } {
+  const r3 = (v: number) => Math.round(v * 1000) / 1000;
+  const position: V3 = [r3((left[0] + right[0]) / 2), r3((left[1] + right[1]) / 2), r3((left[2] + right[2]) / 2)];
+  const d = [(right[0] - left[0]) / 2, (right[1] - left[1]) / 2, (right[2] - left[2]) / 2];
+  const h = Math.hypot(d[0], d[1], d[2]);
+  const stereo: StereoDoc = { ...prev, width: r3(2 * h) };
+  if (h > 1e-6) {
+    stereo.elevation = Math.round(Math.asin(Math.max(-1, Math.min(1, d[1] / h))) * 180 / Math.PI * 10) / 10;
+    stereo.rotation = Math.round(Math.atan2(-d[2], d[0]) * 180 / Math.PI * 10) / 10;
+  }
+  return { position, stereo };
+}
+
 export function defaultLayer(index: number, partial: Partial<LayerDoc> = {}): LayerDoc {
   return {
     name: `Layer ${index + 1}`,
     audio: '',
+    channels: 1,
     position: [0, 1.6, -2],
     level_db: 0,
     mute: false,

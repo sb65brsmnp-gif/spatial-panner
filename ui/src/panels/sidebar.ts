@@ -1,8 +1,8 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
-import { defaultLayer, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
+import { defaultLayer, defaultStereo, isStereo, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
-import type { Backend, EngineInfo, OutputMode } from '../bridge/backend';
+import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
 import { checkbox, el, fmtTime, numberInput, row, section, select, slider, vec3Inputs } from './dom';
 
@@ -18,6 +18,13 @@ export class Sidebar {
   private pointerInside = false;
   info: EngineInfo | null = null;
   private meterEls: HTMLElement[] = [];
+  // Bounce settings live here, not in the panel, because the Output tab is
+  // rebuilt whenever the engine info changes (every couple of seconds).
+  private bounceFrom = 0;
+  private bounceTo: number | null = null;  // null: the scene's length
+  private bounceRate: number | null = null;  // null: the device's rate
+  private bounceState: BounceEvent | null = null;
+  private bounceBar: HTMLElement | null = null;
 
   constructor(private store: Store, private backend: Backend, private tools: Interaction) {
     this.root = el('div', { id: 'sidebar' });
@@ -46,6 +53,14 @@ export class Sidebar {
       if (kinds.has('scene') || kinds.has('selection') || kinds.has('analysis') || kinds.has('file') || kinds.has('tool')) this.render();
     });
     this.setTab('layers');
+    backend.onBounce((e) => this.onBounce(e));
+  }
+
+  private onBounce(e: BounceEvent): void {
+    this.bounceState = e;
+    // Progress only moves the bar; start and finish rebuild the section.
+    if (!e.done && this.bounceBar && (e.progress ?? 0) > 0) { this.bounceBar.style.width = `${Math.round((e.progress ?? 0) * 100)}%`; return; }
+    if (this.tab === 'output') this.render(true);
   }
 
   setTab(t: Tab): void {
@@ -87,7 +102,8 @@ export class Sidebar {
         + (this.plugin ? JSON.stringify(this.info?.tracks ?? []) : '');
       case 'path': return base + JSON.stringify(s.listener) + JSON.stringify(s.editor) + JSON.stringify(this.tools.opts)
         + (a ? `${a.arrival_time}|${a.paths.map((p) => p.length).join(',')}` : '') + s.layers.map((l) => l.name).join('|');
-      case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment);
+      case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment)
+        + (s.room.impulse_response ? JSON.stringify(this.store.audioInfo.get(s.room.impulse_response.file) ?? null) : '');
       case 'output': return base + JSON.stringify(s.editor) + JSON.stringify(this.info);
     }
   }
@@ -165,10 +181,23 @@ export class Sidebar {
       const files = await this.backend.chooseAudioFiles();
       if (!files.length) return;
       for (const f of files) this.store.audioInfo.set(f.path, f);
-      u((x) => { x.audio = files[0].path; if (!x.name) x.name = files[0].name; });
+      u((x) => {
+        x.audio = files[0].path;
+        if (!x.name) x.name = files[0].name;
+        // A stereo file plays as a pair, a mono file as one source.
+        x.channels = Math.min(2, Math.max(1, files[0].channels || 1));
+        if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
+      });
     });
     const info = this.store.audioInfo.get(l.audio);
-    const audioDesc = l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${info.channels} ch` : ''}` : 'none';
+    const audioDesc = l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${info.channels === 1 ? 'mono' : info.channels === 2 ? 'stereo' : `${info.channels} ch`}` : ''}` : 'none';
+    const stereo = isStereo(l);
+    const st = l.stereo ?? defaultStereo();
+    // How the file's channels are played: a left/right pair or summed to one source.
+    const playAs = select(['2', '1'], stereo ? '2' : '1', (v) => u((x) => {
+      x.channels = v === '2' ? 2 : 1;
+      if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
+    }), { '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' });
     const facing = Math.round(Math.atan2(-l.directivity_forward[0], -l.directivity_forward[2]) * 180 / Math.PI);
     const remove = el('button', { class: 'btn danger' }, 'Remove layer');
     remove.addEventListener('click', () => { this.store.select({ kind: 'layer', index: i }); this.tools.deleteSelection(); });
@@ -191,7 +220,8 @@ export class Sidebar {
       this.body.append(section('Layer',
         row('Track', track),
         row('Name', nameIn),
-        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Track is', el('span', { class: 'muted' }, stereo ? 'stereo: the layer is a left/right pair' : 'mono: the layer is one source')),
+        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         el('p', { class: 'muted' }, 'The track\'s Level and Position offset parameters adjust this live and can be automated in Logic.'),
       ));
@@ -199,15 +229,27 @@ export class Sidebar {
       this.body.append(section('Layer',
         row('Name', nameIn),
         row('Audio', el('span', { class: 'file', title: l.audio }, audioDesc), replace),
-        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        info && !info.error && info.channels >= 2 ? row('Play as', playAs) : '',
+        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
           checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
       ));
     }
+    if (stereo) {
+      const us = (fn: (s: typeof st) => void, key?: string) => u((x) => { x.stereo = x.stereo ?? defaultStereo(); fn(x.stereo); }, key);
+      this.body.append(section('Stereo field',
+        el('p', { class: 'muted' }, 'Left and right play from the two ends of the bar. Drag the bar to move the pair, drag an end to widen, narrow or turn it; Option-drag an end keeps the centre fixed.'),
+        row('Width', slider(st.width, 0, 12, 0.05, (v) => us((x) => { x.width = v; }, 'stwidth'), (v) => `${v.toFixed(2)} m`, () => this.store.endGesture())),
+        row('Rotation', slider(st.rotation, -180, 180, 1, (v) => us((x) => { x.rotation = v; }, 'strot'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Elevation', slider(st.elevation, -90, 90, 1, (v) => us((x) => { x.elevation = v; }, 'stel'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Mono', checkbox(st.mono, (v) => us((x) => { x.mono = v; }), 'sum left and right at the centre')),
+        this.plugin ? el('p', { class: 'muted' }, 'The track\'s Stereo Width, Stereo Rotation and Mono parameters adjust this live and can be automated in Logic.') : '',
+      ));
+    }
     this.body.append(section('Sound source',
       row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
-      row('Width', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+      row('Spread', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
       row('Directivity', slider(l.directivity, 0, 1, 0.01, (v) => u((x) => { x.directivity = v; }, 'dir'), (v) => v < 0.01 ? 'omni' : v > 0.99 ? 'cardioid' : v.toFixed(2), () => this.store.endGesture())),
       row('Facing', slider(facing, -180, 180, 1, (v) => u((x) => {
         const r = v * Math.PI / 180;
@@ -231,8 +273,9 @@ export class Sidebar {
     this.addLayers(files);
   }
 
-  // New layers go on a ring around the listener's start, facing it.
-  private addLayers(files: { path: string; name: string }[]): void {
+  // New layers go on a ring around the listener's start, facing it. Stereo
+  // files become left/right pairs.
+  private addLayers(files: { path: string; name: string; channels?: number }[]): void {
     const L = this.store.scene.listener;
     const first = L.paths[L.active_path]?.segments[0]?.points[0] ?? L.static_position;
     this.upd((s) => {
@@ -243,7 +286,9 @@ export class Sidebar {
         const r = 3 + 0.4 * Math.floor(i / 6);
         const pos: [number, number, number] = [
           Math.round((first[0] - r * Math.sin(a)) * 100) / 100, 1.6, Math.round((first[2] - r * Math.cos(a)) * 100) / 100];
-        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos }));
+        const channels = Math.min(2, Math.max(1, f.channels || 1));
+        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos, channels,
+          ...(channels === 2 ? { stereo: defaultStereo() } : {}) }));
       });
     });
     this.store.select({ kind: 'layer', index: this.store.scene.layers.length - 1 });
@@ -386,22 +431,72 @@ export class Sidebar {
         ...R.objects.map((o) => row(o.name || 'object', el('span', { class: 'muted' }, `${o.material.name}, ${o.max.map((v, i) => (v - o.min[i]).toFixed(1)).join(' × ')} m`))),
         el('p', { class: 'muted' }, 'Walls and objects block and reflect sound when the ray-traced room model is in use. They are set in the scene file for now.')));
     }
-    this.body.append(section('Reflections and reverb',
-      row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
-        select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
-          { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
-      row('Refl. level', numberInput(R.reflections_level_db, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
-      box ? row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; })),
-        numberInput(R.reverb_level_db, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }), { step: 0.5, width: 64 }), 'dB') : '',
-      box ? row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64 })) : '',
-      el('p', { class: 'muted' }, 'Room changes restart the room model, so you may hear a short fade.'),
-    ));
+    const db = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+    if (R.type !== 'none') {
+      this.body.append(section('Early reflections',
+        row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
+          select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
+            { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
+        row('Level', slider(R.reflections_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }, 'refl-level'), db, () => this.store.endGesture())),
+        el('p', { class: 'muted' }, 'Mirror images of each layer in the walls, moving with it. Walls scatter part of each echo into the reverb (the material\'s scattering).'),
+      ));
+    }
+    if (box) this.renderLateReverb();
+    this.body.append(el('p', { class: 'muted' }, 'Room changes restart the room model, so you may hear a short fade.'));
     this.body.append(section('Air',
       row('Temperature', numberInput(E.temperature_c, (v) => this.upd((sc) => { sc.environment.temperature_c = v; }), { step: 1, width: 64 }), '°C'),
       row('Humidity', numberInput(E.humidity, (v) => this.upd((sc) => { sc.environment.humidity = Math.max(0, Math.min(100, v)); }), { step: 5, width: 64 }), '%'),
       row('', checkbox(E.air_absorption, (v) => this.upd((sc) => { sc.environment.air_absorption = v; }), 'High-frequency loss over distance')),
       row('Speed of sound', numberInput(E.speed_of_sound, (v) => this.upd((sc) => { sc.environment.speed_of_sound = Math.max(50, v); }), { step: 1, width: 64 }), 'm/s'),
     ));
+  }
+
+  // Late reverb: the built-in room model or a loaded impulse response.
+  private renderLateReverb(): void {
+    const R = this.store.scene.room;
+    const ir = R.impulse_response;
+    const usingIr = !!ir && ir.enabled;
+    const db = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+    const kind = select(['builtin', 'ir'], usingIr ? 'ir' : 'builtin', (v) => this.upd((sc) => {
+      if (v === 'ir') sc.room.impulse_response = { file: '', gain_db: 0, channels: 0, ...(sc.room.impulse_response ?? {}), enabled: true };
+      else if (sc.room.impulse_response) {
+        if (sc.room.impulse_response.file) sc.room.impulse_response.enabled = false;
+        else delete sc.room.impulse_response;
+      }
+    }), { builtin: 'Built-in (from the room)', ir: 'Impulse response (WAV)' });
+    const rows: (Node | string)[] = [
+      row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; })), kind),
+      row('Level', slider(R.reverb_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }, 'rev-level'), db, () => this.store.endGesture())),
+    ];
+    if (usingIr && ir) {
+      const load = el('button', { class: 'btn small' }, ir.file ? 'Replace…' : 'Load IR…');
+      load.addEventListener('click', async () => {
+        const f = await this.backend.chooseFile('Load an impulse response', '*.wav;*.wave');
+        if (!f) return;
+        const infos = await this.backend.audioInfo([f.path]);
+        for (const i of infos) this.store.audioInfo.set(i.path, i);
+        this.upd((sc) => { sc.room.impulse_response = { gain_db: 0, channels: 0, ...(sc.room.impulse_response ?? {}), file: f.path, enabled: true }; });
+      });
+      const info = ir.file ? this.store.audioInfo.get(ir.file) : undefined;
+      const name = ir.file ? ir.file.split(/[\\/]/).pop() ?? ir.file : 'none';
+      const interp = (ch: number) => ch === 1 ? 'mono, played as a diffuse field' : ch === 2 ? 'stereo, left and right of the head'
+        : ch >= 4 ? 'first-order ambiX, fixed to the room' : `${ch} channels: the first is used as mono`;
+      const effective = ir.channels || info?.channels || 0;
+      rows.push(
+        row('IR file', el('span', { class: 'file', title: ir.file }, name), load),
+        info && !info.error ? el('p', { class: 'muted' }, `${info.channels} ch · ${fmtTime(info.duration, true)} · ${(info.sampleRate / 1000).toFixed(1)} kHz — ${interp(effective)}.`) : '',
+        info?.error ? el('p', { class: 'warn-text' }, `Cannot read the file: ${info.error}`) : '',
+        row('Channels', select(['0', '1', '2', '4'], String(ir.channels), (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.channels = parseInt(v, 10); }),
+          { '0': 'as in the file', '1': 'mono (diffuse)', '2': 'stereo L / R', '4': 'ambiX (4 ch, world-fixed)' })),
+        row('IR gain', slider(ir.gain_db, -24, 12, 0.5, (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.gain_db = v; }, 'ir-gain'), db, () => this.store.endGesture())),
+        el('p', { class: 'muted' }, 'The IR is scaled to the room\'s calibrated reverb level (gain is a trim on top) and arrives 4.7 ms late. '
+          + 'It replaces the built-in tail only; turn the early reflections off above if the recording has its own.'),
+      );
+    } else {
+      rows.push(row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64 }),
+        'of the room\'s Eyring RT60'));
+    }
+    this.body.append(section('Late reverb', ...rows));
   }
 
   // -------------------------------------------------------------- output
@@ -428,18 +523,40 @@ export class Sidebar {
       info ? el('p', { class: 'muted' }, `${info.device} · ${(info.sampleRate / 1000).toFixed(1)} kHz · ${info.outputChannels} outputs · ${info.status}`) : '',
     ));
 
-    let start = 0, end = this.store.duration, rate = info?.sampleRate ?? 48000;
-    const bounce = el('button', { class: 'btn primary' }, 'Bounce to WAV…');
+    const end = this.bounceTo ?? this.store.duration;
+    const rate = this.bounceRate ?? info?.sampleRate ?? 48000;
+    const st = this.bounceState;
+    const running = !!st && !st.done;
+    const bounce = el('button', { class: 'btn primary' }, running ? 'Bouncing…' : 'Bounce to WAV…') as HTMLButtonElement;
+    bounce.disabled = running;
     bounce.addEventListener('click', async () => {
-      const r = await this.backend.bounce({ mode: out.mode, layout: out.layout, start, end, sampleRate: rate });
-      if (r) this.flash(`Bouncing to ${r.path}`);
+      try {
+        await this.backend.bounce({ mode: out.mode, layout: out.layout, start: this.bounceFrom, end, sampleRate: rate });
+      } catch (e) {
+        this.flash(String(e instanceof Error ? e.message : e), 'error');
+      }
     });
+    const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
+    let status: HTMLElement | string = '';
+    this.bounceBar = null;
+    if (running) {
+      this.bounceBar = el('div', { class: 'progress-fill' });
+      this.bounceBar.style.width = `${Math.round((st.progress ?? 0) * 100)}%`;
+      status = el('div', {}, el('p', { class: 'muted' }, `Rendering ${name(st.path)}…`), el('div', { class: 'progress' }, this.bounceBar));
+    } else if (st?.error) {
+      status = el('p', { class: 'warn-text' }, `Bounce failed: ${st.error}`);
+    } else if (st) {
+      const show = el('button', { class: 'btn' }, 'Show in Finder');
+      show.addEventListener('click', () => { void this.backend.revealFile(st.path); });
+      status = el('div', {}, el('p', { class: 'muted' }, `Saved ${st.path}`), el('div', { class: 'btn-row' }, show));
+    }
     this.body.append(section('Bounce',
-      row('From', numberInput(start, (v) => { start = Math.max(0, v); }, { step: 1, width: 64 }), 's  to',
-        numberInput(end, (v) => { end = Math.max(0, v); }, { step: 1, width: 64 }), 's'),
-      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { rate = parseInt(v, 10); })),
+      row('From', numberInput(this.bounceFrom, (v) => { this.bounceFrom = Math.max(0, v); }, { step: 1, width: 64 }), 's  to',
+        numberInput(end, (v) => { this.bounceTo = Math.max(0, v); }, { step: 1, width: 64 }), 's'),
+      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { this.bounceRate = parseInt(v, 10); })),
       el('p', { class: 'muted' }, 'Renders offline with the output setting above: binaural stereo, the speaker layout, or ambiX.'),
       el('div', { class: 'btn-row' }, bounce),
+      status,
     ));
   }
 
@@ -453,8 +570,8 @@ export class Sidebar {
     ));
   }
 
-  private flash(text: string): void {
-    window.dispatchEvent(new CustomEvent('sp-message', { detail: { text, level: 'info' } }));
+  private flash(text: string, level: 'info' | 'error' = 'info'): void {
+    window.dispatchEvent(new CustomEvent('sp-message', { detail: { text, level } }));
   }
 }
 

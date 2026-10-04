@@ -270,6 +270,8 @@ TEST_CASE("Session bounces binaural and 7.1.4 WAV files") {
         s.bounce(out, {mode, "7.1.4"}, 1.0, 3.0, 48000, [](float) {}, [&](juce::String e) { result = e; });
         for (int i = 0; i < 800 && result == "pending"; ++i) pump(25);
         REQUIRE(result.isEmpty());
+        // Rendered into a hidden file and moved into place at the end.
+        CHECK_FALSE(dir.getChildFile(".bounce" + juce::String(channels) + ".partial.wav").exists());
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(out));
@@ -280,6 +282,14 @@ TEST_CASE("Session bounces binaural and 7.1.4 WAV files") {
         r->read(&buf, 0, buf.getNumSamples(), 0, true, true);
         CHECK(buf.getRMSLevel(0, 0, buf.getNumSamples()) > 1e-3f);
     }
+
+    // A bounce that fails leaves no file under the chosen name.
+    const auto bad = dir.getChildFile("missing-folder").getChildFile("bounce.wav");
+    juce::String result = "pending";
+    s.bounce(bad, {sp::OutputMode::Binaural, "7.1.4"}, 0.0, 1.0, 48000, [](float) {}, [&](juce::String e) { result = e; });
+    for (int i = 0; i < 800 && result == "pending"; ++i) pump(25);
+    CHECK(result.isNotEmpty());
+    CHECK_FALSE(bad.exists());
 }
 
 int main(int argc, char* argv[]) {

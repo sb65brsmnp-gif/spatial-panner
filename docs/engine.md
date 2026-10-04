@@ -17,9 +17,15 @@ layer audio ─► delay line (one write, many fractional reads)
                  │                 ▸ ambiX:    SH encode
                  ├─ image sources (box room, order 2 = 24 images; outdoor = ground only):
                  │                 distance gain ▸ directivity ▸ wall reflectance x air (3 bands)
+                 │                 ▸ sqrt(1 - scattering) per bounce (the rest goes to the reverb send)
                  │                 ▸ encoded into a 3rd-order Ambisonics bus
-                 └─ reverb send ──► FDN (16 lines, 3-band Eyring RT60, Householder feedback)
-                                    ▸ 16 plane waves into the Ambisonics bus
+                 └─ reverb send ──► late reverb, one of:
+                                    FDN (32 lines spanning the mean free path, Hadamard feedback,
+                                         4 input allpasses, slow random delay modulation, 3-band
+                                         Eyring RT60) ▸ 32 plane waves into the Ambisonics bus
+                                    IR  (room.impulse_response: a WAV convolved in 256-sample blocks)
+                                        ▸ mono: 8 decorrelated plane waves; stereo: head-left and
+                                          head-right; 4-ch ambiX: world-fixed first order
 
    or, with the ray-traced back-end (mesh rooms, objects, or --reflections steam):
                  ├─ direct path: as above, plus Steam Audio occlusion / transmission
@@ -52,6 +58,65 @@ reverb's level comes from the room constant (Hopkins-Stryker, 16 pi / R minus
 the energy already carried by the modelled images), so direct-to-reverberant
 ratio is the distance cue it should be. `reverb_level_db`,
 `reflections_level_db` and per-layer `reverb_send_db` are trims on top.
+The calibration is checked by a unit test (`test_room.cpp`): in an 8 x 5 x
+10 m plaster room the rendered mid-band D/R ratio is -13.2 dB at 2.45 m and
+-18.0 dB at 4.24 m against -12.7 and -17.5 dB from theory, so the default
+level is left alone and "too much room" is a matter of the trims.
+
+### Late reverb
+
+The built-in tail is a 32-line feedback delay network (`dsp/Fdn`). Delay
+lengths are primes spread log-uniformly from 0.7 to 3.2 times the room's
+mean free path (4V/S, jittered 2 %), so the lines cover the real spread of
+path lengths rather than clustering; the feedback matrix is a fast
+Walsh-Hadamard butterfly (every line feeds every other, 32 x 32 at 160
+adds); the send passes four Schroeder allpasses (1.9 to 12.7 ms) before it
+enters the lines, staggered across lines so the first echoes are already
+dense; and each line's read point wanders slowly (up to 0.6 % of its length,
+new random target every 0.15 to 0.5 s, Thiran allpass interpolation so the
+loop stays unit-magnitude) to break the periodicities that make a static
+network ring. Per-line 3-band absorption shelves (corners 354 Hz and 1.4
+kHz) are designed iteratively so the per-pass gain lands on the Eyring RT60
+of each band at 177, 707 and 2828 Hz. Measured on an impulse (`test_reverb.cpp`):
+normalised echo density reaches 0.87 at 20 ms (old network 0.58, 1.0 is
+Gaussian noise); the late-tail spectrum's roughness (std dev of the dB
+magnitude around its trend) is 6.2 dB against 5.5 dB for noise (old 8.9
+dB); the three bands' RT60 land within 5, 8 and 5 % of the request (old
+11, 7 and 27 %). The cost went from 0.56 % to 1.9 % of a core.
+
+Image sources carry the material's `scattering`: each bounce keeps
+sqrt(1 - scattering) of the amplitude as a specular image and the energy it
+loses is added to that layer's reverb send (total reverberant energy is
+preserved within 0.05 dB in the unit test). Mirror-like walls therefore
+flutter and scattering ones do not: between two parallel 3 m walls the share
+of early energy sitting exactly on the flutter echoes is 0.46 with
+`scattering` 0, 0.41 with the table's plaster (0.15) and 0.26 with 0.5. The
+built-in material table is unchanged (its 0.1 to 0.5 scattering values are
+within the published range for those surfaces); a scene that still sounds
+boxy should raise `scattering` on the parallel walls, or lower the
+reflections trim.
+
+An `impulse_response` on a box room replaces the FDN with a measured or
+designed tail (`dsp/IrReverb`): the summed reverb send is convolved with the
+WAV through the same partitioned FFT convolution as the HRTFs, but in
+256-sample blocks (`RenderConfig::irBlockSize`) fed from a FIFO, so a 3 s
+stereo IR at 48 kHz costs 2.7 % of a core (4-channel 5.8 %; 0.05 % while the
+tail is silent). The price is latency: the tail arrives `irBlockSize -
+subBlock` = 224 samples (4.7 ms) after the FDN would have, reported as
+`Stats::reflectionLatency`; the direct path and the image sources are not
+delayed. The IR is resampled to the engine rate, trimmed of trailing
+silence and normalised to unit W energy, so the Hopkins-Stryker level and
+every trim apply unchanged and `gain_db` is a trim on top. Channels: 1 is
+mono, played as a diffuse field (eight short velvet-noise decorrelators
+from eight directions); 2 is stereo, played as two broad first-order plane
+waves at head-left and head-right; 4 is first-order ambiX (ACN, SN3D),
+world-fixed, so it is rotated by the inverse head orientation each sub-block
+(interpolated per sample). Other counts play channel 0 as mono unless
+`channels` picks an interpretation. The image sources stay on, so a recorded
+IR that already carries its own early reflections should be used with
+`reflections: false`. If the file cannot be read the renderer falls back to
+the FDN and says so in `stats().note`; `Stats::irSeconds` / `irChannels`
+report what loaded.
 
 ### Two reflection back-ends
 
@@ -146,6 +211,13 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
           numFrames, /*timeline time of the first frame, seconds*/ t);
 ```
 
+* Inputs are one mono buffer per layer channel, layer by layer: layer i takes
+  `inputs[inputIndex(i)]` and, for a stereo layer, the next one (left, then
+  right); `numInputs()` = `inputChannels(scene)`. A stereo layer is two
+  voices (two delay lines, two image sets, two HRTF pairs), so it costs twice
+  a mono layer. `LayerControls::stereoWidthScale`, `stereoRotationOffsetDeg`
+  and `mono` are the automatable stereo controls; the ends glide to their new
+  places like a moved layer does.
 * Any `numFrames` is accepted; output lags by `latencySamples()` (= the
   sub-block, 32 samples). Report that to the host. Traced reflections lag a
   further `stats().reflectionLatency` samples behind the direct sound; that
@@ -174,7 +246,7 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
   exposes the same on stdin/stdout.
 * Many plugin instances with N = 1 layer each render exactly what one
   instance with N layers would, except for the reverb tail (each instance
-  runs its own FDN; sum is equivalent). `Pose` is a pure function of time, so
+  runs its own FDN or IR convolution; the sum is equivalent). `Pose` is a pure function of time, so
   instances only need the scene and the host playhead.
 * The 3D editor can read `SampledPath::positionAt(s)` and
   `PoseEvaluator::evaluate(t)` to draw the path and the listener avatar.
@@ -190,7 +262,14 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
     "doppler": 1.0, "spread_deg": 0, "directivity": 0.7, "directivity_forward": [1, 0, 0],
     "reference_distance": 1.0, "min_distance": 0.25, "rolloff": 1.0,
     "reverb_send_db": 0, "reflection_order": -1, "start_time": 0, "loop": true,
-    "occlusion": true, "occlusion_radius": 0.5          // ray tracer: size of the source for occlusion
+    "occlusion": true, "occlusion_radius": 0.5,         // ray tracer: size of the source for occlusion
+    // Stereo layers: two emitters fed by the audio's left and right channels.
+    // "position" is the centre of the pair; the ends sit width / 2 either side
+    // along a bar that lies on +X at rotation 0 (left on -X), turned about +Y
+    // by "rotation" (positive turns the right end towards -Z) and tilted by
+    // "elevation" (positive raises the right end). "mono" sums both channels
+    // at half level and plays them from the centre. Default: 1 channel.
+    "channels": 2, "stereo": {"width": 2.0, "rotation": 0, "elevation": 0, "mono": false}
   }],
   "room": {
     "type": "box" | "outdoor" | "mesh" | "none", "size": [w, h, d], "origin": [x, y, z],
@@ -198,6 +277,10 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
                               "left": .., "right": .., "front": .., "back": ..},
     "reflection_order": 2, "reflections_level_db": 0, "reverb_level_db": 0,
     "reverb_time_scale": 1.0, "reflections": true, "reverb": true,
+    // optional: a WAV as the late reverb instead of the built-in network (box rooms).
+    // "file" is relative to the scene file; "channels" 0 = as in the file, 1 mono,
+    // 2 stereo L/R, 4 first-order ambiX; "enabled" false keeps the file but plays the FDN.
+    "impulse_response": {"file": "../signals/hall_ir.wav", "gain_db": 0, "channels": 0, "enabled": true},
     // type "mesh": the room is a triangle mesh (same axes, metres), from an OBJ
     // file relative to the scene file, or inline. OBJ "usemtl" names map to
     // materials via "materials"; a usemtl that is itself a material name needs no entry.
@@ -240,11 +323,12 @@ below 800 Hz, 800 Hz to 8 kHz, above) are used by the ray tracer only.
 
 Every key added for the ray tracer (`occlusion`, `occlusion_radius`, room
 `type: mesh`, `mesh`, `objects`, material `scattering` and `transmission`)
-is optional; scene files written before them load unchanged, and files that
-use them load in a build without Steam Audio (the geometry is then ignored
-and `stats().note` says so). `sceneFromJson(text, baseDir)` resolves
-`mesh.file` against `baseDir`; `loadSceneFile` passes the scene file's
-directory. `sceneToJson` writes the mesh inline unless `room.meshFile` is
+and the room's `impulse_response` are optional; scene files written before
+them load unchanged, and files that use them load in a build without Steam
+Audio (the geometry is then ignored and `stats().note` says so).
+`sceneFromJson(text, baseDir)` resolves `mesh.file` and
+`impulse_response.file` against `baseDir`; `loadSceneFile` passes the scene
+file's directory. `impulse_response` may also be a bare string (the file). `sceneToJson` writes the mesh inline unless `room.meshFile` is
 set.
 
 ## Performance (measured on one 2.8 GHz Xeon core, Linux, GCC 13 -O3)
@@ -257,7 +341,10 @@ under 50 % of one core.
 | 64 layers, free field, binaural | 33 % |
 | 64 layers, box room, 1st-order images (6 per layer) | 100 % |
 | 64 layers, box room, 2nd-order images (24 per layer) | 290 % |
-| Demo room walk, 5 layers, 2nd order | 25 % |
+| Demo room walk, 5 layers, 2nd order | 27 % (26 % with the old 16-line FDN) |
+| Built-in late reverb alone (32-line FDN) | 1.9 % (16-line: 0.6 %) |
+| Impulse-response reverb, 3 s stereo IR, 256-sample block | 2.7 % (4-ch ambiX 5.8 %; 0.05 % when silent) |
+| Demo room walk with the 2.5 s stereo test IR | 31 % |
 | Ray traced, per layer: reflection convolution, 0.8 s IR, 256-sample block | 6 % (4 % at 1024) |
 | Ray traced, per layer: direct-path occlusion | under 1 % |
 | Ray tracing, 10 x 3.2 x 12 m box, 4096 rays x 83 bounces every 0.1 s, 2 threads | 55 % (on those threads) |

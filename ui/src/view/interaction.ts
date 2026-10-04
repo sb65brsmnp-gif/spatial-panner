@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
+import { stereoEnds, stereoFromEnds, defaultStereo, isStereo } from '../model/scene';
 import {
   appendSegments, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
   round3, samplePath, snap, spiral, getPoint, dist, type PointRef,
@@ -32,7 +33,10 @@ export interface ToolOptions {
 interface PenAnchor { p: V3; hin: V3; hout: V3 }
 
 type Drag =
-  | { kind: 'layer'; index: number; plane: THREE.Plane; offset: THREE.Vector3 }
+  // `end`: which part of the layer is held: the centre (a mono layer's ball,
+  // or a stereo layer's bar) or the left/right end of a stereo pair. `mirror`
+  // (Alt held) keeps the centre fixed and moves the other end the opposite way.
+  | { kind: 'layer'; index: number; end: 'centre' | 'L' | 'R'; mirror: boolean; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'point'; path: number; ref: PointRef; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
@@ -48,6 +52,9 @@ export class Interaction {
   private hover: V3 | null = null;
   onToolChange: () => void = () => {};
   blockDelete: () => boolean = () => false;
+
+  // A point-to-point, curve or pen line is being drawn (Enter finishes it).
+  get drawing(): boolean { return this.clicks.length > 0 || this.pen.length > 0; }
 
   constructor(private vp: Viewport, private view: SceneView, private store: Store) {
     const el = vp.renderer.domElement;
@@ -150,10 +157,13 @@ export class Interaction {
     if (hits.length) {
       const index = hits[0].object.userData.index as number;
       const l = this.store.scene.layers[index];
-      const pos = new THREE.Vector3(...l.position);
+      let end = (hits[0].object.userData.end as 'centre' | 'L' | 'R' | undefined) ?? 'centre';
+      if (!isStereo(l) || l.stereo?.mono) end = 'centre';
+      const [left, right] = stereoEnds(l);
+      const pos = new THREE.Vector3(...(end === 'L' ? left : end === 'R' ? right : l.position));
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
-      this.drag = { kind: 'layer', index, plane, offset: pos.clone().sub(hit) };
+      this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit) };
       this.store.select({ kind: 'layer', index });
       this.vp.controls.enabled = false;
       return;
@@ -211,7 +221,21 @@ export class Interaction {
         p = this.snapEdit(p, d.plane);
         this.store.update((s) => {
           const l = s.layers[d.index];
-          l.position = this.keepAxes(l.position, p, d.plane);
+          if (d.end === 'centre') {
+            l.position = this.keepAxes(l.position, p, d.plane);
+            return;
+          }
+          // Moving one end of a stereo pair: the other end stays (or mirrors
+          // about the centre with Alt); centre, width, rotation and elevation
+          // follow from where the two ends are.
+          const [left, right] = stereoEnds(l);
+          const moved = this.keepAxes(d.end === 'L' ? left : right, p, d.plane);
+          const c = l.position;
+          const mirrored: V3 = [2 * c[0] - moved[0], 2 * c[1] - moved[1], 2 * c[2] - moved[2]];
+          const other = d.mirror ? mirrored : (d.end === 'L' ? right : left);
+          const r = d.end === 'L' ? stereoFromEnds(moved, other, l.stereo ?? defaultStereo()) : stereoFromEnds(other, moved, l.stereo ?? defaultStereo());
+          l.position = r.position;
+          l.stereo = r.stereo;
         }, `layer-move-${d.index}`);
         break;
       }

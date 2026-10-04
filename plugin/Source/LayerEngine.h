@@ -66,7 +66,11 @@ public:
 
     // ---- audio thread
     struct Block {
-        const float* input = nullptr;   // mono, may be null
+        // The track's audio: one buffer for a mono layer, left and right for
+        // a stereo one (the renderer's inputs, see Renderer::inputIndex). Null
+        // buffers are silence.
+        const float* inputs[2] = {nullptr, nullptr};
+        int numInputs = 0;
         float* const* outputs = nullptr;
         int numOutputs = 0;
         int numFrames = 0;

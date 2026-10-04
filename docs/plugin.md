@@ -73,8 +73,11 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    * Pick **Mono → 7.1.4** (or 5.1, 7.1, 5.1.4 and so on) on a track whose
      output is a surround bus or the Atmos bed.
 
-   A stereo input is mixed to mono. A layer is a point source, and the width
-   parameter spreads it.
+   A mono track is one source. A stereo track plays its layer as a **stereo
+   pair**: left and right from the two ends of a bar in the scene, which the
+   editor's Stereo field section (or dragging the ends) places, widens and
+   turns; *Mono* sums the two at the centre. The Spread parameter widens any
+   source.
 2. **Roles.** The first instance becomes the **scene** track. Every later
    instance becomes a **layer**, and appears in the scene at a free spot
    around the listener. The header at the top of the plug-in window shows
@@ -140,8 +143,11 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Layer Level | −60 to +12 dB | Gain before spatialisation. The bottom of the range mutes the layer. |
 | Layer Mute | on, off | |
 | Layer Doppler | 0 to 100 % | Scales the layer's Doppler setting. |
-| Layer Width | 0 to 180° | Added to the layer's spread. |
+| Layer Spread | 0 to 180° | Added to the layer's spread (apparent source size). |
 | Layer Offset X / Y / Z | ±20 m | Moves the layer from its place in the scene. |
+| Layer Stereo Width | 0 to 400 %, default 100 | Stereo tracks: multiplies the pair's width in the scene. 0 brings both ends to the centre. |
+| Layer Stereo Rotation | ±180° | Stereo tracks: added to the pair's rotation. |
+| Layer Mono | on, off | Stereo tracks: on sums left and right at the centre. Off leaves the scene's Mono setting. |
 
 Automation is evaluated every 32 samples (0.7 ms at 48 kHz), and the
 plug-in reports a latency of 32 samples, which Logic compensates.

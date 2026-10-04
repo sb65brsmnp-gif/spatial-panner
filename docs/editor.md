@@ -38,11 +38,19 @@ dev server instead of the built-in page, with hot reload.
 ## Using it
 
 **Layers** (sidebar): *Add audio files…* creates one layer per file (WAV,
-AIFF, FLAC, MP3, M4A, Ogg, CAF; decoded to mono and kept in memory). Each
-layer has mute and solo, level, start time and loop, Doppler amount, width (spread),
-directivity and facing, distance rolloff, room send and reflections. Drag a layer in the view to move it; Shift+drag changes
-its height. Any number of layers can be added; CPU is the limit (see
-docs/engine.md for figures).
+AIFF, FLAC, MP3, M4A, Ogg, CAF; kept in memory). A mono file is one source.
+A stereo file becomes a **stereo pair**: two balls, L and R, joined by a bar,
+playing the file's left and right channels from their own places, so the
+listener can walk between or through them. Drag the bar to move the pair,
+drag an end to widen, narrow or turn it (Option-drag an end keeps the centre
+fixed), or use the *Stereo field* sliders: width (metres), rotation,
+elevation and *Mono*, which sums both channels at the centre. *Play as* turns
+a stereo file into a single summed source instead. Each layer also has mute
+and solo, level, start time and loop, Doppler amount, spread, directivity and
+facing, distance rolloff, room send and reflections. Drag a layer in the view
+to move it; Shift+drag changes its height. Any number of layers can be added;
+CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
+layers).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
 the path; drawing again appends to the current path's end.
@@ -63,7 +71,10 @@ snap is on the same tab.
 **Views**: 3D orbit (1), Top (2), Front (3), Side (4), and Ears (5), the
 listener's own view while playing. *Follow* keeps the listener in view.
 
-**Timeline** (bottom): play/pause (Space), click the ruler to seek. Three
+**Timeline** (bottom): transport buttons for beginning of path (Enter), back
+and forward (a click jumps 5 s, hold to scrub at 4x), stop, play/pause
+(Space) and end of path; `,` and `.` step the playhead 1 s back or forward,
+0.1 s with Shift. Click the ruler to seek. Three
 lanes hold keys for speed (m/s), head yaw and head pitch. Double-click a lane
 to add a key, drag to move it, Delete to remove it; the bar above the lanes
 edits the selected key's value and easing. Mouse wheel zooms. In the default
@@ -71,13 +82,39 @@ edits the selected key's value and easing. Mouse wheel zooms. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
-**Room**: box size and centre, wall materials (absorption per band),
-reflections and their level, reverb and decay, air temperature and humidity;
-or no room (free field). Scenes can also carry a mesh room (an OBJ file, as in
-`scenes/lshape.json`) and box objects such as partitions and pillars (as in
-`scenes/occluder.json`); the editor draws them, lists them on the Room tab and
-plays them through the engine's ray-traced back-end (Steam Audio), but they
-are set in the scene file, not placed in the editor yet.
+**Room**: box size and centre, wall materials (absorption per band), air
+temperature and humidity; or no room (free field). *Early reflections* has
+the on/off, the reflection order and a level slider; *Late reverb* has the
+on/off, a level slider, and the choice between the built-in reverb (with its
+decay multiplier) and an impulse response. Both levels are trims on a
+calibrated model: at 0 dB the room is as loud as a room of that size and
+those materials should be, so a scene with "too much room" is turned down
+here rather than by moving layers. Scenes can also carry a mesh room (an OBJ
+file, as in `scenes/lshape.json`) and box objects such as partitions and
+pillars (as in `scenes/occluder.json`); the editor draws them, lists them on
+the Room tab and plays them through the engine's ray-traced back-end (Steam
+Audio), but they are set in the scene file, not placed in the editor yet.
+
+**Impulse response reverb**: choose *Impulse response (WAV)* under Late
+reverb and press *Load IR…* to pick a WAV (any sample rate and bit depth;
+8/16/24/32-bit PCM or float). The tab shows the file's channel count,
+length and rate and how it is played: a mono file becomes a diffuse field
+around the listener, a stereo file two broad sources left and right of the
+head, a 4-channel file first-order ambiX (ACN/SN3D) fixed to the room, so it
+stays put when the head turns. *Channels* overrides that reading (a stereo
+file can be summed to mono, for instance). The IR replaces only the late
+tail: the engine's own early reflections of each layer keep running on top,
+and they move with the layers; if the recording already contains the room's
+first reflections, switch *Early reflections* off. The IR is normalised to
+the room's calibrated reverb level (so the Level slider still works as a
+trim) and *IR gain* trims it further. The tail arrives 4.7 ms (224 samples)
+later than the built-in reverb would, which is inaudible in a reverb but is
+reported by the engine. Changing or reloading the IR restarts the room
+model, like any other room change. Two synthetic test IRs come with the
+signals (`sp-gensignals` writes `hall_ir.wav`, stereo 2.5 s, and
+`plate_ir.wav`, mono 1.4 s); real room recordings in WAV form, mono, stereo
+or first-order ambiX, work the same way. The scene file stores the IR path
+relative to the scene, like audio.
 
 **Output**: binaural (SADIE II KU100 HRTF), speakers (stereo, quad, 5.1, 7.1,
 5.1.4, 7.1.4, 9.1.6, mapped onto the device's first outputs) or ambiX. Changes

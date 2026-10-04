@@ -84,6 +84,10 @@ TEST_CASE("prepareUpdate: what updates live and what needs a new renderer") {
     added.layers.push_back(Layer{});
     CHECK(r.prepareUpdate(added) == nullptr);
 
+    Scene stereo = s;
+    stereo.layers[0].channels = 2;  // one more input: a new renderer
+    CHECK(r.prepareUpdate(stereo) == nullptr);
+
     Scene room = s;
     room.room.type = RoomType::Box;
     CHECK(r.prepareUpdate(room) == nullptr);

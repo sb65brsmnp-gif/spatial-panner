@@ -82,6 +82,7 @@ public:
     struct LayerInfo {
         int slot = -1;
         std::string id, name, cloneOf;
+        int channels = 1;      // the track's input channels: 1 (mono) or 2 (stereo)
         float meterPeak = 0;
         uint64_t heartbeatMs = 0;
     };
@@ -92,6 +93,7 @@ public:
     bool slotOwnedBy(int slot, uint64_t token) const;
     void heartbeatSlot(int slot, uint64_t token);
     void setSlotName(int slot, uint64_t token, const std::string& name);
+    void setSlotChannels(int slot, uint64_t token, int channels);
     void addMeter(int slot, float peak);      // audio thread; peak hold until read
     std::vector<LayerInfo> liveLayers(uint64_t staleMs = 5000, bool takeMeters = true) const;
     bool idInUse(const std::string& id, uint64_t exceptToken, uint64_t staleMs = 5000) const;

@@ -98,9 +98,13 @@ input.num { width: 64px; }
 /* timeline */
 #timeline { display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--line); min-height: 0; }
 .tl-bar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tl-bar .transport { min-width: 34px; padding-left: 6px; padding-right: 6px; text-align: center; touch-action: none; }
 .tl-time { font-variant-numeric: tabular-nums; min-width: 100px; padding: 0 6px; }
 .tl-sep { color: var(--muted); margin-left: 8px; }
 .tl-unit { color: var(--muted); }
 .tl-keybar { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .tl-keybar .hint { margin: 0; }
 .tl-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+.progress { height: 6px; background: #262b34; border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
+.progress-fill { height: 100%; width: 0; background: var(--blue); transition: width 0.2s; }
+.layer-end { color: #c9d1dc; font-size: 10px; font-weight: 600; background: rgba(21, 23, 28, 0.7); padding: 0 4px; border-radius: 3px; pointer-events: none; }

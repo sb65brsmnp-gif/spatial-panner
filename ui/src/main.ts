@@ -9,7 +9,7 @@ import { SceneView } from './view/sceneView';
 import { Interaction, type ToolName } from './view/interaction';
 import { Toolbar } from './panels/toolbar';
 import { Sidebar } from './panels/sidebar';
-import { Timeline } from './panels/timeline';
+import { Timeline, transportKeyAction } from './panels/timeline';
 import { el, fmtTime } from './panels/dom';
 
 const backend = createBackend();
@@ -28,9 +28,12 @@ const tools = new Interaction(vp, view, store);
 let follow = false;
 
 const toolbar = new Toolbar(tools, plugin, {
-  newScene: () => {
-    if (plugin) { if (confirm('Start over with an empty scene? The tracks stay as layers.')) store.replace({ ...defaultScene(), name: store.scene.name }); return; }
-    if (!store.dirty || confirm('Discard unsaved changes?')) { store.load(defaultScene(), null); frame(); }
+  newScene: async () => {
+    if (plugin) {
+      if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
+      return;
+    }
+    if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
   },
   open: () => openScene(),
   save: (saveAs) => saveScene(saveAs),
@@ -153,7 +156,8 @@ async function sync(): Promise<void> {
 }
 
 async function requestAudioInfo(): Promise<void> {
-  const missing = [...new Set(store.scene.layers.map((l) => l.audio).filter((p) => p && !store.audioInfo.has(p)))];
+  const ir = store.scene.room.impulse_response?.file;
+  const missing = [...new Set([...store.scene.layers.map((l) => l.audio), ir ?? ''].filter((p) => p && !store.audioInfo.has(p)))];
   if (!missing.length) return;
   const infos = await backend.audioInfo(missing);
   for (const i of infos) {
@@ -206,7 +210,8 @@ store.subscribe((kinds) => {
 // --------------------------------------------------------------- files
 
 async function openScene(): Promise<void> {
-  if (plugin ? !confirm('Replace this session\'s scene with a scene file?') : store.dirty && !confirm('Discard unsaved changes?')) return;
+  if (plugin ? !await backend.confirm('Replace this session\'s scene with a scene file?', 'Import…')
+    : store.dirty && !await backend.confirm('Discard unsaved changes?', 'Discard')) return;
   try {
     const r = await backend.openScene();
     if (r) loadOpened(r);
@@ -268,6 +273,17 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveScene(e.shiftKey); return; }
   if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openScene(); return; }
   if (typing || mod) return;
+  // Transport: Enter returns to the beginning of the path, , and . step the
+  // playhead (Space, play/pause, is the timeline's). While a line is being
+  // drawn, Enter finishes it instead (the drawing tools run first and mark
+  // the event handled).
+  const transport = transportKeyAction(e);
+  if (transport) {
+    if (transport.kind === 'start') { if (e.defaultPrevented || tools.drawing) return; timeline.goToPathStart(); }
+    else timeline.nudge(transport.seconds);
+    e.preventDefault();
+    return;
+  }
   const toolKeys: Record<string, ToolName> = { v: 'select', f: 'freehand', l: 'polyline', c: 'curve', p: 'pen', s: 'shape' };
   const viewKeys: Record<string, ViewName> = { '1': 'persp', '2': 'top', '3': 'front', '4': 'side', '5': 'listener' };
   const k = e.key.toLowerCase();
@@ -280,8 +296,8 @@ window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind
 // ---------------------------------------------------------------- start
 
 store.load(defaultScene(), null);
-backend.onOpenFile((r) => {
-  if (!store.dirty || confirm('Discard unsaved changes?')) loadOpened(r);
+backend.onOpenFile(async (r) => {
+  if (!store.dirty || await backend.confirm(`Discard unsaved changes and open ${r.path.split(/[\\/]/).pop()}?`, 'Discard')) loadOpened(r);
 });
 // A scene given on the command line / opened from the Finder (app), or ?scene=name.json (dev).
 backend.startupScene().then((r) => { if (r) loadOpened(r); }).catch((e) => toast(String(e), 'error'));
