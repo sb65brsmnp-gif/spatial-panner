@@ -1,0 +1,24 @@
+{
+  "name": "spatial-panner-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "3D scene and path editor for the spatial panner (runs inside the JUCE WebView)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "e2e": "node tests/e2e/run.mjs"
+  },
+  "dependencies": {
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/three": "0.180.0",
+    "playwright": "1.56.1",
+    "typescript": "5.9.3",
+    "vite": "7.1.12",
+    "vitest": "3.2.4"
+  }
+}

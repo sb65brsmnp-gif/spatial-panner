@@ -1,0 +1,358 @@
+// Builds and updates the 3D objects for the scene: room, grid, layers, paths
+// (with their editable points and time markers) and the listener avatar.
+// The room lives in its own group so walls and objects for non-box geometry
+// can be added next to it later without touching the rest.
+import * as THREE from 'three';
+import { CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+import { Line2 } from 'three/examples/jsm/lines/Line2.js';
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import type { Store } from '../model/store';
+import type { LayerDoc, PathDoc, V3 } from '../model/scene';
+import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
+import type { Viewport } from './viewport';
+
+export const LAYER_RADIUS = 0.22;
+const v3 = (p: V3) => new THREE.Vector3(p[0], p[1], p[2]);
+
+// Head orientation in the engine's convention -> Three.js quaternion.
+// Engine: q = yaw about +Y * pitch about +X * roll about -Z (docs/engine.md).
+export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number): THREE.Quaternion {
+  const d = Math.PI / 180;
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(pitchDeg * d, yawDeg * d, -rollDeg * d, 'YXZ'));
+}
+
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; arrow: THREE.ArrowHelper; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+
+export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
+
+export class SceneView {
+  readonly root = new THREE.Group();
+  readonly roomGroup = new THREE.Group();
+  readonly layerGroup = new THREE.Group();
+  readonly pathGroup = new THREE.Group();
+  readonly pointGroup = new THREE.Group();
+  readonly markerGroup = new THREE.Group();
+  readonly previewGroup = new THREE.Group();
+  readonly listener = new THREE.Group();
+  private layers: LayerObj[] = [];
+  pointHandles: PointHandle[] = [];
+  private lineMaterials: LineMaterial[] = [];
+  private head = new THREE.Group();
+
+  constructor(private vp: Viewport, private store: Store) {
+    this.root.add(this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener);
+    vp.scene.add(this.root);
+    this.buildListener();
+    vp.onBeforeRender(() => {
+      const w = vp.container.clientWidth, h = vp.container.clientHeight;
+      for (const m of this.lineMaterials) m.resolution.set(w, h);
+    });
+  }
+
+  // ---------------------------------------------------------------- room
+
+  rebuildRoom(): void {
+    clear(this.roomGroup);
+    const room = this.store.scene.room;
+    if (room.type === 'box') {
+      const [w, h, d] = room.size;
+      const o = v3(room.origin);
+      const box = new THREE.BoxGeometry(w, h, d);
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: 0x8090a8 }));
+      edges.position.set(o.x, o.y + h / 2, o.z);
+      this.roomGroup.add(edges);
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d),
+        new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 1, side: THREE.DoubleSide }));
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(o.x, o.y - 0.002, o.z);
+      floor.name = 'floor';
+      this.roomGroup.add(floor);
+      const grid = new THREE.GridHelper(Math.ceil(Math.max(w, d)), Math.ceil(Math.max(w, d)), 0x3a4250, 0x2c323c);
+      grid.position.set(o.x, o.y, o.z);
+      (grid.material as THREE.Material).depthWrite = false;
+      this.roomGroup.add(grid);
+      // "Front" marker on the -Z wall so orientation is obvious.
+      const label = makeLabel('front wall', 'wall-label');
+      label.position.set(o.x, o.y + h + 0.3, o.z - d / 2);
+      this.roomGroup.add(label);
+    } else {
+      const grid = new THREE.GridHelper(60, 60, 0x3a4250, 0x262b33);
+      this.roomGroup.add(grid);
+      const ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 60),
+        new THREE.MeshStandardMaterial({ color: room.type === 'outdoor' ? 0x22302a : 0x1c1f25, roughness: 1 }));
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.002;
+      ground.name = 'floor';
+      this.roomGroup.add(ground);
+    }
+    this.vp.invalidate();
+  }
+
+  // -------------------------------------------------------------- layers
+
+  rebuildLayers(): void {
+    for (const l of this.layers) disposeLayer(l);
+    clear(this.layerGroup);
+    this.layers = this.store.scene.layers.map((l, i) => this.makeLayer(l, i));
+    this.updateLayers();
+  }
+
+  private makeLayer(_l: LayerDoc, index: number): LayerObj {
+    const group = new THREE.Group();
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4 }));
+    ball.userData = { kind: 'layer', index };
+    group.add(ball);
+    const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -1, 0)]),
+      new THREE.LineDashedMaterial({ color: 0x8a94a6, dashSize: 0.1, gapSize: 0.08 }));
+    group.add(stem);
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.24, 32), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: 0.6 }));
+    ring.rotation.x = -Math.PI / 2;
+    group.add(ring);
+    const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 0.7, 0xffffff, 0.18, 0.12);
+    group.add(arrow);
+    const div = document.createElement('div');
+    div.className = 'layer-label';
+    const name = document.createElement('span');
+    const meterBox = document.createElement('div');
+    meterBox.className = 'meter';
+    const meter = document.createElement('div');
+    meterBox.appendChild(meter);
+    div.append(name, meterBox);
+    const label = new CSS2DObject(div);
+    label.position.set(0, LAYER_RADIUS + 0.25, 0);
+    group.add(label);
+    this.layerGroup.add(group);
+    return { group, ball, stem, ring, arrow, label, meter, name };
+  }
+
+  updateLayers(): void {
+    const s = this.store.scene;
+    if (s.layers.length !== this.layers.length) return this.rebuildLayers();
+    const sel = this.store.selection;
+    const anySolo = s.layers.some((l) => l.solo);
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    s.layers.forEach((l, i) => {
+      const o = this.layers[i];
+      o.group.position.set(l.position[0], l.position[1], l.position[2]);
+      const color = new THREE.Color(l.color ?? '#4f9cf9');
+      const silent = l.mute || (anySolo && !l.solo);
+      const mat = o.ball.material as THREE.MeshStandardMaterial;
+      mat.color.copy(silent ? color.clone().multiplyScalar(0.35) : color);
+      const selected = sel.kind === 'layer' && sel.index === i;
+      mat.emissive.copy(selected ? color : new THREE.Color(0));
+      mat.emissiveIntensity = selected ? 0.6 : 0;
+      o.ball.scale.setScalar(selected ? 1.25 : 1);
+      const h = l.position[1] - floorY;
+      (o.stem.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -h, 0)]);
+      o.stem.computeLineDistances();
+      o.ring.position.y = -h + 0.01;
+      (o.ring.material as THREE.MeshBasicMaterial).color.copy(color);
+      o.arrow.visible = l.directivity > 0.01;
+      const f = v3(l.directivity_forward);
+      if (f.lengthSq() > 1e-9) o.arrow.setDirection(f.normalize());
+      o.arrow.setColor(color);
+      o.name.textContent = l.name || `Layer ${i + 1}`;
+      o.label.element.classList.toggle('selected', selected);
+      o.label.element.classList.toggle('silent', silent);
+    });
+    this.updateMeters();
+    this.vp.invalidate();
+  }
+
+  updateMeters(): void {
+    const m = this.store.meters;
+    this.layers.forEach((o, i) => {
+      const db = m[i] ?? -120;
+      const frac = Math.max(0, Math.min(1, (db + 60) / 60));
+      o.meter.style.width = `${(frac * 100).toFixed(1)}%`;
+      o.meter.style.background = db > -3 ? '#eb5757' : db > -12 ? '#f2c94c' : '#5fd38d';
+    });
+  }
+
+  // --------------------------------------------------------------- paths
+
+  rebuildPaths(): void {
+    clear(this.pathGroup);
+    clear(this.pointGroup);
+    clear(this.markerGroup);
+    this.lineMaterials = [];
+    this.pointHandles = [];
+    const L = this.store.scene.listener;
+    const a = this.store.analysis;
+    const fresh = a && a.revision === this.store.revision;
+    L.paths.forEach((p, i) => {
+      const active = i === L.active_path;
+      // The engine's samples when they match the current revision; the local
+      // evaluator (same maths) while an edit is in flight.
+      const pts = fresh && a!.paths[i]?.points.length ? a!.paths[i].points : samplePath(p);
+      if (pts.length < 2) return;
+      const line = this.fatLine(pts as V3[], active ? 0xffc857 : 0x7b8494, active ? 3 : 1.5, active ? 1 : 0.7);
+      line.userData = { kind: 'path', path: i };
+      this.pathGroup.add(line);
+      // Start arrow and end flag.
+      if (active) {
+        this.pathGroup.add(endMarker(pts[0] as V3, 0x5fd38d));
+        if (!p.closed) this.pathGroup.add(endMarker(pts[pts.length - 1] as V3, 0xeb5757));
+        this.buildPointHandles(p, i);
+      }
+    });
+    this.buildTimeMarkers();
+    this.vp.invalidate();
+  }
+
+  private fatLine(points: V3[], color: number, width: number, opacity: number): Line2 {
+    const g = new LineGeometry();
+    g.setPositions(points.flat());
+    const m = new LineMaterial({ color, linewidth: width, transparent: opacity < 1, opacity, worldUnits: false });
+    m.resolution.set(this.vp.container.clientWidth, this.vp.container.clientHeight);
+    this.lineMaterials.push(m);
+    const line = new Line2(g, m);
+    line.computeLineDistances();
+    return line;
+  }
+
+  private buildPointHandles(p: PathDoc, pathIndex: number): void {
+    const sel = this.store.selection;
+    const anchorGeo = new THREE.SphereGeometry(0.12, 16, 8);
+    const handleGeo = new THREE.BoxGeometry(0.11, 0.11, 0.11);
+    for (const ref of editablePoints(p)) {
+      const seg = p.segments[ref.seg];
+      const pos = getPoint(p, ref)!;
+      const handle = isHandle(seg, ref.pt);
+      const selected = sel.kind === 'point' && sel.path === pathIndex && sel.ref.seg === ref.seg && sel.ref.pt === ref.pt;
+      const mesh = new THREE.Mesh(handle ? handleGeo : anchorGeo,
+        new THREE.MeshBasicMaterial({ color: selected ? 0xffffff : handle ? 0x56ccf2 : 0xffc857, depthTest: false, transparent: true }));
+      mesh.renderOrder = 10;
+      mesh.position.copy(v3(pos));
+      mesh.userData = { kind: 'point', path: pathIndex, ref };
+      this.pointGroup.add(mesh);
+      this.pointHandles.push({ mesh, path: pathIndex, ref });
+      if (handle) {
+        const anchor = seg.points[ref.pt === 1 ? 0 : 3];
+        const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([v3(anchor), v3(pos)]),
+          new THREE.LineBasicMaterial({ color: 0x56ccf2, transparent: true, opacity: 0.7, depthTest: false }));
+        l.renderOrder = 9;
+        this.pointGroup.add(l);
+      }
+    }
+  }
+
+  // Dots where the listener will be at each second, labelled every 5 s
+  // (from the engine's pose evaluation, so speed changes show as spacing).
+  private buildTimeMarkers(): void {
+    const a = this.store.analysis;
+    if (!a || a.active_path < 0 || !a.poses.length) return;
+    const step = Math.max(1, Math.round(1 / a.dt));
+    const dotGeo = new THREE.SphereGeometry(0.045, 8, 6);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffe3a3 });
+    let lastPos: number[] | null = null;
+    for (let i = 0; i < a.poses.length; i += step) {
+      const p = a.poses[i];
+      const t = i * a.dt;
+      if (lastPos && Math.hypot(p[0] - lastPos[0], p[1] - lastPos[1], p[2] - lastPos[2]) < 0.05) continue;  // standing still
+      lastPos = p;
+      const dot = new THREE.Mesh(dotGeo, dotMat);
+      dot.position.set(p[0], p[1], p[2]);
+      this.markerGroup.add(dot);
+      if (Math.round(t) % 5 === 0) {
+        const lab = makeLabel(`${Math.round(t)}s`, 'time-label');
+        lab.position.set(p[0], p[1] + 0.25, p[2]);
+        this.markerGroup.add(lab);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ listener
+
+  private buildListener(): void {
+    const skin = new THREE.MeshStandardMaterial({ color: 0xe8e1d6, roughness: 0.6 });
+    const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.11, 24, 16), skin);
+    headMesh.scale.set(0.9, 1.05, 1);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.08, 12), skin);
+    nose.rotation.x = -Math.PI / 2;
+    nose.position.set(0, -0.01, -0.12);
+    const earGeo = new THREE.SphereGeometry(0.03, 10, 8);
+    const earL = new THREE.Mesh(earGeo, skin); earL.position.set(-0.1, 0, 0); earL.scale.set(0.5, 1.2, 0.9);
+    const earR = earL.clone(); earR.position.x = 0.1;
+    // View cone: shows where the head points from any camera angle.
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.2, 24, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffc857, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+    cone.rotation.x = Math.PI / 2;
+    cone.position.z = -0.7;
+    this.head.add(headMesh, nose, earL, earR, cone);
+    this.head.traverse((o) => { o.userData = { kind: 'listener' }; });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.12, 0.9, 16),
+      new THREE.MeshStandardMaterial({ color: 0x3c4658, roughness: 0.8 }));
+    body.name = 'body';
+    this.listener.add(this.head, body);
+  }
+
+  updateListener(pose: number[] | null): void {
+    const L = this.store.scene.listener;
+    const p = pose ?? [...L.static_position, 0, 0, 0, 0, 0];
+    this.listener.position.set(p[0], p[1], p[2]);
+    this.head.quaternion.copy(headQuaternion(p[3], p[4], p[5]));
+    const body = this.listener.getObjectByName('body')!;
+    const floorY = this.store.scene.room.type === 'box' ? this.store.scene.room.origin[1] : 0;
+    const h = Math.max(0.3, p[1] - floorY - 0.2);
+    body.scale.y = h / 0.9;
+    body.position.y = -0.2 - h / 2;
+    body.rotation.y = p[3] * Math.PI / 180;
+    this.vp.setEye(new THREE.Vector3(p[0], p[1], p[2]), this.head.quaternion);
+    this.listener.visible = this.vp.view !== 'listener';
+    this.vp.invalidate();
+  }
+
+  // ------------------------------------------------------------- preview
+
+  setPreview(points: V3[], extra: V3[] = [], handles: [V3, V3][] = []): void {
+    clear(this.previewGroup);
+    if (points.length >= 2) this.previewGroup.add(this.fatLine(points, 0x8fe3ff, 2.5, 1));
+    const geo = new THREE.SphereGeometry(0.07, 12, 8);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x8fe3ff, depthTest: false });
+    for (const p of extra) {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.copy(v3(p));
+      m.renderOrder = 11;
+      this.previewGroup.add(m);
+    }
+    for (const [a, b] of handles) {
+      this.previewGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([v3(a), v3(b)]),
+        new THREE.LineBasicMaterial({ color: 0x56ccf2 })));
+    }
+    this.vp.invalidate();
+  }
+
+  clearPreview(): void { this.setPreview([]); }
+
+  pickableLayers(): THREE.Object3D[] { return this.layers.map((l) => l.ball); }
+}
+
+function makeLabel(text: string, cls: string): CSS2DObject {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  return new CSS2DObject(div);
+}
+
+function endMarker(p: V3, color: number): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.12), new THREE.MeshBasicMaterial({ color }));
+  m.position.copy(v3(p));
+  return m;
+}
+
+function disposeLayer(l: LayerObj): void {
+  l.label.element.remove();
+}
+
+function clear(g: THREE.Object3D): void {
+  for (const c of [...g.children]) {
+    c.traverse((o) => {
+      if (o instanceof CSS2DObject) o.element.remove();
+      const m = o as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+    });
+    g.remove(c);
+  }
+}
