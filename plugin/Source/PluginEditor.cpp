@@ -3,6 +3,8 @@
 
 #include <cmath>
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include "BinaryData.h"
 #include "SceneDoc.h"
 #include "sp/Pose.h"
