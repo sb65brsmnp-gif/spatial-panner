@@ -73,7 +73,8 @@ struct Tap {
 };
 
 struct Voice {
-    Layer layer;
+    const Layer* layer = nullptr;   // points into Impl::scene.layers
+    Vec3 position;                  // layer position, slewed towards layer->position after live edits
     LayerControls controls;
     DelayLine delay;
     std::vector<Tap> taps;  // taps[0] is the direct path
@@ -93,6 +94,44 @@ struct Voice {
     // Loudspeaker direct path
     std::vector<float> spkCur, spkTarget;
 };
+
+// Longest path (direct or image) between any layer and the listener over the
+// timeline, plus headroom: the delay lines are sized from it.
+float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration) {
+    const double dur = duration > 0 ? duration : 600.0;
+    const int steps = static_cast<int>(std::min(dur / 0.25, 4000.0)) + 1;
+    float maxD = 1.0f;
+    const int ord = scene.room.type == RoomType::Box ? std::max(scene.room.reflectionOrder, 0) : 1;
+    std::vector<std::vector<ImageSource>> images;
+    for (const auto& l : scene.layers) {
+        const int lo = l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
+        images.push_back(computeImages(scene.room, l.position, lo));
+    }
+    for (int i = 0; i < steps; ++i) {
+        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1));
+        for (const auto& imgs : images)
+            for (const auto& img : imgs) maxD = std::max(maxD, (img.position - p.position).length());
+    }
+    return std::min(maxD * 1.15f + 2.0f, 3000.0f);
+}
+
+bool sameMaterial(const Material& a, const Material& b) { return a.name == b.name && a.absorption == b.absorption; }
+
+bool sameRoom(const Room& a, const Room& b) {
+    if (a.type != b.type || !(a.size == b.size) || !(a.origin == b.origin) || a.reflectionOrder != b.reflectionOrder ||
+        a.reflectionsLevelDb != b.reflectionsLevelDb || a.reverbLevelDb != b.reverbLevelDb ||
+        a.reverbTimeScale != b.reverbTimeScale || a.reflectionsEnabled != b.reflectionsEnabled ||
+        a.reverbEnabled != b.reverbEnabled)
+        return false;
+    for (int w = 0; w < kNumWalls; ++w)
+        if (!sameMaterial(a.materials[w], b.materials[w])) return false;
+    return true;
+}
+
+bool sameEnvironment(const Environment& a, const Environment& b) {
+    return a.speedOfSound == b.speedOfSound && a.temperatureC == b.temperatureC &&
+           a.relativeHumidity == b.relativeHumidity && a.pressureKPa == b.pressureKPa && a.airAbsorption == b.airAbsorption;
+}
 
 }  // namespace
 
@@ -160,7 +199,6 @@ struct Renderer::Impl {
     Impl(const Scene& s, const RenderConfig& c, double dur);
     void initVoices();
     void initRoom();
-    float estimateMaxDistance() const;
     void computeTargets(Voice& v, const Pose& pose, double time);
     void rebuildTaps(Voice& v, const Vec3& srcPos);
     void updateHrtf(Voice& v, const Vec3& rel, float dist);
@@ -227,7 +265,7 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
         }
     }
 
-    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance();
+    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration);
     air = AirAbsorptionTable(scene.environment, fs, maxDistance + 5.0f, 1.0f);
     if (scene.environment.airAbsorption) {
         const float f[3] = {250.0f, 1000.0f, 4000.0f};
@@ -250,24 +288,6 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
     outFifo.assign(static_cast<size_t>(nOut) * B, 0.0f);
     fifoFill = 0;
     first = true;
-}
-
-float Renderer::Impl::estimateMaxDistance() const {
-    const double dur = duration > 0 ? duration : 600.0;
-    const int steps = static_cast<int>(std::min(dur / 0.25, 4000.0)) + 1;
-    float maxD = 1.0f;
-    const int ord = scene.room.type == RoomType::Box ? std::max(scene.room.reflectionOrder, 0) : 1;
-    std::vector<std::vector<ImageSource>> images;
-    for (const auto& l : scene.layers) {
-        const int lo = l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
-        images.push_back(computeImages(scene.room, l.position, lo));
-    }
-    for (int i = 0; i < steps; ++i) {
-        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1), listenerControls);
-        for (const auto& imgs : images)
-            for (const auto& img : imgs) maxD = std::max(maxD, (img.position - p.position).length());
-    }
-    return std::min(maxD * 1.15f + 2.0f, 3000.0f);
 }
 
 void Renderer::Impl::initRoom() {
@@ -300,9 +320,10 @@ void Renderer::Impl::initVoices() {
     const int maxDelay = static_cast<int>(maxDistance / speedOfSound * fs) + 16;
     for (size_t i = 0; i < voices.size(); ++i) {
         Voice& v = voices[i];
-        v.layer = scene.layers[i];
+        v.layer = &scene.layers[i];
+        v.position = v.layer->position;
         v.delay.init(maxDelay);
-        rebuildTaps(v, v.layer.position);
+        rebuildTaps(v, v.position);
         if (cfg.mode == OutputMode::Binaural) {
             v.directIn.reset(convSpec, *fft);
             for (int k = 0; k < 2; ++k) {
@@ -339,7 +360,7 @@ void Renderer::Impl::updateHrtf(Voice& v, const Vec3& rel, float dist) {
     } else {
         dirL = dirR = rel.normalized();
     }
-    const float spread = v.controls.spreadDeg.value_or(v.layer.spreadDeg);
+    const float spread = v.controls.spreadDeg.value_or(v.layer->spreadDeg);
     // Rate limit: a new pair of HRIRs costs 16 FFTs; direction changes within
     // a couple of milliseconds are far below what the ear resolves.
     v.crossfade = false;
@@ -369,7 +390,7 @@ void Renderer::Impl::updateHrtf(Voice& v, const Vec3& rel, float dist) {
 }
 
 void Renderer::Impl::rebuildTaps(Voice& v, const Vec3& srcPos) {
-    const Layer& L = v.layer;
+    const Layer& L = *v.layer;
     const Room& room = scene.room;
     int ord = L.reflectionOrder >= 0 ? L.reflectionOrder : room.reflectionOrder;
     if (!room.reflectionsEnabled) ord = 0;
@@ -385,8 +406,19 @@ void Renderer::Impl::rebuildTaps(Voice& v, const Vec3& srcPos) {
 }
 
 void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/) {
-    const Layer& L = v.layer;
-    const Vec3 srcPos = L.position + v.controls.positionOffset;
+    const Layer& L = *v.layer;
+    // A layer moved by a live scene update glides to its new position (time
+    // constant 40 ms) instead of jumping, so dragging it in the editor does
+    // not produce a burst of Doppler shift. Static scenes never move.
+    if (first) {
+        v.position = L.position;
+    } else if ((L.position - v.position).lengthSquared() > 1e-8f) {
+        const float a = 1.0f - std::exp(-static_cast<float>(B) / (0.04f * fs));
+        v.position = v.position + (L.position - v.position) * a;
+    } else {
+        v.position = L.position;
+    }
+    const Vec3 srcPos = v.position + v.controls.positionOffset;
 
     // (Re)build the image set when the source moved.
     if ((srcPos - v.imagesForPosition).lengthSquared() > 1e-10f) rebuildTaps(v, srcPos);
@@ -645,6 +677,32 @@ void Renderer::reset() { impl_->resetState(); }
 
 void Renderer::setLayerControls(int layer, const LayerControls& c) {
     if (layer >= 0 && layer < static_cast<int>(impl_->voices.size())) impl_->voices[layer].controls = c;
+}
+
+std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
+    // Reads only members that applyUpdate() never touches (layer count, room,
+    // environment, duration, maxDistance), so this may run concurrently with
+    // process() and applyUpdate().
+    const Impl& im = *impl_;
+    if (scene.layers.size() != im.voices.size()) return nullptr;
+    if (!sameRoom(scene.room, im.scene.room) || !sameEnvironment(scene.environment, im.scene.environment))
+        return nullptr;
+    auto u = std::make_unique<SceneUpdate>();
+    u->scene = scene;
+    u->poses = PoseEvaluator(scene, im.duration > 0 ? im.duration : 600.0);
+    if (estimateMaxDistance(scene, u->poses, im.duration) > im.maxDistance) return nullptr;
+    return u;
+}
+
+void Renderer::applyUpdate(SceneUpdate& u) {
+    Impl& im = *impl_;
+    if (u.scene.layers.size() != im.voices.size()) return;
+    // Vector and object swaps exchange heap buffers without allocating.
+    std::swap(im.scene.layers, u.scene.layers);
+    std::swap(im.scene.listener, u.scene.listener);
+    std::swap(im.scene.name, u.scene.name);
+    std::swap(im.poses, u.poses);
+    for (size_t i = 0; i < im.voices.size(); ++i) im.voices[i].layer = &im.scene.layers[i];
 }
 
 Renderer::Stats Renderer::stats() const {

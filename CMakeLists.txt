@@ -22,6 +22,7 @@ add_subdirectory(engine)
 if(SP_BUILD_TOOLS)
   add_subdirectory(tools/render)
   add_subdirectory(tools/gensignals)
+  add_subdirectory(tools/scene)
 endif()
 
 if(SP_BUILD_TESTS)

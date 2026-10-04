@@ -6,6 +6,7 @@ add_library(sp_engine STATIC
   src/Materials.cpp
   src/SpeakerLayout.cpp
   src/SceneJson.cpp
+  src/SceneAnalysis.cpp
   src/Renderer.cpp
   src/dsp/Fft.cpp
   src/dsp/Convolver.cpp

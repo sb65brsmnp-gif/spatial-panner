@@ -47,6 +47,13 @@ struct LayerControls {
     std::optional<float> spreadDeg;
 };
 
+// A scene edit prepared off the audio thread by Renderer::prepareUpdate and
+// applied on it by Renderer::applyUpdate.
+struct SceneUpdate {
+    Scene scene;
+    PoseEvaluator poses;
+};
+
 class Renderer {
 public:
     // `duration` (seconds) bounds the speed-curve integration; pass the
@@ -77,6 +84,23 @@ public:
 
     // Clears all delay lines and filter states (for transport jumps).
     void reset();
+
+    // Live scene edits (the editor's path while it plays).
+    //
+    // prepareUpdate() builds what applyUpdate() needs from an edited scene.
+    // It allocates, so call it off the audio thread; it is safe to call while
+    // process() runs on another thread. It returns null when the edit needs a
+    // new Renderer instead: a different number of layers, any change to the
+    // room or environment, or layers/paths reaching beyond the delay lines.
+    // Everything else (layer positions, levels, directivity, spread, Doppler,
+    // distance model, sends, paths, speed curve, head track) updates live.
+    //
+    // applyUpdate() runs on the audio thread between process() calls and does
+    // not allocate or free: it swaps the new data in and leaves the old data
+    // in `update`, so destroy `update` off the audio thread afterwards.
+    // Moved layers glide to their new positions over ~40 ms.
+    std::unique_ptr<SceneUpdate> prepareUpdate(const Scene& scene) const;
+    void applyUpdate(SceneUpdate& update);
 
     // Diagnostics
     struct Stats {
