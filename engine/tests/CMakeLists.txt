@@ -4,7 +4,9 @@ add_executable(sp_tests
   test_dsp.cpp
   test_renderer.cpp
   test_scene_json.cpp
-  test_live_update.cpp)
+  test_live_update.cpp
+  test_reverb.cpp
+  test_room.cpp)
 if(SP_WITH_STEAM_AUDIO)
   target_sources(sp_tests PRIVATE test_steam.cpp)
 endif()

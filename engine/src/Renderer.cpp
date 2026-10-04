@@ -355,7 +355,10 @@ void Renderer::Impl::initRoom() {
             fp.rt60Mid = bandAverage(roomStats.rt60, 2, 3);
             fp.rt60High = bandAverage(roomStats.rt60, 4, 5);
             fp.meanFreePathSeconds = roomStats.meanFreePath / speedOfSound;
-            fp.preDelaySeconds = roomStats.meanFreePath * (room.reflectionOrder + 0.5f) / speedOfSound;
+            // The tail stands in for every reflection beyond the modelled
+            // order, plus what the modelled walls scatter: it starts between
+            // the modelled images, and the input allpasses smear its onset.
+            fp.preDelaySeconds = roomStats.meanFreePath * (0.5f * room.reflectionOrder + 0.5f) / speedOfSound;
             fp.ambiOrder = order;
             fdn.init(fp);
         }
@@ -594,7 +597,10 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
             g *= (1.0f - 0.5f * k) + 0.5f * k * cosTheta;
         }
         if (!t.isDirect) {
-            g *= reflGain;
+            // Only the specular share of a scattering wall stays in the image;
+            // the rest reaches the diffuse field through the reverb send below
+            // (it is missing from imageEnergy, so lateE picks it up).
+            g *= reflGain * t.image.specular;
             const float midRefl = bandAverage(t.image.reflectance, 2, 3);
             imageEnergy += (g * midRefl) * (g * midRefl);
         }

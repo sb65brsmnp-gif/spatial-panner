@@ -17,6 +17,10 @@ struct ImageSource {
     int order = 0;
     // Per-band amplitude factor from the wall materials (product of sqrt(1 - alpha)).
     std::array<float, kNumBands> reflectance{1, 1, 1, 1, 1, 1};
+    // Amplitude factor of the specular (mirror) part: product of
+    // sqrt(1 - scattering) over the walls hit. The scattered remainder goes to
+    // the diffuse field (the late reverb send), so energy is conserved.
+    float specular = 1;
     // Position of the listener's mirror image for directivity: the direction
     // the sound leaves the real source is (listenerImage - source).
     std::array<int, 3> index{};  // (nx, ny, nz)

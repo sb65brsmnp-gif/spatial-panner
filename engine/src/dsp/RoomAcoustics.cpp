@@ -51,6 +51,7 @@ std::vector<ImageSource> computeImages(const Room& room, const Vec3& source, int
         g.order = 1;
         for (int b = 0; b < kNumBands; ++b)
             g.reflectance[b] = std::sqrt(std::max(0.0f, 1.0f - room.materials[WallNegY].absorption[b]));
+        g.specular = std::sqrt(clamp(1.0f - room.materials[WallNegY].scattering, 0.0f, 1.0f));
         images.push_back(g);
         return images;
     }
@@ -82,6 +83,10 @@ std::vector<ImageSource> computeImages(const Room& room, const Vec3& source, int
                     }
                     img.reflectance[b] = r;
                 }
+                img.specular = 1.0f;
+                for (int w = 0; w < kNumWalls; ++w)
+                    for (int h = 0; h < img.wallHits[w]; ++h)
+                        img.specular *= std::sqrt(clamp(1.0f - room.materials[w].scattering, 0.0f, 1.0f));
                 images.push_back(img);
             }
         }
