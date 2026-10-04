@@ -68,9 +68,21 @@ jobs:
         run: |
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
 
+      - name: Package the macOS app with the demo scenes
+        if: runner.os == 'macOS'
+        run: |
+          pkg="build/package/Spatial Panner"
+          mkdir -p "$pkg"
+          ditto "build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app" "$pkg/Spatial Panner.app"
+          cp -R scenes "$pkg/scenes"
+          ./build/tools/gensignals/sp-gensignals "$pkg/signals" --seconds 40
+          # ditto keeps the executable bits and the code signature, which the
+          # artifact upload alone would drop.
+          (cd build/package && ditto -c -k --keepParent "Spatial Panner" Spatial-Panner-macOS.zip)
+
       - name: Upload the macOS app
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: spatial-panner-macos
-          path: build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app
+          path: build/package/Spatial-Panner-macOS.zip
