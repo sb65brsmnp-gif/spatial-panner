@@ -367,17 +367,25 @@ export class Sidebar {
     const R = s.room;
     const E = s.environment;
     const box = R.type === 'box';
+    const mesh = R.type === 'mesh';
+    const types = mesh || R.mesh ? ['box', 'mesh', 'outdoor', 'none'] : ['box', 'outdoor', 'none'];
     const mats = WALLS.filter((w) => box || w === 'floor').map((w) =>
       row(box ? w[0].toUpperCase() + w.slice(1) : 'Ground', select(MATERIALS, R.materials[w].name, (v) => this.upd((sc) => { sc.room.materials[w] = { name: v }; }),
         Object.fromEntries(MATERIALS.map((m) => [m, m.replace('_', ' ')])))));
     this.body.append(section('Space',
-      row('Type', select(['box', 'outdoor', 'none'], R.type, (v) => this.upd((sc) => { sc.room.type = v as SceneDoc['room']['type']; }),
-        { box: 'room (box)', outdoor: 'outdoors (ground only)', none: 'free field (no reflections)' })),
+      row('Type', select(types, R.type, (v) => this.upd((sc) => { sc.room.type = v as SceneDoc['room']['type']; }),
+        { box: 'room (box)', mesh: 'room (mesh)', outdoor: 'outdoors (ground only)', none: 'free field (no reflections)' })),
+      mesh ? el('p', { class: 'muted' }, meshNote(R.mesh, this.info?.steamAudio)) : '',
       box ? row('Size', vec3Inputs(R.size, (v) => this.upd((sc) => { sc.room.size = v.map((x) => Math.max(1, x)) as typeof v; }), 0.5)) : '',
       box ? el('p', { class: 'muted' }, 'Width (x), height (y), depth (z) in metres.') : '',
       box ? row('Centre', vec3Inputs(R.origin, (v) => this.upd((sc) => { sc.room.origin = v; }), 0.5)) : '',
     ));
-    if (R.type !== 'none') this.body.append(section(box ? 'Surfaces' : 'Ground', ...mats));
+    if (R.type !== 'none' && !mesh) this.body.append(section(box ? 'Surfaces' : 'Ground', ...mats));
+    if (R.objects?.length) {
+      this.body.append(section('Objects',
+        ...R.objects.map((o) => row(o.name || 'object', el('span', { class: 'muted' }, `${o.material.name}, ${o.max.map((v, i) => (v - o.min[i]).toFixed(1)).join(' × ')} m`))),
+        el('p', { class: 'muted' }, 'Walls and objects block and reflect sound when the ray-traced room model is in use. They are set in the scene file for now.')));
+    }
     this.body.append(section('Reflections and reverb',
       row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
         select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
@@ -452,4 +460,10 @@ export class Sidebar {
 
 function layoutChannels(name: string): number {
   return ({ stereo: 2, quad: 4, '5.1': 6, '7.1': 8, '5.1.4': 10, '7.1.4': 12, '9.1.6': 16 } as Record<string, number>)[name] ?? 2;
+}
+
+function meshNote(mesh: unknown, steam: boolean | undefined): string {
+  const file = typeof mesh === 'object' && mesh && 'file' in mesh ? String((mesh as { file: unknown }).file).split(/[\\/]/).pop() : null;
+  const from = file ? `Shape from ${file}.` : 'Shape stored in the scene file.';
+  return steam === false ? `${from} This build has no ray tracer, so a mesh room plays as free field.` : `${from} Surfaces come from the mesh's materials.`;
 }

@@ -213,6 +213,47 @@ TEST_CASE("Session plays a scene, takes live edits without rebuilding, and cross
     CHECK(std::abs(s.tick().time - 10.0) < 0.06);
 }
 
+TEST_CASE("Session plays a room with objects through the ray-traced back-end, and live edits keep it") {
+    if (!sp::Renderer::steamAudioAvailable()) SKIP("built without Steam Audio");
+    juce::TemporaryFile tmpDir;
+    const auto dir = tmpDir.getFile();
+    dir.createDirectory();
+    Rig rig;
+    auto& s = rig.s;
+    if (!Session::hrtfFile().existsAsFile()) SKIP("HRTF not available");
+
+    sp::Scene scene = testScene(dir);
+    sp::SceneObject wall;
+    wall.name = "partition";
+    wall.minCorner = {-1, 0, -2};
+    wall.maxCorner = {1, 3, -1.8f};
+    wall.material = sp::materials::byName("brick");
+    scene.room.objects.push_back(wall);
+    s.setScene(scene, 20);
+    waitIdle(s);
+    REQUIRE(s.buildsStarted() == 1);
+    s.transport(Session::Transport::Play);
+    auto a = rig.run(1.5);
+    CHECK(finite(a[0]));
+    CHECK(finite(a[1]));
+    CHECK(rms(a[0], 9600) > 1e-3);
+
+    // Moving a layer patches the running ray-traced renderer; moving the wall rebuilds it.
+    scene.layers[0].position = {-2, 1.6f, -1};
+    s.setScene(scene, 20);
+    pump(20);
+    auto b = rig.run(0.5);
+    CHECK(s.buildsStarted() == 1);
+    CHECK(finite(b[0]));
+    scene.room.objects[0].maxCorner.y = 2.5f;
+    s.setScene(scene, 20);
+    waitIdle(s);
+    auto c = rig.run(1.0);
+    CHECK(s.buildsStarted() == 2);
+    CHECK(finite(c[0]));
+    CHECK(rms(c[0], 9600) > 1e-3);
+}
+
 TEST_CASE("Session bounces binaural and 7.1.4 WAV files") {
     juce::TemporaryFile tmpDir;
     const auto dir = tmpDir.getFile();

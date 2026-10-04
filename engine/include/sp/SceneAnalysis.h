@@ -32,6 +32,7 @@ struct SceneAnalysis {
     std::vector<SampledPathView> paths;  // one per scene path, same order
     std::vector<PoseSample> poses;       // at t = 0, dt, 2 dt, ... duration
     double arrivalTime = -1;      // when the listener reaches the end of the active path, -1 = never
+    MeshGeometry roomMesh;        // a Mesh room's triangles (loaded from its OBJ), empty otherwise
 };
 
 // `duration` <= 0 uses scene.duration, or 60 s when that is 0 too.

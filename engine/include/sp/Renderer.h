@@ -119,9 +119,6 @@ public:
     // Clears all delay lines and filter states (for transport jumps).
     void reset();
 
-    // True when the engine was built with the Steam Audio back-end.
-    static bool steamAudioAvailable();
-
     // Live scene edits (the editor's path while it plays).
     //
     // prepareUpdate() builds what applyUpdate() needs from an edited scene.
@@ -138,6 +135,9 @@ public:
     // Moved layers glide to their new positions over ~40 ms.
     std::unique_ptr<SceneUpdate> prepareUpdate(const Scene& scene) const;
     void applyUpdate(SceneUpdate& update);
+
+    // True when the engine was built with the Steam Audio back-end.
+    static bool steamAudioAvailable();
 
     // Diagnostics
     struct Stats {

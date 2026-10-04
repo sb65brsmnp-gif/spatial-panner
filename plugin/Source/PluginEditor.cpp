@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "sp/Renderer.h"
 
 #include <cmath>
 
@@ -37,6 +38,28 @@ void relativiseAudioPaths(json& scene, const juce::File& dir) {
         const auto rel = juce::File(a).getRelativePathFrom(dir);
         if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) l["audio"] = rel.replaceCharacter('\\', '/').toStdString();
     }
+}
+
+// A mesh room's OBJ file: absolute in the session, relative in a file on
+// disk, kept as the file wrote it (as the app does, app/Source/Bridge.cpp).
+void resolveMeshPath(json& scene, const json& raw, const juce::File& dir) {
+    if (!raw.contains("room") || !raw["room"].contains("mesh") || !scene.contains("room")) return;
+    json m = raw["room"]["mesh"];
+    if (m.is_string()) m = json{{"file", m}};
+    if (!m.is_object() || !m.contains("file")) return;
+    const std::string f = m["file"].get<std::string>();
+    if (!juce::File::isAbsolutePath(f)) m["file"] = dir.getChildFile(f).getFullPathName().toStdString();
+    scene["room"]["mesh"] = m;
+}
+
+void relativiseMeshPath(json& scene, const juce::File& dir) {
+    if (!scene.contains("room") || !scene["room"].contains("mesh")) return;
+    json& m = scene["room"]["mesh"];
+    if (!m.is_object() || !m.contains("file")) return;
+    const std::string f = m["file"].get<std::string>();
+    if (!juce::File::isAbsolutePath(f)) return;
+    const auto rel = juce::File(f).getRelativePathFrom(dir);
+    if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) m["file"] = rel.replaceCharacter('\\', '/').toStdString();
 }
 
 }  // namespace
@@ -146,6 +169,7 @@ private:
                       {"output", {{"mode", "binaural"}, {"layout", "7.1.4"}}},
                       {"status", proc_.statusText().toStdString()},
                       {"host", "plugin"},
+                      {"steamAudio", sp::Renderer::steamAudioAvailable()},
                       {"tracks", tracks}}.dump());
             return;
         }
@@ -176,8 +200,10 @@ private:
                                   try {
                                       const std::string text = f.loadFileAsString().toStdString();
                                       json raw = json::parse(text);
-                                      json scene = json::parse(sp::sceneToJson(sp::sceneFromJson(text)));
-                                      resolveAudioPaths(scene, f.getParentDirectory());
+                                      const juce::File dir = f.getParentDirectory();
+                                      json scene = json::parse(sp::sceneToJson(sp::sceneFromJson(text, dir.getFullPathName().toStdString())));
+                                      resolveAudioPaths(scene, dir);
+                                      resolveMeshPath(scene, raw, dir);
                                       done(json{{"path", f.getFullPathName().toStdString()}, {"scene", scene}, {"raw", raw}}.dump());
                                   } catch (const std::exception& e) {
                                       done(json{{"nativeError", std::string("Could not read ") + f.getFileName().toStdString() + ": " + e.what()}}.dump());
@@ -191,6 +217,7 @@ private:
                 json scene = a.at("scene");
                 sp::sceneFromJson(scene.dump());
                 relativiseAudioPaths(scene, f.getParentDirectory());
+                relativiseMeshPath(scene, f.getParentDirectory());
                 if (!f.replaceWithText(juce::String::fromUTF8(scene.dump(2).c_str()) + "\n"))
                     throw std::runtime_error("Cannot write " + f.getFullPathName().toStdString());
                 lastDir_ = f.getParentDirectory();

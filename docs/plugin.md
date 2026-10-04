@@ -55,10 +55,14 @@ scripts/install_au.sh
 Then quit and reopen Logic, or reopen the project.
 
 The macOS CI job also builds the plug-in, runs auval on it, and uploads it as
-the `spatial-panner-au` artifact. A copy you download carries the quarantine
-flag. `scripts/install_au.sh` removes the flag and re-signs the copy, so you
-can use it the same way: put the downloaded component at the path the
-script expects, then run the script.
+the `spatial-panner-au` artifact (a zip of the component). A downloaded copy
+carries the quarantine flag. To use it without building, unzip it into
+`~/Library/Audio/Plug-Ins/Components/`, then run:
+
+```sh
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/"Spatial Panner.component"
+killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
+```
 
 ## Setting up a session
 
@@ -222,6 +226,9 @@ built-in model don't have this cost.
 * **Memory:** each binaural track loads its own copy of the HRTF, about 18 MB
   and 0.4 s on insert. Sharing the HRTF between instances needs an engine
   change.
+* **Mesh rooms** refer to their `.obj` file by its full path in the
+  session. If you move the project to another Mac, export the scene with
+  the OBJ next to it and import it there.
 * **Layer without a scene track:** a layer instance stores a copy of the
   scene with its own state. If you remove the scene track, the layers keep
   playing that copy, and their header says so.

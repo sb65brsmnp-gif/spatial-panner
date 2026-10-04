@@ -102,7 +102,8 @@ struct Voice {
 
 // Longest path (direct or image) between any layer and the listener over the
 // timeline, plus headroom: the delay lines are sized from it.
-float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration) {
+float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration,
+                          const ListenerControls& controls = {}) {
     const double dur = duration > 0 ? duration : 600.0;
     const int steps = static_cast<int>(std::min(dur / 0.25, 4000.0)) + 1;
     float maxD = 1.0f;
@@ -113,7 +114,7 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
         images.push_back(computeImages(scene.room, l.position, lo));
     }
     for (int i = 0; i < steps; ++i) {
-        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1));
+        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1), controls);
         for (const auto& imgs : images)
             for (const auto& img : imgs) maxD = std::max(maxD, (img.position - p.position).length());
     }
@@ -121,31 +122,27 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
 }
 
 bool sameMaterial(const Material& a, const Material& b) {
-    return a.name == b.name && a.absorption == b.absorption && a.scattering == b.scattering &&
-           a.transmission == b.transmission;
+    return a.name == b.name && a.absorption == b.absorption && a.scattering == b.scattering && a.transmission == b.transmission;
 }
 
 bool sameMesh(const MeshGeometry& a, const MeshGeometry& b) {
-    if (a.vertices.size() != b.vertices.size() || a.triangles != b.triangles ||
-        a.materialIndices != b.materialIndices || a.materials.size() != b.materials.size())
+    if (a.vertices != b.vertices || a.triangles != b.triangles || a.materialIndices != b.materialIndices ||
+        a.materials.size() != b.materials.size())
         return false;
-    for (size_t i = 0; i < a.vertices.size(); ++i)
-        if (!(a.vertices[i] == b.vertices[i])) return false;
     for (size_t i = 0; i < a.materials.size(); ++i)
         if (!sameMaterial(a.materials[i], b.materials[i])) return false;
     return true;
 }
 
-bool sameObjects(const std::vector<SceneObject>& a, const std::vector<SceneObject>& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i)
-        if (!(a[i].minCorner == b[i].minCorner) || !(a[i].maxCorner == b[i].maxCorner) ||
-            !sameMaterial(a[i].material, b[i].material))
-            return false;
-    return true;
+bool sameObject(const SceneObject& a, const SceneObject& b) {
+    return a.name == b.name && a.minCorner == b.minCorner && a.maxCorner == b.maxCorner && sameMaterial(a.material, b.material);
 }
 
 bool sameRoom(const Room& a, const Room& b) {
+    // Geometry feeds the ray tracer's scene, which is built once per Renderer.
+    if (a.meshFile != b.meshFile || !sameMesh(a.mesh, b.mesh) || a.objects.size() != b.objects.size()) return false;
+    for (size_t i = 0; i < a.objects.size(); ++i)
+        if (!sameObject(a.objects[i], b.objects[i])) return false;
     if (a.type != b.type || !(a.size == b.size) || !(a.origin == b.origin) || a.reflectionOrder != b.reflectionOrder ||
         a.reflectionsLevelDb != b.reflectionsLevelDb || a.reverbLevelDb != b.reverbLevelDb ||
         a.reverbTimeScale != b.reverbTimeScale || a.reflectionsEnabled != b.reflectionsEnabled ||
@@ -153,8 +150,7 @@ bool sameRoom(const Room& a, const Room& b) {
         return false;
     for (int w = 0; w < kNumWalls; ++w)
         if (!sameMaterial(a.materials[w], b.materials[w])) return false;
-    // Geometry the ray tracer was built from.
-    return a.meshFile == b.meshFile && sameMesh(a.mesh, b.mesh) && sameObjects(a.objects, b.objects);
+    return true;
 }
 
 bool sameEnvironment(const Environment& a, const Environment& b) {
@@ -312,7 +308,7 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
         }
     }
 
-    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration);
+    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration, listenerControls);
     air = AirAbsorptionTable(scene.environment, fs, maxDistance + 5.0f, 1.0f);
     if (scene.environment.airAbsorption) {
         const float f[3] = {250.0f, 1000.0f, 4000.0f};
@@ -892,7 +888,7 @@ std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
     auto u = std::make_unique<SceneUpdate>();
     u->scene = scene;
     u->poses = PoseEvaluator(scene, im.duration > 0 ? im.duration : 600.0);
-    if (estimateMaxDistance(scene, u->poses, im.duration) > im.maxDistance) return nullptr;
+    if (estimateMaxDistance(scene, u->poses, im.duration, im.listenerControls) > im.maxDistance) return nullptr;
     return u;
 }
 

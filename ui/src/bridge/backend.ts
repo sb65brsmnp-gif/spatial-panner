@@ -19,6 +19,7 @@ export interface EngineInfo {
   cpu: number;           // fraction of the audio callback budget
   output: OutputConfig;
   status: string;        // human-readable engine state ("Playing", "Loading audio...")
+  steamAudio?: boolean;  // the engine has the ray-traced room model (mesh rooms, objects)
   host?: 'plugin';
   tracks?: { id: string; name: string }[];  // plugin: the tracks running a layer instance
 }

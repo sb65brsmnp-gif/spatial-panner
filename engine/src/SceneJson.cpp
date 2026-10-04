@@ -268,12 +268,13 @@ Room roomFromJson(const json& j, const std::string& baseDir) {
             const Material all = materialFromJson(m);
             for (auto& w : r.materials) w = all;
         } else {
-            for (int w = 0; w < kNumWalls; ++w)
-                if (m.contains(wallKey(w))) r.materials[w] = materialFromJson(m.at(wallKey(w)));
+            // "walls" sets all four side walls; a named wall overrides it.
             if (m.contains("walls")) {
                 const Material walls = materialFromJson(m.at("walls"));
                 for (int w : {WallNegX, WallPosX, WallNegZ, WallPosZ}) r.materials[w] = walls;
             }
+            for (int w = 0; w < kNumWalls; ++w)
+                if (m.contains(wallKey(w))) r.materials[w] = materialFromJson(m.at(wallKey(w)));
         }
     }
     r.reflectionOrder = j.value("reflection_order", r.reflectionOrder);

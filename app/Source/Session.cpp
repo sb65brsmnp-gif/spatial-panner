@@ -1,6 +1,7 @@
 #include "Session.h"
 
 #include <cmath>
+#include <thread>
 
 #include "sp/SceneJson.h"
 
@@ -176,6 +177,10 @@ void Session::startBuild() {
             auto cfg = makeConfig(out, rate);
             if (cfg.mode == sp::OutputMode::Binaural && cfg.hrtfPath.empty()) throw std::runtime_error("HRTF file (sadie_d1.sofa) not found next to the app");
             cfg.maxDistance = editHeadroomDistance(scene);
+            // Live playback: ray-trace reflections on a worker thread, never in
+            // the audio callback, and leave cores for the audio and the UI.
+            cfg.steam.asyncSimulation = true;
+            cfg.steam.threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
             r = std::make_shared<sp::Renderer>(scene, cfg, dur > 0 ? dur : 600.0);
         } catch (const std::exception& e) {
             err = e.what();

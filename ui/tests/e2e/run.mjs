@@ -1,13 +1,18 @@
 // End-to-end test of the editor in a browser against the dev server (which
 // uses the engine's sp-scene tool for analysis). Run: npm run e2e
-// Needs the CMake build (build/tools/scene/sp-scene) and Playwright's Chromium.
+// Needs the CMake build (build/tools/scene/sp-scene), the demo signals
+// (build/tools/gensignals/sp-gensignals signals) and Playwright's Chromium.
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+if (!existsSync(resolve(root, '../signals/voice.wav'))) {
+  console.error('Missing demo signals: run build/tools/gensignals/sp-gensignals signals from the repository root.');
+  process.exit(1);
+}
 const outDir = process.env.E2E_OUT ?? resolve(root, 'test-results');
 mkdirSync(outDir, { recursive: true });
 
@@ -250,6 +255,32 @@ await check('demo scene opens and its path matches the engine', async () => {
   assert(Math.abs(a.arrival_time - 22) < 0.5, `arrival ${a.arrival_time}`);
   await page.waitForTimeout(300);
   await page.screenshot({ path: resolve(outDir, 'room_walk.png') });
+});
+
+await check('a scene with objects shows them in the view and the Room tab', async () => {
+  await page.goto('http://localhost:5199/?scene=occluder.json');
+  await page.waitForFunction(() => window.spEditor?.store.scene.room.objects?.length === 3);
+  await waitAnalysis();
+  const o = await ed(() => window.spEditor.store.scene.room.objects[0]);
+  assert(o.name === 'partition wall' && Math.abs(o.max[0] + 1.9) < 1e-3, JSON.stringify(o));
+  await page.click('.tab:has-text("Room")');
+  await page.waitForSelector('text=partition wall');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: resolve(outDir, 'occluder.png') });
+});
+
+await check('a mesh room opens from its OBJ file and is drawn from the engine', async () => {
+  await page.goto('http://localhost:5199/?scene=lshape.json');
+  await page.waitForFunction(() => window.spEditor?.store.scene.room.type === 'mesh');
+  await waitAnalysis();
+  const mesh = await ed(() => window.spEditor.store.scene.room.mesh);
+  assert(mesh.file.endsWith('/scenes/lshape.obj'), JSON.stringify(mesh));
+  const tris = await ed(() => window.spEditor.store.analysis.room_mesh?.triangles.length ?? 0);
+  assert(tris > 10, `triangles ${tris}`);
+  const lines = await ed(() => window.spEditor.view.roomGroup.children.filter((c) => c.type === 'LineSegments').length);
+  assert(lines >= 1, 'mesh edges not drawn');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: resolve(outDir, 'lshape.png') });
 });
 
 if (errors.length) { failed++; console.log('Page errors:\n' + errors.join('\n')); }

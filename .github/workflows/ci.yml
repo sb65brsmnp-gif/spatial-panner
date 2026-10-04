@@ -42,6 +42,9 @@ jobs:
       - name: Test (engine, app session, plugin)
         run: ctest --test-dir build --output-on-failure
 
+      - name: Generate the demo signals (used by the demos and the editor tests)
+        run: ./build/tools/gensignals/sp-gensignals signals --seconds 6
+
       - name: Check the plugin is a universal binary
         if: runner.os == 'macOS'
         run: lipo -info "build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component/Contents/MacOS/Spatial Panner" | grep -q "x86_64 arm64\|arm64 x86_64"
@@ -71,20 +74,38 @@ jobs:
 
       - name: Render a demo
         run: |
-          ./build/tools/gensignals/sp-gensignals signals --seconds 6
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
           ./build/tools/render/sp-render scenes/occluder.json -o occluder.wav --duration 4 --steam-threads 2 --bench --normalize
+
+      - name: Package the macOS app with the demo scenes
+        if: runner.os == 'macOS'
+        run: |
+          pkg="build/package/Spatial Panner"
+          mkdir -p "$pkg"
+          ditto "build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app" "$pkg/Spatial Panner.app"
+          cp -R scenes "$pkg/scenes"
+          ./build/tools/gensignals/sp-gensignals "$pkg/signals" --seconds 40
+          # ditto keeps the executable bits and the code signature, which the
+          # artifact upload alone would drop.
+          (cd build/package && ditto -c -k --keepParent "Spatial Panner" Spatial-Panner-macOS.zip)
 
       - name: Upload the macOS app
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: spatial-panner-macos
-          path: build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app
+          path: build/package/Spatial-Panner-macOS.zip
+
+      - name: Package the Audio Unit
+        if: runner.os == 'macOS'
+        run: |
+          # ditto keeps the executable bits and the signature (see the app above).
+          (cd "build/plugin/SpatialPannerPlugin_artefacts/Release/AU" && \
+            ditto -c -k --keepParent "Spatial Panner.component" "$GITHUB_WORKSPACE/build/package/Spatial-Panner-AU.zip")
 
       - name: Upload the Audio Unit
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: spatial-panner-au
-          path: build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component
+          path: build/package/Spatial-Panner-AU.zip

@@ -194,6 +194,8 @@ store.subscribe((kinds) => {
     if (kinds.has('selection')) { view.updateLayers(); view.rebuildPaths(); }
     if (kinds.has('analysis')) view.rebuildPaths();
   }
+  // A mesh room is drawn from the analysis, which arrives after the scene.
+  if (kinds.has('analysis') && store.scene.room.type === 'mesh') view.rebuildRoom();
   if (kinds.has('meters')) view.updateMeters();
   if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
