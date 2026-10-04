@@ -1,0 +1,35 @@
+{
+  "name": "Standing still in the room: head turns left, right, then looks up and down",
+  "duration": 24,
+  "layers": [
+    {"name": "voice",  "audio": "../signals/voice.wav",  "position": [-2.0, 1.6, -3.0], "level_db": -5,
+     "directivity": 0.6, "directivity_forward": [0.55, 0, 0.83], "loop": true},
+    {"name": "clicks", "audio": "../signals/clicks.wav", "position": [3.0, 1.6, 0.5], "level_db": -9, "loop": true},
+    {"name": "pluck",  "audio": "../signals/pluck.wav",  "position": [1.0, 1.4, 4.0], "level_db": -7, "loop": true},
+    {"name": "bell",   "audio": "../signals/bell.wav",   "position": [0.0, 3.3, -1.5], "level_db": -9, "loop": true}
+  ],
+  "room": {
+    "type": "box", "size": [12, 3.5, 16],
+    "materials": {"walls": "plaster", "back": "curtain", "floor": "wood_floor", "ceiling": "acoustic_tile"},
+    "reflection_order": 2
+  },
+  "listener": {
+    "static_position": [0, 1.7, 0],
+    "head": {
+      "mode": "keyframed",
+      "keys": [
+        {"time": 0,  "yaw": 0,   "pitch": 0},
+        {"time": 3,  "yaw": 0,   "pitch": 0},
+        {"time": 6,  "yaw": 90,  "pitch": 0},
+        {"time": 8,  "yaw": 90,  "pitch": 0},
+        {"time": 12, "yaw": -90, "pitch": 0},
+        {"time": 14, "yaw": -90, "pitch": 0},
+        {"time": 16, "yaw": 0,   "pitch": 0},
+        {"time": 18, "yaw": 0,   "pitch": 45},
+        {"time": 20, "yaw": 0,   "pitch": 45},
+        {"time": 22, "yaw": 0,   "pitch": -30},
+        {"time": 24, "yaw": 0,   "pitch": 0}
+      ]
+    }
+  }
+}

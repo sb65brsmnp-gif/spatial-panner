@@ -1,0 +1,16 @@
+{
+  "name": "Fly-by: listener passes a running engine at 25 m/s (Doppler, air absorption, ground reflection)",
+  "duration": 11,
+  "layers": [
+    {"name": "engine", "audio": "../signals/engine.wav", "position": [0, 0.8, 0], "level_db": -2, "loop": true},
+    {"name": "clicks", "audio": "../signals/clicks.wav", "position": [45, 1.5, -9], "level_db": 0, "loop": true},
+    {"name": "bell",   "audio": "../signals/bell.wav",   "position": [-30, 2.0, 12], "level_db": 2, "loop": true}
+  ],
+  "room": {"type": "outdoor", "materials": "asphalt"},
+  "listener": {
+    "path": {"type": "line", "points": [[-120, 1.7, -3], [120, 1.7, -3]]},
+    "speed": 25,
+    "head": {"mode": "along_path"}
+  },
+  "environment": {"temperature_c": 20, "humidity": 50}
+}
