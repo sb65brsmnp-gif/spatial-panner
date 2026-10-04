@@ -3,6 +3,8 @@
 
 #include <cmath>
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include "BinaryData.h"
 #include "SceneDoc.h"
 #include "sp/Pose.h"
@@ -62,6 +64,33 @@ void relativiseMeshPath(json& scene, const juce::File& dir) {
     if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) m["file"] = rel.replaceCharacter('\\', '/').toStdString();
 }
 
+// The room's impulse response: the engine makes the path absolute when it
+// reads the file; saving makes it relative again.
+void relativiseIrPath(json& scene, const juce::File& dir) {
+    if (!scene.contains("room") || !scene["room"].contains("impulse_response")) return;
+    json& ir = scene["room"]["impulse_response"];
+    if (!ir.is_object() || !ir.contains("file") || !ir["file"].is_string()) return;
+    const std::string f = ir["file"].get<std::string>();
+    if (f.empty()) { scene["room"].erase("impulse_response"); return; }
+    if (!juce::File::isAbsolutePath(f)) return;
+    const auto rel = juce::File(f).getRelativePathFrom(dir);
+    if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) ir["file"] = rel.replaceCharacter('\\', '/').toStdString();
+}
+
+// Header of an audio file (for the Room tab's impulse response readout).
+json audioInfoJson(const juce::File& f) {
+    json j{{"path", f.getFullPathName().toStdString()}, {"name", f.getFileNameWithoutExtension().toStdString()},
+           {"duration", 0.0}, {"channels", 0}, {"sampleRate", 0}};
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(f));
+    if (!r) { j["error"] = f.existsAsFile() ? "unsupported audio format" : "file not found"; return j; }
+    j["duration"] = r->sampleRate > 0 ? r->lengthInSamples / r->sampleRate : 0.0;
+    j["channels"] = static_cast<int>(r->numChannels);
+    j["sampleRate"] = r->sampleRate;
+    return j;
+}
+
 }  // namespace
 
 // ============================================================ 3D editor (scene)
@@ -82,7 +111,7 @@ public:
                                }
                                return std::nullopt;
                            });
-        const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles",
+        const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                                "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm"};
         for (const char* n : names) {
             const std::string name = n;
@@ -191,7 +220,14 @@ private:
         }
         if (name == "openScene") { openScene(done); return; }
         if (name == "saveScene") { saveScene(a, done); return; }
-        if (name == "audioInfo" || name == "chooseAudioFiles") { done("[]"); return; }
+        if (name == "chooseAudioFiles") { done("[]"); return; }  // tracks supply the audio
+        if (name == "audioInfo") {
+            json out = json::array();
+            for (const auto& p : a.value("paths", std::vector<std::string>{})) out.push_back(audioInfoJson(juce::File(juce::String::fromUTF8(p.c_str()))));
+            done(out.dump());
+            return;
+        }
+        if (name == "chooseFile") { chooseFile(a, done); return; }
         if (name == "bounce") {
             message("Bounce from Logic (File > Bounce): every track renders its own layer.");
             done("null");
@@ -199,6 +235,19 @@ private:
         }
         if (name == "setOutput") { done(json{{"ok", true}}.dump()); return; }
         done("");  // transport, showAudioSettings: Logic owns these
+    }
+
+    // One file of any kind: {"title", "wildcard"} -> {"path", "name"} or null.
+    void chooseFile(const json& a, std::function<void(std::string)> done) {
+        chooser_ = std::make_unique<juce::FileChooser>(juce::String::fromUTF8(a.value("title", "Choose a file").c_str()), lastDir_,
+                                                       juce::String::fromUTF8(a.value("wildcard", "*").c_str()));
+        chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [this, done](const juce::FileChooser& fc) {
+                                  const auto f = fc.getResult();
+                                  if (f == juce::File()) { done("null"); return; }
+                                  lastDir_ = f.getParentDirectory();
+                                  done(json{{"path", f.getFullPathName().toStdString()}, {"name", f.getFileNameWithoutExtension().toStdString()}}.dump());
+                              });
     }
 
     void openScene(std::function<void(std::string)> done) {
@@ -229,6 +278,7 @@ private:
                 sp::sceneFromJson(scene.dump());
                 relativiseAudioPaths(scene, f.getParentDirectory());
                 relativiseMeshPath(scene, f.getParentDirectory());
+                relativiseIrPath(scene, f.getParentDirectory());
                 if (!f.replaceWithText(juce::String::fromUTF8(scene.dump(2).c_str()) + "\n"))
                     throw std::runtime_error("Cannot write " + f.getFullPathName().toStdString());
                 lastDir_ = f.getParentDirectory();

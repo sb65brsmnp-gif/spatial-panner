@@ -78,6 +78,20 @@ void relativiseMeshPath(json& scene, const juce::File& dir) {
     if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) m["file"] = rel.replaceCharacter('\\', '/').toStdString();
 }
 
+// The room's impulse response follows the audio rule too. The engine makes
+// the path absolute when it reads the file (sceneFromJson with the scene's
+// directory), so only saving needs a hand.
+void relativiseIrPath(json& scene, const juce::File& dir) {
+    if (!scene.contains("room") || !scene["room"].contains("impulse_response")) return;
+    json& ir = scene["room"]["impulse_response"];
+    if (!ir.is_object() || !ir.contains("file") || !ir["file"].is_string()) return;
+    const std::string f = ir["file"].get<std::string>();
+    if (f.empty()) { scene["room"].erase("impulse_response"); return; }
+    if (!juce::File::isAbsolutePath(f)) return;
+    const auto rel = juce::File(f).getRelativePathFrom(dir);
+    if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) ir["file"] = rel.replaceCharacter('\\', '/').toStdString();
+}
+
 }  // namespace
 
 Bridge::Bridge(Session& s, juce::AudioDeviceManager& d) : session_(s), devices_(d) {
@@ -134,6 +148,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         return out.dump();
     }
     if (name == "chooseAudioFiles" && async) { chooseAudioFiles(async); return {}; }
+    if (name == "chooseFile" && async) { chooseFile(a, async); return {}; }
     if (name == "openScene" && async) { openScene(async); return {}; }
     if (name == "saveScene" && async) { saveScene(arg, async); return {}; }
     if (name == "bounce" && async) { bounce(arg, async); return {}; }
@@ -155,14 +170,15 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
 }
 
 juce::WebBrowserComponent::Options Bridge::addTo(juce::WebBrowserComponent::Options o) {
-    const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles",
+    const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                            "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile"};
     for (const char* n : names) {
         const std::string name = n;
         o = o.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args, Completion done) {
             const std::string arg = args.isEmpty() ? std::string() : args[0].toString().toStdString();
             auto finish = [done](std::string r) { done(juce::var(juce::String(r))); };
-            const bool isAsync = name == "chooseAudioFiles" || name == "openScene" || name == "saveScene" || name == "bounce" || name == "confirm";
+            const bool isAsync = name == "chooseAudioFiles" || name == "chooseFile" || name == "openScene" || name == "saveScene" ||
+                                 name == "bounce" || name == "confirm";
             try {
                 if (isAsync) call(name, arg, finish);
                 else finish(call(name, arg));
@@ -228,6 +244,20 @@ void Bridge::chooseAudioFiles(std::function<void(std::string)> done) {
                  }, done);
 }
 
+// One file of any kind: {"title", "wildcard"} -> {"path", "name"} or null.
+void Bridge::chooseFile(const json& a, std::function<void(std::string)> done) {
+    const juce::String title = juce::String::fromUTF8(a.value("title", "Choose a file").c_str());
+    const juce::String wildcard = juce::String::fromUTF8(a.value("wildcard", "*").c_str());
+    beginChooser(std::make_unique<juce::FileChooser>(title, lastDir_, wildcard),
+                 juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                 [this, done](const juce::FileChooser& fc) {
+                     const auto f = fc.getResult();
+                     if (f == juce::File()) { done("null"); return; }
+                     lastDir_ = f.getParentDirectory();
+                     done(json{{"path", f.getFullPathName().toStdString()}, {"name", f.getFileNameWithoutExtension().toStdString()}}.dump());
+                 }, done);
+}
+
 void Bridge::openScene(std::function<void(std::string)> done) {
     beginChooser(std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.json"),
                  juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
@@ -267,6 +297,7 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
             sp::sceneFromJson(scene.dump());  // validate before writing
             relativiseAudioPaths(scene, f.getParentDirectory());
             relativiseMeshPath(scene, f.getParentDirectory());
+            relativiseIrPath(scene, f.getParentDirectory());
             if (!f.replaceWithText(juce::String(scene.dump(2)) + "\n")) throw std::runtime_error("Cannot write " + f.getFullPathName().toStdString());
             lastDir_ = f.getParentDirectory();
             done(json{{"path", f.getFullPathName().toStdString()}}.dump());

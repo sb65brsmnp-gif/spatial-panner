@@ -82,13 +82,39 @@ edits the selected key's value and easing. Mouse wheel zooms. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
-**Room**: box size and centre, wall materials (absorption per band),
-reflections and their level, reverb and decay, air temperature and humidity;
-or no room (free field). Scenes can also carry a mesh room (an OBJ file, as in
-`scenes/lshape.json`) and box objects such as partitions and pillars (as in
-`scenes/occluder.json`); the editor draws them, lists them on the Room tab and
-plays them through the engine's ray-traced back-end (Steam Audio), but they
-are set in the scene file, not placed in the editor yet.
+**Room**: box size and centre, wall materials (absorption per band), air
+temperature and humidity; or no room (free field). *Early reflections* has
+the on/off, the reflection order and a level slider; *Late reverb* has the
+on/off, a level slider, and the choice between the built-in reverb (with its
+decay multiplier) and an impulse response. Both levels are trims on a
+calibrated model: at 0 dB the room is as loud as a room of that size and
+those materials should be, so a scene with "too much room" is turned down
+here rather than by moving layers. Scenes can also carry a mesh room (an OBJ
+file, as in `scenes/lshape.json`) and box objects such as partitions and
+pillars (as in `scenes/occluder.json`); the editor draws them, lists them on
+the Room tab and plays them through the engine's ray-traced back-end (Steam
+Audio), but they are set in the scene file, not placed in the editor yet.
+
+**Impulse response reverb**: choose *Impulse response (WAV)* under Late
+reverb and press *Load IR…* to pick a WAV (any sample rate and bit depth;
+8/16/24/32-bit PCM or float). The tab shows the file's channel count,
+length and rate and how it is played: a mono file becomes a diffuse field
+around the listener, a stereo file two broad sources left and right of the
+head, a 4-channel file first-order ambiX (ACN/SN3D) fixed to the room, so it
+stays put when the head turns. *Channels* overrides that reading (a stereo
+file can be summed to mono, for instance). The IR replaces only the late
+tail: the engine's own early reflections of each layer keep running on top,
+and they move with the layers; if the recording already contains the room's
+first reflections, switch *Early reflections* off. The IR is normalised to
+the room's calibrated reverb level (so the Level slider still works as a
+trim) and *IR gain* trims it further. The tail arrives 4.7 ms (224 samples)
+later than the built-in reverb would, which is inaudible in a reverb but is
+reported by the engine. Changing or reloading the IR restarts the room
+model, like any other room change. Two synthetic test IRs come with the
+signals (`sp-gensignals` writes `hall_ir.wav`, stereo 2.5 s, and
+`plate_ir.wav`, mono 1.4 s); real room recordings in WAV form, mono, stereo
+or first-order ambiX, work the same way. The scene file stores the IR path
+relative to the scene, like audio.
 
 **Output**: binaural (SADIE II KU100 HRTF), speakers (stereo, quad, 5.1, 7.1,
 5.1.4, 7.1.4, 9.1.6, mapped onto the device's first outputs) or ambiX. Changes

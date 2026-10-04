@@ -36,6 +36,7 @@ private:
 
     void emit(const juce::Identifier& id, const std::string& json);
     void chooseAudioFiles(std::function<void(std::string)> done);
+    void chooseFile(const nlohmann::json& args, std::function<void(std::string)> done);
     void openScene(std::function<void(std::string)> done);
     std::string readScene(const juce::File& f);
     void saveScene(const std::string& arg, std::function<void(std::string)> done);

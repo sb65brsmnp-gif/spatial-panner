@@ -13,8 +13,10 @@
 #include "dsp/Fft.h"
 #include "dsp/Filters.h"
 #include "dsp/Hrtf.h"
+#include "dsp/IrReverb.h"
 #include "dsp/Panning.h"
 #include "dsp/RoomAcoustics.h"
+#include "dsp/WavReader.h"
 #ifdef SP_HAVE_STEAM_AUDIO
 #include "SteamAudioBackend.h"
 #endif
@@ -158,6 +160,10 @@ bool sameRoom(const Room& a, const Room& b) {
         a.reverbTimeScale != b.reverbTimeScale || a.reflectionsEnabled != b.reflectionsEnabled ||
         a.reverbEnabled != b.reverbEnabled)
         return false;
+    // The impulse response is loaded and partitioned once per Renderer.
+    const ImpulseResponse& ia = a.impulseResponse;
+    const ImpulseResponse& ib = b.impulseResponse;
+    if (ia.file != ib.file || ia.gainDb != ib.gainDb || ia.channels != ib.channels || ia.enabled != ib.enabled) return false;
     for (int w = 0; w < kNumWalls; ++w)
         if (!sameMaterial(a.materials[w], b.materials[w])) return false;
     return true;
@@ -212,7 +218,10 @@ struct Renderer::Impl {
     std::vector<PartitionedFilter> ambiBinPart;  // [ear * nSh + c]
     std::vector<SpectralInput> busIn;            // per SH channel
     Fdn fdn;
-    bool fdnEnabled = false;
+    bool fdnEnabled = false;      // the built-in late reverb runs
+    IrReverb irReverb;
+    bool useIr = false;           // a loaded impulse response is the late reverb instead
+    bool lateReverb = false;      // either: the reverb send is live
     RoomStats roomStats;
     float reverbTotalEnergy = 0;  // 16 pi / R (mid band), relative to a 1 m direct path
     float reflGain = 1, reverbTrim = 1;
@@ -374,11 +383,34 @@ void Renderer::Impl::initRoom() {
             fp.rt60Mid = bandAverage(roomStats.rt60, 2, 3);
             fp.rt60High = bandAverage(roomStats.rt60, 4, 5);
             fp.meanFreePathSeconds = roomStats.meanFreePath / speedOfSound;
-            fp.preDelaySeconds = roomStats.meanFreePath * (room.reflectionOrder + 0.5f) / speedOfSound;
+            // The tail stands in for every reflection beyond the modelled
+            // order, plus what the modelled walls scatter: it starts between
+            // the modelled images, and the input allpasses smear its onset.
+            fp.preDelaySeconds = roomStats.meanFreePath * (0.5f * room.reflectionOrder + 0.5f) / speedOfSound;
             fp.ambiOrder = order;
             fdn.init(fp);
         }
+        // An impulse response replaces the FDN as the tail (same send, same
+        // level logic); if it fails to load, say so and keep the FDN.
+        if (fdnEnabled && room.impulseResponse.active()) {
+            try {
+                const WavData wav = readWav(room.impulseResponse.file);
+                IrReverbSpec is;
+                is.sampleRate = fs;
+                is.subBlock = B;
+                is.blockSize = std::max(cfg.irBlockSize, B);
+                is.ambiOrder = order;
+                irReverb.init(wav.channels, static_cast<float>(wav.info.sampleRate), room.impulseResponse.channels,
+                              room.impulseResponse.gainDb, is);
+                useIr = true;
+                fdnEnabled = false;
+            } catch (const std::exception& e) {
+                note = "impulse response '" + room.impulseResponse.file + "' not used (" + e.what() + "); using the built-in reverb";
+                useIr = false;
+            }
+        }
     }
+    lateReverb = fdnEnabled || useIr;
 }
 
 float Renderer::Impl::estimateIrSeconds() const {
@@ -467,7 +499,7 @@ void Renderer::Impl::initBackend() {
     }
 #endif
     backend = useSteam ? ReflectionsBackend::SteamAudio : ReflectionsBackend::Builtin;
-    if (useSteam) fdnEnabled = false;  // the traced IR carries the whole tail
+    if (useSteam) fdnEnabled = useIr = lateReverb = false;  // the traced IR carries the whole tail
 }
 
 // Where a voice should sit: the layer position, or a stereo layer's left or
@@ -638,7 +670,10 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
             g *= (1.0f - 0.5f * k) + 0.5f * k * cosTheta;
         }
         if (!t.isDirect) {
-            g *= reflGain;
+            // Only the specular share of a scattering wall stays in the image;
+            // the rest reaches the diffuse field through the reverb send below
+            // (it is missing from imageEnergy, so lateE picks it up).
+            g *= reflGain * t.image.specular;
             const float midRefl = bandAverage(t.image.reflectance, 2, 3);
             imageEnergy += (g * midRefl) * (g * midRefl);
         }
@@ -665,7 +700,7 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
 
     // Late reverb send: what the diffuse field should carry beyond the
     // modelled early reflections.
-    if (fdnEnabled && !muted) {
+    if (lateReverb && !muted) {
         const float totalE = reverbTotalEnergy * refGain * refGain;
         const float lateE = std::max(totalE - imageEnergy, 0.15f * totalE);
         v.sendTarget = std::sqrt(lateE) * dbToGain(L.reverbSendDb) * reverbTrim;
@@ -840,8 +875,11 @@ void Renderer::Impl::renderSubBlock(double time) {
     }
 #endif
 
-    // Late reverb into the bus.
-    if (fdnEnabled) {
+    // Late reverb into the bus: the loaded impulse response (convolved in
+    // irBlockSize blocks, so it lags by irReverb.latency() samples) or the FDN.
+    if (useIr) {
+        irReverb.process(revIn.data(), pose.orientation, bus.data());
+    } else if (fdnEnabled) {
         float amb[kMaxAmbiChannels];
         for (int i = 0; i < B; ++i) {
             std::fill(amb, amb + nSh, 0.0f);
@@ -901,6 +939,7 @@ void Renderer::Impl::resetState() {
     }
     for (auto& b : busIn) b.clear();
     if (fdnEnabled) fdn.reset();
+    if (useIr) irReverb.reset();
 #ifdef SP_HAVE_STEAM_AUDIO
     if (steam) steam->reset();
 #endif
@@ -979,10 +1018,15 @@ Renderer::Stats Renderer::stats() const {
     Stats s;
     s.backend = impl_->backend;
     s.numImagesPerLayer = impl_->voices.empty() ? 0 : static_cast<int>(impl_->voices[0].taps.size()) - 1;
-    s.reverbRt60Mid = impl_->fdnEnabled ? bandAverage(impl_->roomStats.rt60, 2, 3) : 0.0f;
-    s.reverbGain = impl_->fdnEnabled ? std::sqrt(impl_->reverbTotalEnergy) : 0.0f;
+    s.reverbRt60Mid = impl_->lateReverb ? bandAverage(impl_->roomStats.rt60, 2, 3) : 0.0f;
+    s.reverbGain = impl_->lateReverb ? std::sqrt(impl_->reverbTotalEnergy) : 0.0f;
     s.maxDistance = impl_->maxDistance;
     s.irSeconds = impl_->steamIrSeconds;
+    if (impl_->useIr) {
+        s.irSeconds = impl_->irReverb.seconds();
+        s.irChannels = impl_->irReverb.channels();
+        s.reflectionLatency = impl_->irReverb.latency();
+    }
 #ifdef SP_HAVE_STEAM_AUDIO
     if (impl_->steam) {
         s.numTriangles = impl_->steam->numTriangles();

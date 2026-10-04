@@ -39,6 +39,8 @@ void usage() {
                  "  --normalize                      scale the output so its peak is -1 dBFS\n"
                  "  --bench                          print CPU usage (realtime factor)\n"
                  "  --no-reflections / --no-reverb   disable room parts\n"
+                 "  --ir FILE.wav                    use this impulse response as the late reverb (overrides the scene's)\n"
+                 "  --ir-gain DB / --ir-channels N   trim and interpretation (0 = from the file, 1 mono, 2 stereo, 4 ambiX)\n"
                  "  --reflections auto|builtin|steam reflections back-end (default auto: steam for mesh rooms/objects)\n"
                  "  --steam-rays N / --steam-bounces N   ray tracing effort (default 4096 / enough for the IR, max 96)\n"
                  "  --steam-block N                  reflection convolution block (default 256; smaller = costlier, less lag)\n"
@@ -70,7 +72,9 @@ int main(int argc, char** argv) {
     int order = 3, rate = 48000, block = 512;
     double duration = 0;
     bool floatOut = false, bench = false, noRefl = false, noReverb = false, normalize = false;
-    std::string reflections = "auto", steamReverb = "convolution";
+    std::string reflections = "auto", steamReverb = "convolution", irFile;
+    double irGain = 0;
+    int irChannels = -1;
     int steamRays = -1, steamBounces = -1, steamThreads = -1, steamBlock = -1;
     double steamIr = -1, steamInterval = -1;
     for (int i = 1; i < argc; ++i) {
@@ -92,6 +96,9 @@ int main(int argc, char** argv) {
         else if (a == "--bench") bench = true;
         else if (a == "--no-reflections") noRefl = true;
         else if (a == "--no-reverb") noReverb = true;
+        else if (a == "--ir") irFile = next("--ir");
+        else if (a == "--ir-gain") irGain = std::stod(next("--ir-gain"));
+        else if (a == "--ir-channels") irChannels = std::stoi(next("--ir-channels"));
         else if (a == "--reflections") reflections = next("--reflections");
         else if (a == "--steam-rays") steamRays = std::stoi(next("--steam-rays"));
         else if (a == "--steam-bounces") steamBounces = std::stoi(next("--steam-bounces"));
@@ -110,6 +117,12 @@ int main(int argc, char** argv) {
         Scene scene = loadSceneFile(scenePath);
         if (noRefl) scene.room.reflectionsEnabled = false;
         if (noReverb) scene.room.reverbEnabled = false;
+        if (!irFile.empty()) {
+            scene.room.impulseResponse.file = fs::absolute(irFile).string();
+            scene.room.impulseResponse.gainDb = static_cast<float>(irGain);
+            scene.room.impulseResponse.enabled = true;
+        }
+        if (irChannels >= 0) scene.room.impulseResponse.channels = irChannels;
 
         RenderConfig cfg;
         cfg.sampleRate = rate;
@@ -184,6 +197,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; Steam Audio reflections (%d triangles, IR %.2f s, %d rays x %d bounces every %.0f ms, block %d), delay line %.0f m\n",
                          modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numTriangles, st.irSeconds,
                          cfg.steam.rays, st.bounces, cfg.steam.updateInterval * 1000, cfg.steam.frameSize, st.maxDistance);
+        else if (st.irChannels > 0)
+            std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; built-in reflections, %d images/layer, impulse-response reverb (%d ch, %.2f s, %s, lags %d samples), delay line %.0f m\n",
+                         modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.irChannels, st.irSeconds,
+                         st.irChannels == 1 ? "mono, diffuse" : st.irChannels == 2 ? "stereo L/R" : "ambiX, world-fixed", st.reflectionLatency,
+                         st.maxDistance);
         else
             std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; built-in reflections, %d images/layer, RT60 mid %.2f s, delay line %.0f m\n",
                          modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.reverbRt60Mid,
