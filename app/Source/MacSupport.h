@@ -5,10 +5,12 @@
 
 namespace spapp {
 
-// The editor's WKWebView claims file drags for itself (and would navigate to
-// a dropped file). Unregistering it hands Finder drags to the JUCE window
-// around it, where MainComponent receives them with their full paths.
-// WebKit can register again (e.g. after a reload), so call this regularly.
+// The editor's WKWebView takes every drag that lands on it (its drag hit
+// test answers for any point in its frame, whatever types it registered),
+// and the page would only see dropped files without their paths. This hands
+// file drags to the JUCE window around it, where MainComponent receives them
+// with their full paths. Call it once the web view exists; calling again is
+// free, so the window's timer repeats it in case the view is recreated.
 void passFileDragsToWindow(juce::Component& windowContent);
 
 }  // namespace spapp
