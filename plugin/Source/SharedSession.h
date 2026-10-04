@@ -82,7 +82,7 @@ public:
     struct LayerInfo {
         int slot = -1;
         std::string id, name, cloneOf;
-        int channels = 1;      // the track's input channels: 1 (mono) or 2 (stereo)
+        int channels = 1;      // the track's input channels: 1 (mono), 2 (stereo), 4 (quad: a first-order Ambisonic layer), up to 16
         float meterPeak = 0;
         uint64_t heartbeatMs = 0;
     };

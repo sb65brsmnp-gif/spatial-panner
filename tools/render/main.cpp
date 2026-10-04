@@ -159,33 +159,64 @@ int main(int argc, char** argv) {
         // Load layer audio.
         const fs::path sceneDir = fs::absolute(scenePath).parent_path();
         // One buffer per renderer input: a layer's channels in order (a mono
-        // layer sums the file's channels; a stereo layer takes left and right).
+        // layer sums the file's channels; a stereo layer takes left and right;
+        // an Ambisonic layer takes all its channels from one file, or one mono
+        // file per channel from "audio_files").
         std::vector<std::vector<float>> audio(static_cast<size_t>(inputChannels(scene)));
         std::vector<size_t> firstInput(scene.layers.size());
         size_t longest = 0;
         for (size_t i = 0, input = 0; i < scene.layers.size(); ++i) {
             const Layer& l = scene.layers[i];
-            const int nch = std::max(1, std::min(l.channels, 2));
+            const int nch = layerInputs(l);
             firstInput[i] = input;
             input += static_cast<size_t>(nch);
-            if (l.audioFile.empty()) continue;
-            fs::path p = l.audioFile;
-            if (p.is_relative()) p = sceneDir / p;
-            tools::AudioFile f = tools::readWav(p.string());
-            for (int c = 0; c < nch; ++c) {
-                std::vector<float> ch(f.frames(), 0.0f);
-                if (nch == 1) {
-                    for (int fc = 0; fc < f.channels; ++fc)
-                        for (size_t n = 0; n < ch.size(); ++n) ch[n] += f.data[fc][n] / f.channels;
-                } else {
-                    ch = f.data[static_cast<size_t>(std::min(c, f.channels - 1))];
+            const auto resolve = [&](const std::string& file) {
+                fs::path p = file;
+                if (p.is_relative()) p = sceneDir / p;
+                return p;
+            };
+            std::string shown;
+            if (isAmbisonic(l) && !l.audioFiles.empty()) {
+                if (static_cast<int>(l.audioFiles.size()) != nch) {
+                    std::fprintf(stderr, "layer %s: %d-channel Ambisonic layer needs %d files in audio_files, has %zu\n",
+                                 l.name.c_str(), nch, nch, l.audioFiles.size());
+                    return 1;
                 }
-                audio[firstInput[i] + static_cast<size_t>(c)] = resampleLinear(ch, f.sampleRate, rate);
+                for (int c = 0; c < nch; ++c) {
+                    const fs::path p = resolve(l.audioFiles[static_cast<size_t>(c)]);
+                    tools::AudioFile f = tools::readWav(p.string());
+                    std::vector<float> ch(f.frames(), 0.0f);
+                    for (int fc = 0; fc < f.channels; ++fc)
+                        for (size_t n = 0; n < ch.size(); ++n) ch[n] += f.data[static_cast<size_t>(fc)][n] / f.channels;
+                    audio[firstInput[i] + static_cast<size_t>(c)] = resampleLinear(ch, f.sampleRate, rate);
+                    if (c == 0) shown = p.filename().string() + " + " + std::to_string(nch - 1) + " more";
+                }
+            } else {
+                if (l.audioFile.empty()) continue;
+                const fs::path p = resolve(l.audioFile);
+                tools::AudioFile f = tools::readWav(p.string());
+                if (isAmbisonic(l) && f.channels < nch) {
+                    std::fprintf(stderr, "layer %s: %d-channel Ambisonic layer, but %s has %d channels\n", l.name.c_str(), nch,
+                                 p.filename().string().c_str(), f.channels);
+                    return 1;
+                }
+                for (int c = 0; c < nch; ++c) {
+                    std::vector<float> ch(f.frames(), 0.0f);
+                    if (nch == 1) {
+                        for (int fc = 0; fc < f.channels; ++fc)
+                            for (size_t n = 0; n < ch.size(); ++n) ch[n] += f.data[static_cast<size_t>(fc)][n] / f.channels;
+                    } else {
+                        ch = f.data[static_cast<size_t>(std::min(c, f.channels - 1))];
+                    }
+                    audio[firstInput[i] + static_cast<size_t>(c)] = resampleLinear(ch, f.sampleRate, rate);
+                }
+                shown = p.filename().string();
             }
             const size_t end = static_cast<size_t>(l.startTime * rate) + audio[firstInput[i]].size();
             if (!l.loop) longest = std::max(longest, end);
-            std::fprintf(stderr, "layer %-16s %s (%.1f s%s)\n", l.name.c_str(), p.filename().string().c_str(),
-                         audio[firstInput[i]].size() / static_cast<double>(rate), nch == 2 ? ", stereo" : "");
+            std::fprintf(stderr, "layer %-16s %s (%.1f s%s)\n", l.name.c_str(), shown.c_str(),
+                         audio[firstInput[i]].size() / static_cast<double>(rate),
+                         isAmbisonic(l) ? (", Ambisonic order " + std::to_string(ambisonicOrder(l.channels))).c_str() : nch == 2 ? ", stereo" : "");
         }
         if (duration <= 0) duration = scene.duration;
         if (duration <= 0) duration = longest / static_cast<double>(rate);
@@ -221,7 +252,7 @@ int main(int argc, char** argv) {
             const int n = static_cast<int>(std::min<size_t>(block, totalFrames + latency - pos));
             for (size_t i = 0; i < scene.layers.size(); ++i) {
                 const Layer& l = scene.layers[i];
-                const int nch = std::max(1, std::min(l.channels, 2));
+                const int nch = layerInputs(l);
                 const long start = static_cast<long>(l.startTime * rate);
                 for (int c = 0; c < nch; ++c) {
                     const size_t in = firstInput[i] + static_cast<size_t>(c);

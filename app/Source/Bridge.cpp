@@ -34,24 +34,37 @@ std::string modeName(sp::OutputMode m) {
 
 // Audio paths are absolute in the editor and relative to the scene file on
 // disk (so scenes can move with their audio, and sp-render reads them too).
+void resolveAudioPath(json& a, const juce::File& dir) {
+    if (!a.is_string()) return;
+    const std::string s = a.get<std::string>();
+    if (s.empty() || juce::File::isAbsolutePath(s)) return;
+    a = dir.getChildFile(s).getFullPathName().toStdString();
+}
+
+void relativiseAudioPath(json& a, const juce::File& dir) {
+    if (!a.is_string()) return;
+    const std::string s = a.get<std::string>();
+    if (s.empty() || !juce::File::isAbsolutePath(s)) return;
+    const auto rel = juce::File(s).getRelativePathFrom(dir);
+    // Keep absolute paths for files on another volume or far away.
+    if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) a = rel.replaceCharacter('\\', '/').toStdString();
+}
+
 void resolveAudioPaths(json& scene, const juce::File& dir) {
     if (!scene.contains("layers")) return;
     for (auto& l : scene["layers"]) {
-        const std::string a = l.value("audio", "");
-        if (a.empty() || juce::File::isAbsolutePath(a)) continue;
-        l["audio"] = dir.getChildFile(a).getFullPathName().toStdString();
+        if (l.contains("audio")) resolveAudioPath(l["audio"], dir);
+        if (l.contains("audio_files") && l["audio_files"].is_array())
+            for (auto& f : l["audio_files"]) resolveAudioPath(f, dir);
     }
 }
 
 void relativiseAudioPaths(json& scene, const juce::File& dir) {
     if (!scene.contains("layers")) return;
     for (auto& l : scene["layers"]) {
-        const std::string a = l.value("audio", "");
-        if (a.empty() || !juce::File::isAbsolutePath(a)) continue;
-        const juce::File f(a);
-        const auto rel = f.getRelativePathFrom(dir);
-        // Keep absolute paths for files on another volume or far away.
-        if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) l["audio"] = rel.replaceCharacter('\\', '/').toStdString();
+        if (l.contains("audio")) relativiseAudioPath(l["audio"], dir);
+        if (l.contains("audio_files") && l["audio_files"].is_array())
+            for (auto& f : l["audio_files"]) relativiseAudioPath(f, dir);
     }
 }
 
@@ -147,7 +160,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         for (const auto& p : a.value("paths", std::vector<std::string>{})) out.push_back(audioInfoJson(session_.library().info(juce::String(p))));
         return out.dump();
     }
-    if (name == "chooseAudioFiles" && async) { chooseAudioFiles(async); return {}; }
+    if (name == "chooseAudioFiles" && async) { chooseAudioFiles(a, async); return {}; }
     if (name == "chooseFile" && async) { chooseFile(a, async); return {}; }
     if (name == "openScene" && async) { openScene(async); return {}; }
     if (name == "saveScene" && async) { saveScene(arg, async); return {}; }
@@ -230,8 +243,10 @@ bool Bridge::beginChooser(std::unique_ptr<juce::FileChooser> c, int flags, std::
     return true;
 }
 
-void Bridge::chooseAudioFiles(std::function<void(std::string)> done) {
-    beginChooser(std::make_unique<juce::FileChooser>("Add audio files as layers", lastDir_, kAudioWildcard),
+// {"title"?} -> [audio info, ...] in the order the files were chosen, or null.
+void Bridge::chooseAudioFiles(const json& a, std::function<void(std::string)> done) {
+    const juce::String title = juce::String::fromUTF8(a.value("title", "Add audio files as layers").c_str());
+    beginChooser(std::make_unique<juce::FileChooser>(title, lastDir_, kAudioWildcard),
                  juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles |
                      juce::FileBrowserComponent::canSelectMultipleItems,
                  [this, done](const juce::FileChooser& fc) {

@@ -15,6 +15,7 @@ add_library(sp_engine STATIC
   src/dsp/Hrtf.cpp
   src/dsp/Fdn.cpp
   src/dsp/IrReverb.cpp
+  src/dsp/SoundField.cpp
   src/dsp/Resampler.cpp
   src/dsp/WavReader.cpp
   src/dsp/RoomAcoustics.cpp

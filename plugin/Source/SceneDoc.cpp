@@ -80,6 +80,22 @@ int layerIndex(const json& doc, const std::string& hostId) {
     return -1;
 }
 
+// A layer whose channels come from a file the plugin plays itself (an
+// Ambisonic recording of a higher order than the track carries) keeps its
+// own channel count; every other layer has the track's.
+bool fileFed(const json& l) {
+    if (sp::ambisonicOrder(l.value("channels", 1)) < 1) return false;
+    if (!l.value("audio", std::string()).empty()) return true;
+    return l.contains("audio_files") && l["audio_files"].is_array() && !l["audio_files"].empty();
+}
+
+// Gives an Ambisonic layer (4, 9 or 16 channels) its sphere settings.
+bool completeAmbisonic(json& l) {
+    if (sp::ambisonicOrder(l.value("channels", 1)) < 1 || l.contains("ambisonic")) return false;
+    l["ambisonic"] = json{{"format", "ambix"}, {"radius", 3.0}, {"yaw", 0.0}, {"pitch", 0.0}, {"roll", 0.0}, {"room_send", false}};
+    return true;
+}
+
 bool reconcile(json& doc, const std::vector<SharedSession::LayerInfo>& live) {
     if (!doc.contains("layers") || !doc["layers"].is_array()) doc["layers"] = json::array();
     bool changed = false;
@@ -91,11 +107,13 @@ bool reconcile(json& doc, const std::vector<SharedSession::LayerInfo>& live) {
                 l["name"] = info.name;
                 changed = true;
             }
-            // A stereo track plays its layer as a left/right pair.
-            if (l.value("channels", 1) != info.channels) {
+            // A stereo track plays its layer as a left/right pair, a quad
+            // track as a first-order Ambisonic sphere.
+            if (!fileFed(l) && l.value("channels", 1) != info.channels) {
                 l["channels"] = info.channels;
                 changed = true;
             }
+            if (completeAmbisonic(l)) changed = true;
             continue;
         }
         auto& layers = doc["layers"];
@@ -127,7 +145,8 @@ bool reconcile(json& doc, const std::vector<SharedSession::LayerInfo>& live) {
         }
         layer["host_id"] = info.id;
         if (!info.name.empty()) layer["name"] = info.name;
-        layer["channels"] = info.channels;
+        if (!fileFed(layer)) layer["channels"] = info.channels;
+        completeAmbisonic(layer);
         layers.push_back(layer);
         changed = true;
     }

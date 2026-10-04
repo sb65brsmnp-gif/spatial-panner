@@ -47,7 +47,8 @@ export interface Backend {
   transport(cmd: { action: 'play' | 'pause' | 'stop' | 'seek' | 'loop'; time?: number; loop?: boolean }): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
-  chooseAudioFiles(): Promise<AudioInfo[]>;
+  // The native open dialog for audio files (several); `title` names the ask.
+  chooseAudioFiles(title?: string): Promise<AudioInfo[]>;
   // One file of any kind through the native open dialog (e.g. an impulse
   // response WAV); `wildcard` as JUCE takes it ("*.wav;*.aif"). null if cancelled.
   chooseFile(title: string, wildcard: string): Promise<{ path: string; name: string } | null>;
@@ -119,7 +120,7 @@ class AppBackend implements Backend {
   async transport(cmd: Parameters<Backend['transport']>[0]) { await this.call('transport', cmd); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
-  async chooseAudioFiles() { return (await this.call<AudioInfo[]>('chooseAudioFiles')) ?? []; }
+  async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
   chooseFile(title: string, wildcard: string) { return this.call<{ path: string; name: string } | null>('chooseFile', { title, wildcard }); }
   async audioInfo(paths: string[]) { return (await this.call<AudioInfo[]>('audioInfo', { paths })) ?? []; }
   openScene() { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('openScene'); }

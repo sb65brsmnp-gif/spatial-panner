@@ -33,7 +33,7 @@ std::shared_ptr<const LayerAudio> AudioLibrary::decode(juce::AudioFormatManager&
     if (!r) { error = juce::File(path).existsAsFile() ? "Unsupported audio format" : "File not found"; return nullptr; }
     const auto n = static_cast<int>(std::min<juce::int64>(r->lengthInSamples, std::numeric_limits<int>::max() / 2));
     const int fileCh = static_cast<int>(r->numChannels);
-    const int ch = std::min(fileCh, 2);  // mono, or left and right
+    const int ch = std::min(fileCh, 16);  // mono, left and right, or an Ambisonic recording (up to third order)
     juce::AudioBuffer<float> buf(fileCh, n);
     r->read(&buf, 0, n, 0, true, true);
     auto out = std::make_shared<LayerAudio>();

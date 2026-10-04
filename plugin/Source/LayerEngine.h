@@ -42,6 +42,7 @@ struct EngineConfig {
 class LayerEngine {
 public:
     static constexpr int kMaxOutputs = 16;
+    static constexpr int kMaxInputs = 16;   // an Ambisonic layer's channels (third order)
 
     LayerEngine();
     ~LayerEngine();
@@ -66,10 +67,11 @@ public:
 
     // ---- audio thread
     struct Block {
-        // The track's audio: one buffer for a mono layer, left and right for
-        // a stereo one (the renderer's inputs, see Renderer::inputIndex). Null
-        // buffers are silence.
-        const float* inputs[2] = {nullptr, nullptr};
+        // The layer's audio: one buffer for a mono layer, left and right for
+        // a stereo one, the recording's channels (ACN order) for an Ambisonic
+        // one (the renderer's inputs, see Renderer::inputIndex). Null buffers
+        // are silence.
+        const float* inputs[kMaxInputs] = {};
         int numInputs = 0;
         float* const* outputs = nullptr;
         int numOutputs = 0;

@@ -16,6 +16,7 @@
 #include "dsp/IrReverb.h"
 #include "dsp/Panning.h"
 #include "dsp/RoomAcoustics.h"
+#include "dsp/SoundField.h"
 #include "dsp/WavReader.h"
 #ifdef SP_HAVE_STEAM_AUDIO
 #include "SteamAudioBackend.h"
@@ -106,6 +107,33 @@ struct Voice {
     std::vector<float> spkCur, spkTarget;
 };
 
+// An Ambisonic layer: the recording's channels, delayed by the distance to
+// the sphere, mixed into the bus by the sound-field matrix (dsp/SoundField.h).
+struct FieldVoice {
+    const Layer* layer = nullptr;
+    int layerIndex = 0;
+    int inputIndex = 0;             // first input buffer; the layer's channels follow
+    int nIn = 4;                    // ACN channels in use (the file's order, or the bus order if lower)
+    int inOrder = 1;
+    std::array<int, kMaxAmbiChannels> inSource{};   // input buffer (relative) feeding each ACN channel
+    std::array<float, kMaxAmbiChannels> inGain{};   // its scale to N3D
+    std::vector<DelayLine> delay;   // one per ACN channel
+    float delayCur = 0, delayTarget = 0;
+    float distRef = 0;
+    float levelCur = 0, levelTarget = 0;
+    float sendCur = 0, sendTarget = 0;
+    std::vector<ShelfPair> colour;  // air absorption on the way from the sphere, per channel
+    LayerControls controls;
+    SoundFieldTransform transform;
+    std::vector<float> matCur, matTarget;   // nSh x nIn
+    bool haveMatrix = false;
+    int matrixAge = 0;
+    Vec3 lastOffset;
+    Quat lastRot;
+    float lastRadius = 0;
+    std::vector<float> work;        // nIn x B
+};
+
 // Longest path (direct or image) between any layer and the listener over the
 // timeline, plus headroom: the delay lines are sized from it.
 float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration,
@@ -116,7 +144,7 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
     const int ord = scene.room.type == RoomType::Box ? std::max(scene.room.reflectionOrder, 0) : 1;
     std::vector<std::vector<ImageSource>> images;
     for (const auto& l : scene.layers) {
-        const int lo = l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
+        const int lo = isAmbisonic(l) ? 0 : l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
         if (l.channels == 2) {
             const Vec3 d = stereoOffset(l.stereo.width, l.stereo.rotationDeg, l.stereo.elevationDeg);
             images.push_back(computeImages(scene.room, l.position - d, lo));
@@ -229,7 +257,9 @@ struct Renderer::Impl {
     std::vector<float> speakerDelaySamples, speakerGains;
     bool speakerCompensation = false;
 
-    std::vector<Voice> voices;
+    std::vector<Voice> voices;        // point emitters (mono layers, stereo ends)
+    std::vector<FieldVoice> fields;   // Ambisonic layers
+    int nInputs = 0;                  // inputChannels(scene)
 
     // Ray-traced back-end (Steam Audio). When active, the image-source taps
     // and the FDN are off; it supplies the reflected field and occlusion.
@@ -271,6 +301,8 @@ struct Renderer::Impl {
     float estimateIrSeconds() const;
     float meanFreePath() const;
     void computeTargets(Voice& v, const Pose& pose, double time);
+    void computeFieldTargets(FieldVoice& f, const Pose& pose);
+    void renderField(FieldVoice& f);
     void rebuildTaps(Voice& v, const Vec3& srcPos);
     void updateHrtf(Voice& v, const Vec3& rel, float dist);
     void renderSubBlock(double time);
@@ -360,7 +392,8 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
     tmpBlock.assign(B, 0.0f);
     tapBuf.assign(B, 0.0f);
     outBlock.assign(static_cast<size_t>(nOut) * B, 0.0f);
-    inFifo.assign(static_cast<size_t>(std::max(1, inputChannels(scene))) * B, 0.0f);
+    nInputs = inputChannels(scene);
+    inFifo.assign(static_cast<size_t>(std::max(1, nInputs)) * B, 0.0f);
     outFifo.assign(static_cast<size_t>(nOut) * B, 0.0f);
     fifoFill = 0;
     first = true;
@@ -483,7 +516,9 @@ void Renderer::Impl::initBackend() {
             st.sampleRate = fs;
             st.subBlock = B;
             st.ambiOrder = order;
-            st.numSources = inputChannels(scene);  // one ray-traced source per emitter
+            st.numSources = 0;  // one ray-traced source per point emitter (Ambisonic layers have none)
+            for (const auto& l : scene.layers)
+                if (!isAmbisonic(l)) st.numSources += layerInputs(l);
             st.steam = cfg.steam;
             st.irSeconds = cfg.steam.irSeconds > 0 ? cfg.steam.irSeconds : estimateIrSeconds();
             st.speedOfSound = speedOfSound;
@@ -516,17 +551,39 @@ Vec3 Renderer::Impl::emitterTarget(const Voice& v) const {
 
 void Renderer::Impl::initVoices() {
     voices.clear();
-    voices.resize(static_cast<size_t>(inputChannels(scene)));
+    fields.clear();
     const int maxDelay = static_cast<int>(maxDistance / speedOfSound * fs) + 16;
-    size_t vi = 0;
+    int input = 0;
     for (size_t li = 0; li < scene.layers.size(); ++li) {
-        const int nch = std::max(1, std::min(scene.layers[li].channels, 2));
-        for (int ch = 0; ch < nch; ++ch, ++vi) {
-            Voice& v = voices[vi];
-            v.layer = &scene.layers[li];
+        const Layer& L = scene.layers[li];
+        if (isAmbisonic(L)) {
+            FieldVoice f;
+            f.layer = &L;
+            f.layerIndex = static_cast<int>(li);
+            f.inputIndex = input;
+            // The bus carries `order`; a recording of a higher order is
+            // truncated to it (ACN puts the lower orders first).
+            f.inOrder = std::min(ambisonicOrder(L.channels), order);
+            f.nIn = ambiChannels(f.inOrder);
+            f.transform.init(f.inOrder, order);
+            f.delay.resize(static_cast<size_t>(f.nIn));
+            for (auto& d : f.delay) d.init(maxDelay);
+            f.colour.resize(static_cast<size_t>(f.nIn));
+            f.matCur.assign(static_cast<size_t>(nSh) * f.nIn, 0.0f);
+            f.matTarget.assign(static_cast<size_t>(nSh) * f.nIn, 0.0f);
+            f.work.assign(static_cast<size_t>(f.nIn) * B, 0.0f);
+            fields.push_back(std::move(f));
+            input += layerInputs(L);
+            continue;
+        }
+        const int nch = layerInputs(L);
+        for (int ch = 0; ch < nch; ++ch, ++input) {
+            Voice v;
+            v.layer = &L;
             v.layerIndex = static_cast<int>(li);
             v.channel = ch;
-            v.inputIndex = static_cast<int>(vi);
+            v.inputIndex = input;
+            voices.push_back(std::move(v));
         }
     }
     for (size_t i = 0; i < voices.size(); ++i) {
@@ -729,6 +786,124 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
     }
 }
 
+// Where the listener is relative to the sphere, in the recording's frame,
+// and the matrix, delay, level and air that follow from it.
+void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose) {
+    const Layer& L = *f.layer;
+    const Layer::Ambisonic& A = L.ambisonic;
+    // Input channels -> ACN/N3D: ambiX is ACN/SN3D; FuMa is W X Y Z with W
+    // scaled by 1/sqrt(2) (first order only; SAF has the same limit).
+    const bool fuma = A.format == Layer::Ambisonic::Format::FuMa && L.channels == 4;
+    for (int c = 0; c < f.nIn; ++c) {
+        f.inSource[static_cast<size_t>(c)] = c;
+        f.inGain[static_cast<size_t>(c)] = 1.0f / n3dToSn3d(c);
+    }
+    if (fuma) {
+        const int src[4] = {0, 2, 3, 1};
+        for (int c = 0; c < 4 && c < f.nIn; ++c) f.inSource[static_cast<size_t>(c)] = src[c];
+        f.inGain[0] = 1.4142135f;
+    }
+
+    const Vec3 centre = L.position + f.controls.positionOffset;
+    const float radius = std::max(A.radius * std::max(f.controls.ambisonicRadiusScale, 0.0f), 0.05f);
+    const Quat rec = ambisonicOrientation(A, f.controls.ambisonicYawOffsetDeg);
+    const Vec3 offsetWorld = pose.position - centre;
+    const Vec3 offset = rec.inverseRotate(offsetWorld);
+    // Recording frame -> world (rec) -> head (inverse of the head's orientation).
+    const Quat recToHead = (pose.orientation.conjugate() * rec).normalized();
+    const float dist = offsetWorld.length();
+
+    // The sphere's surface is where the sounds were: the field arrives from
+    // `radius` away at the centre and from further once the listener is
+    // outside, with the delay change (Doppler) that implies.
+    const float path = std::max(dist, radius);
+    if (first) f.distRef = path;
+    const float dopplerAmount = clamp(f.controls.dopplerAmount.value_or(L.dopplerAmount), 0.0f, 1.0f);
+    f.delayTarget = (dopplerAmount * path + (1 - dopplerAmount) * f.distRef) / speedOfSound * fs;
+
+    const bool muted = L.mute || f.controls.mute;
+    f.levelTarget = muted ? 0.0f : dbToGain(L.levelDb + f.controls.levelOffsetDb);
+    // Air absorption over the way from the sphere; the recording carries its own.
+    const float excess = std::max(dist - radius, 0.0f);
+    for (auto& c : f.colour) c.set(airBandGain[0](excess), airBandGain[1](excess), airBandGain[2](excess), fs);
+
+    // W feeds the late reverb when asked (the field already holds its own room).
+    const float outsideGain = std::pow(radius / path, std::max(L.rolloff, 0.0f));
+    f.sendTarget = (A.roomSend && lateReverb && !muted)
+        ? std::sqrt(reverbTotalEnergy) * dbToGain(L.reverbSendDb) * reverbTrim * outsideGain : 0.0f;
+
+    // The matrix is re-derived at the HRTF update rate and only when the
+    // listener moved (1 cm), turned (~0.15 degrees) or the sphere changed.
+    const bool due = first || !f.haveMatrix || ++f.matrixAge >= std::max(1, cfg.hrtfUpdateInterval);
+    if (due) {
+        const float dq = std::fabs(f.lastRot.x - recToHead.x) + std::fabs(f.lastRot.y - recToHead.y) +
+                         std::fabs(f.lastRot.z - recToHead.z) + std::fabs(f.lastRot.w - recToHead.w);
+        const bool changed = !f.haveMatrix || (offset - f.lastOffset).lengthSquared() > 1e-4f || dq > 1.3e-3f ||
+                             std::fabs(radius - f.lastRadius) > 1e-3f;
+        if (changed) {
+            f.transform.compute(offset, radius, recToHead, std::max(L.rolloff, 0.0f), std::max(L.minDistance, 0.01f), f.matTarget.data());
+            f.lastOffset = offset;
+            f.lastRot = recToHead;
+            f.lastRadius = radius;
+            f.haveMatrix = true;
+        }
+        f.matrixAge = 0;
+    }
+    if (first) {
+        f.delayCur = f.delayTarget;
+        f.levelCur = f.levelTarget;
+        f.sendCur = f.sendTarget;
+        f.matCur = f.matTarget;
+    }
+}
+
+void Renderer::Impl::renderField(FieldVoice& f) {
+    const float invB = 1.0f / static_cast<float>(B);
+    const float dLevel = (f.levelTarget - f.levelCur) * invB;
+    const float dDelay = (f.delayTarget - f.delayCur) * invB;
+    const float dSend = (f.sendTarget - f.sendCur) * invB;
+    for (int c = 0; c < f.nIn; ++c) {
+        const float* in = inFifo.data() + static_cast<size_t>(f.inputIndex + f.inSource[static_cast<size_t>(c)]) * B;
+        const float g = f.inGain[static_cast<size_t>(c)];
+        DelayLine& dl = f.delay[static_cast<size_t>(c)];
+        float level = f.levelCur, d = f.delayCur, send = f.sendCur;
+        for (int i = 0; i < B; ++i) {
+            level += dLevel;
+            dl.write(in[i] * level * g);
+        }
+        float* w = f.work.data() + static_cast<size_t>(c) * B;
+        ShelfPair& colour = f.colour[static_cast<size_t>(c)];
+        for (int i = 0; i < B; ++i) {
+            d += dDelay;
+            w[i] = colour.process(dl.read(d + static_cast<float>(B - 1 - i)));
+            if (c == 0) {
+                send += dSend;
+                revIn[i] += w[i] * send;
+            }
+        }
+    }
+    // Into the bus through the matrix, interpolated over the sub-block.
+    for (int k = 0; k < nSh; ++k) {
+        float* b = bus.data() + static_cast<size_t>(k) * B;
+        const float* m0 = f.matCur.data() + static_cast<size_t>(k) * f.nIn;
+        const float* m1 = f.matTarget.data() + static_cast<size_t>(k) * f.nIn;
+        for (int c = 0; c < f.nIn; ++c) {
+            const float a = m0[c], step = (m1[c] - a) * invB;
+            if (a == 0 && step == 0) continue;
+            const float* w = f.work.data() + static_cast<size_t>(c) * B;
+            float m = a;
+            for (int i = 0; i < B; ++i) {
+                m += step;
+                b[i] += w[i] * m;
+            }
+        }
+    }
+    f.levelCur = f.levelTarget;
+    f.delayCur = f.delayTarget;
+    f.sendCur = f.sendTarget;
+    f.matCur = f.matTarget;
+}
+
 void Renderer::Impl::renderSubBlock(double time) {
     const Pose pose = poses.evaluate(time, listenerControls);
     lastPose = pose;
@@ -742,6 +917,7 @@ void Renderer::Impl::renderSubBlock(double time) {
     std::fill(earBuf[1].begin(), earBuf[1].end(), 0.0f);
 
     for (auto& v : voices) computeTargets(v, pose, time);
+    for (auto& f : fields) computeFieldTargets(f, pose);
 
 #ifdef SP_HAVE_STEAM_AUDIO
     if (useSteam && steam) {
@@ -866,6 +1042,9 @@ void Renderer::Impl::renderSubBlock(double time) {
         }
     }
 
+    // Ambisonic layers into the bus.
+    for (auto& f : fields) renderField(f);
+
     // Ray-traced reflections (early and late) into the bus.
 #ifdef SP_HAVE_STEAM_AUDIO
     if (useSteam && steam) {
@@ -937,6 +1116,11 @@ void Renderer::Impl::resetState() {
         v.directIn.clear();
         v.crossfade = false;
     }
+    for (auto& f : fields) {
+        for (auto& d : f.delay) d.clear();
+        for (auto& c : f.colour) c.reset();
+        f.haveMatrix = false;
+    }
     for (auto& b : busIn) b.clear();
     if (fdnEnabled) fdn.reset();
     if (useIr) irReverb.reset();
@@ -958,12 +1142,12 @@ Renderer::Renderer(const Scene& scene, const RenderConfig& config, double durati
 
 Renderer::~Renderer() = default;
 
-int Renderer::numInputs() const { return static_cast<int>(impl_->voices.size()); }
+int Renderer::numInputs() const { return impl_->nInputs; }
 int Renderer::numLayers() const { return static_cast<int>(impl_->scene.layers.size()); }
 int Renderer::inputIndex(int layer) const {
     int n = 0;
     for (int i = 0; i < layer && i < static_cast<int>(impl_->scene.layers.size()); ++i)
-        n += std::max(1, std::min(impl_->scene.layers[static_cast<size_t>(i)].channels, 2));
+        n += layerInputs(impl_->scene.layers[static_cast<size_t>(i)]);
     return n;
 }
 int Renderer::numOutputs() const { return impl_->nOut; }
@@ -978,6 +1162,8 @@ void Renderer::reset() { impl_->resetState(); }
 void Renderer::setLayerControls(int layer, const LayerControls& c) {
     for (auto& v : impl_->voices)
         if (v.layerIndex == layer) v.controls = c;
+    for (auto& f : impl_->fields)
+        if (f.layerIndex == layer) f.controls = c;
 }
 
 std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
@@ -1004,6 +1190,7 @@ void Renderer::applyUpdate(SceneUpdate& u) {
     std::swap(im.scene.name, u.scene.name);
     std::swap(im.poses, u.poses);
     for (auto& v : im.voices) v.layer = &im.scene.layers[static_cast<size_t>(v.layerIndex)];
+    for (auto& f : im.fields) f.layer = &im.scene.layers[static_cast<size_t>(f.layerIndex)];
 }
 
 bool Renderer::steamAudioAvailable() {
@@ -1042,7 +1229,7 @@ void Renderer::process(const float* const* inputs, float* const* outputs, int nu
     DenormalGuard denormals;
     Impl& im = *impl_;
     const int B = im.B;
-    const size_t nInputs = im.voices.size();
+    const size_t nInputs = static_cast<size_t>(im.nInputs);
     int done = 0;
     while (done < numFrames) {
         if (im.fifoFill == 0) im.subBlockStartTime = timeSeconds + static_cast<double>(done) / im.cfg.sampleRate;

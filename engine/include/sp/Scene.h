@@ -57,12 +57,42 @@ struct Layer {
         float elevationDeg = 0;
         bool mono = false;
     } stereo;
+
+    // Ambisonic layers (`channels` = 4, 9 or 16: a first, second or third
+    // order sound field recording) are a sphere of `radius` metres centred on
+    // `position`. The recording is heard in full at the centre; the sphere's
+    // surface stands for where the recorded sounds were, so the listener
+    // walking towards one side hears that side louder and wider (a source on
+    // the surface falls off as (radius / distance) ^ rolloff, clamped inside
+    // minDistance), and outside the sphere the whole field narrows towards
+    // its centre. The recording's own front faces -Z turned by yaw, pitch and
+    // roll (same convention as the head). The field turns with the head
+    // exactly. Spread, directivity, images and occlusion do not apply;
+    // reverbSendDb only when `roomSend` is on (W feeds the late reverb).
+    struct Ambisonic {
+        enum class Format { AmbiX, FuMa };  // ACN/SN3D, or Furse-Malham WXYZ (first order only)
+        Format format = Format::AmbiX;
+        float radius = 3.0f;
+        float yawDeg = 0, pitchDeg = 0, rollDeg = 0;
+        bool roomSend = false;
+    } ambisonic;
+    // Tools and the app: one mono file per channel, in channel order, instead
+    // of the channels of `audioFile` (four separate B-format tracks).
+    std::vector<std::string> audioFiles;
 };
 
 // Half-vector from a stereo layer's centre to its right end (left = -offset).
 Vec3 stereoOffset(float width, float rotationDeg, float elevationDeg);
 // Centre, width, rotation and elevation that put the ends at `left`/`right`.
 void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::Stereo& stereo);
+
+// Ambisonic order for a channel count (4 -> 1, 9 -> 2, 16 -> 3), or -1.
+int ambisonicOrder(int channels);
+inline bool isAmbisonic(const Layer& l) { return ambisonicOrder(l.channels) > 0; }
+// The renderer inputs a layer takes: 1, 2, or its Ambisonic channel count.
+inline int layerInputs(const Layer& l) { return isAmbisonic(l) ? l.channels : (l.channels == 2 ? 2 : 1); }
+// Orientation of an Ambisonic layer's recording (recording frame -> world).
+Quat ambisonicOrientation(const Layer::Ambisonic& a, float extraYawDeg = 0);
 
 // -------------------------------------------------------------------- Room
 

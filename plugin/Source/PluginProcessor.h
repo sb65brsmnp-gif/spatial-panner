@@ -21,6 +21,7 @@
 #include <string>
 
 #include "LayerEngine.h"
+#include "LayerFile.h"
 #include "SharedSession.h"
 
 namespace spplug {
@@ -81,6 +82,7 @@ public:
     struct HostTrack { std::string id, name; float meterDb = -120; };
     std::vector<HostTrack> hostTracks();   // live layer instances (meters read and reset)
     const std::string& layerId() const { return layerId_; }
+    LayerFile& fileForTesting() { return file_; }
 
     struct Transport { double time = 0; bool playing = false; };
     Transport transport() const { return {lastTime_.load(), lastPlaying_.load()}; }
@@ -140,12 +142,18 @@ private:
     std::atomic<bool> awaitOfflineProgram_{false};
     std::atomic<float> docLevelGain_{1.0f}, docDoppler_{1.0f}, docSpread_{0.0f};
     std::atomic<int> docChannels_{1};   // the layer's channels in the scene document
+    // An Ambisonic layer the plugin plays from a file (more channels than
+    // the track carries): the file, the layer's start time and loop setting.
+    LayerFile file_;
+    std::atomic<bool> fileFed_{false};
+    std::atomic<double> docStart_{0};
+    std::atomic<bool> docLoop_{false};
 
     // audio thread
     double sampleRate_ = 48000;
     juce::int64 expected_ = -1;
     juce::int64 freeRun_ = 0;
-    std::vector<float> mono_, right_;   // copies of the track's input (the outputs overwrite the buffer)
+    std::vector<std::vector<float>> in_;   // copies of the layer's input channels (the outputs overwrite the buffer)
     int slotChannels_ = 0;
     std::atomic<double> lastTime_{0};
     std::atomic<bool> lastPlaying_{false};
@@ -163,6 +171,8 @@ private:
     std::atomic<float>* pWidth_;
     std::atomic<float>* pStereoWidth_;
     std::atomic<float>* pStereoRotation_;
+    std::atomic<float>* pSphereRadius_;
+    std::atomic<float>* pSphereRotation_;
     std::atomic<float>* pMono_;
     std::atomic<float>* pX_;
     std::atomic<float>* pY_;

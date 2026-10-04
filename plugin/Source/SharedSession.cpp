@@ -20,7 +20,7 @@ namespace spplug {
 
 namespace {
 constexpr uint64_t kMagic = 0x53504c4956453031ull;  // "SPLIVE01"
-constexpr uint32_t kLayoutVersion = 4;
+constexpr uint32_t kLayoutVersion = 5;
 
 static_assert(std::atomic<uint64_t>::is_always_lock_free, "needs lock-free 64-bit atomics");
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "needs lock-free 32-bit atomics");
@@ -81,7 +81,7 @@ struct SharedSession::Region {
         std::atomic<uint64_t> id[kIdWords];
         std::atomic<uint64_t> name[kNameWords];
         std::atomic<uint64_t> cloneOf[kIdWords];
-        std::atomic<uint32_t> channels;   // the track's input channels (1 or 2)
+        std::atomic<uint32_t> channels;   // the track's input channels (1, 2, or 4 for a quad track; up to 16)
         std::atomic<uint32_t> pad;
     } slots[kMaxSlots];
 
@@ -304,7 +304,7 @@ void SharedSession::setSlotName(int slot, uint64_t token, const std::string& nam
 
 void SharedSession::setSlotChannels(int slot, uint64_t token, int channels) {
     if (!slotOwnedBy(slot, token)) return;
-    r_->slots[slot].channels.store(static_cast<uint32_t>(std::max(1, std::min(channels, 2))), std::memory_order_release);
+    r_->slots[slot].channels.store(static_cast<uint32_t>(std::max(1, std::min(channels, 16))), std::memory_order_release);
 }
 
 void SharedSession::addMeter(int slot, float peak) {
@@ -334,7 +334,7 @@ std::vector<SharedSession::LayerInfo> SharedSession::liveLayers(uint64_t staleMs
         }
         if (info.id.empty()) continue;
         info.slot = i;
-        info.channels = std::max(1u, std::min(2u, sl.channels.load(std::memory_order_acquire)));
+        info.channels = std::max(1u, std::min(16u, sl.channels.load(std::memory_order_acquire)));
         info.heartbeatMs = hb;
         const uint32_t m = takeMeters ? sl.meterBits.exchange(0, std::memory_order_relaxed) : sl.meterBits.load(std::memory_order_relaxed);
         info.meterPeak = bitsFloat(m);

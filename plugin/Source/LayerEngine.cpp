@@ -362,7 +362,7 @@ void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
         return;
     }
     p.renderer->setLayerControls(0, b.layer);
-    const float* in[2] = {nullptr, nullptr};
+    const float* in[kMaxInputs] = {};
     float* out[kMaxOutputs];
     int done = 0;
     while (done < b.numFrames) {
@@ -375,7 +375,7 @@ void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
             p.lastTime = t;
             p.renderer->setListenerControls(p.lastControls);
         }
-        for (int c = 0; c < 2; ++c) in[c] = c < b.numInputs && b.inputs[c] ? b.inputs[c] + done : nullptr;
+        for (int c = 0; c < kMaxInputs; ++c) in[c] = c < b.numInputs && b.inputs[c] ? b.inputs[c] + done : nullptr;
         for (int c = 0; c < p.numOut; ++c) out[c] = p.out[static_cast<size_t>(c)].data() + done;
         p.renderer->process(in, out, k, t);
         p.phase = (p.phase + k) % kSubBlock;
@@ -401,7 +401,7 @@ void LayerEngine::process(const Block& b) {
     for (int off = 0; off < b.numFrames; off += maxBlock) {
         Block sub = b;
         sub.numFrames = std::min(maxBlock, b.numFrames - off);
-        for (int c = 0; c < 2; ++c) sub.inputs[c] = b.inputs[c] ? b.inputs[c] + off : nullptr;
+        for (int c = 0; c < kMaxInputs; ++c) sub.inputs[c] = b.inputs[c] ? b.inputs[c] + off : nullptr;
         sub.time = b.time + off / current_->cfg.sampleRate;
         renderProgram(*current_, sub, b.numOutputs);
         const int nc = std::min(b.numOutputs, current_->numOut);

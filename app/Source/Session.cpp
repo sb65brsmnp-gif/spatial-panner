@@ -16,10 +16,23 @@ constexpr double kFadeSeconds = 0.04;   // crossfade between programs
 // Per-layer playback data, swapped as a whole by patches.
 struct LayerData {
     std::vector<std::shared_ptr<const LayerAudio>> audio;
+    std::vector<std::vector<std::shared_ptr<const LayerAudio>>> files;  // an Ambisonic layer's one-file-per-channel set, else empty
     std::vector<juce::int64> start;   // samples
     std::vector<char> loop;
     std::vector<float> meterGain;     // level and mute, so the meters show what the layer contributes
-    std::vector<int> channels;        // 1 or 2 renderer inputs per layer, in order
+    std::vector<int> channels;        // renderer inputs per layer (1, 2, or an Ambisonic layer's 4 / 9 / 16), in order
+    std::vector<char> ambisonic;
+
+    // The samples feeding input channel `c` of layer `i`, or null for silence.
+    const std::vector<float>* source(size_t i, int c) const {
+        if (!files[i].empty()) {
+            const LayerAudio* f = static_cast<size_t>(c) < files[i].size() ? files[i][static_cast<size_t>(c)].get() : nullptr;
+            return f && f->numChannels() > 0 ? &f->channel(0) : nullptr;
+        }
+        const LayerAudio* a = audio[i].get();
+        if (!a || a->numChannels() == 0) return nullptr;
+        return ambisonic[i] ? a->exactChannel(c) : &a->channel(c);
+    }
 };
 
 struct Program {
@@ -136,13 +149,20 @@ void Session::fillLayerData(LayerData& d, const sp::Scene& s, double rate) {
     d.loop.resize(n);
     d.meterGain.resize(n);
     d.channels.resize(n);
+    d.files.assign(n, {});
+    d.ambisonic.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const auto& l = s.layers[i];
-        d.audio[i] = library_.get(juce::String(l.audioFile));
+        d.ambisonic[i] = sp::isAmbisonic(l) ? 1 : 0;
+        if (d.ambisonic[i] && !l.audioFiles.empty()) {
+            for (const auto& f : l.audioFiles) d.files[i].push_back(library_.get(juce::String(f)));
+        } else {
+            d.audio[i] = library_.get(juce::String(l.audioFile));
+        }
         d.start[i] = static_cast<juce::int64>(std::llround(l.startTime * rate));
         d.loop[i] = l.loop ? 1 : 0;
         d.meterGain[i] = l.mute ? 0.0f : sp::dbToGain(l.levelDb);
-        d.channels[i] = std::max(1, std::min(l.channels, 2));
+        d.channels[i] = sp::layerInputs(l);
     }
 }
 
@@ -254,10 +274,23 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
         try {
             juce::AudioFormatManager fm;
             fm.registerBasicFormats();
-            std::vector<std::shared_ptr<const LayerAudio>> audio;
-            for (const auto& l : scene.layers) {
+            LayerData audio;
+            const size_t nl = scene.layers.size();
+            audio.audio.resize(nl);
+            audio.files.assign(nl, {});
+            audio.ambisonic.resize(nl);
+            for (size_t i = 0; i < nl; ++i) {
+                const auto& l = scene.layers[i];
                 juce::String err;
-                audio.push_back(l.audioFile.empty() ? nullptr : AudioLibrary::decode(fm, juce::String(l.audioFile), rate, err));
+                audio.ambisonic[i] = sp::isAmbisonic(l) ? 1 : 0;
+                if (audio.ambisonic[i] && !l.audioFiles.empty()) {
+                    for (const auto& f : l.audioFiles) {
+                        audio.files[i].push_back(AudioLibrary::decode(fm, juce::String(f), rate, err));
+                        if (err.isNotEmpty()) break;
+                    }
+                } else if (!l.audioFile.empty()) {
+                    audio.audio[i] = AudioLibrary::decode(fm, juce::String(l.audioFile), rate, err);
+                }
                 if (err.isNotEmpty()) throw std::runtime_error((juce::String(l.name) + ": " + err).toStdString());
             }
             const double t1 = std::max(end, start + 0.1);
@@ -288,11 +321,10 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
                 size_t input = 0;
                 for (size_t i = 0; i < scene.layers.size(); ++i) {
                     const auto& l = scene.layers[i];
-                    const LayerAudio* a = audio[i].get();
                     const auto st = static_cast<juce::int64>(std::llround(l.startTime * rate));
-                    const int nch = std::max(1, std::min(l.channels, 2));
+                    const int nch = sp::layerInputs(l);
                     for (int c = 0; c < nch; ++c, ++input) {
-                        const std::vector<float>* smp = a && a->numChannels() > 0 ? &a->channel(c) : nullptr;
+                        const std::vector<float>* smp = audio.source(i, c);
                         for (int k = 0; k < block; ++k) {
                             juce::int64 idx = pos + k - st;
                             float v = 0;
@@ -486,16 +518,16 @@ void Session::fillInputs(Program& p, int n, float gainStart, float gainStep, boo
     const size_t nl = L.channels.size();
     size_t input = 0;
     for (size_t i = 0; i < nl && input < p.in.size(); ++i) {
-        const LayerAudio* a = i < L.audio.size() ? L.audio[i].get() : nullptr;
         const int nch = L.channels[i];
         float peak = 0;
         for (int c = 0; c < nch && input < p.in.size(); ++c, ++input) {
             float* dst = p.in[input].data();
-            if (!a || a->numSamples() == 0 || (gainStart <= 0 && gainStep <= 0)) {
+            const std::vector<float>* src = L.source(i, c);
+            if (!src || src->empty() || (gainStart <= 0 && gainStep <= 0)) {
                 std::fill(dst, dst + n, 0.0f);
                 continue;
             }
-            const auto& smp = a->channel(c);
+            const auto& smp = *src;
             const auto size = static_cast<juce::int64>(smp.size());
             const juce::int64 base = pos_ - L.start[i];
             float g = gainStart;

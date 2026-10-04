@@ -7,7 +7,8 @@ add_executable(sp_tests
   test_live_update.cpp
   test_reverb.cpp
   test_room.cpp
-  test_ir.cpp)
+  test_ir.cpp
+  test_soundfield.cpp)
 if(SP_WITH_STEAM_AUDIO)
   target_sources(sp_tests PRIVATE test_steam.cpp)
 endif()
