@@ -189,7 +189,7 @@ struct HeadTrack {
     bool banking = false;               // AlongPath: roll into turns
     Vec3 lookAtPoint{0, 1.6f, 0};       // LookAt: target point...
     int lookAtLayer = -1;               // ...or a layer index (wins when >= 0)
-    std::vector<HeadKey> keys;          // Keyframed
+    std::vector<HeadKey> keys;          // Keyframed: the head direction; other modes: a turn on top of it
     float yawOffsetDeg = 0;             // added on top of any mode
     float pitchOffsetDeg = 0;
     float rollOffsetDeg = 0;

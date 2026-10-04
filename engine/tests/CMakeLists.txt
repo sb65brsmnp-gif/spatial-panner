@@ -3,7 +3,8 @@ add_executable(sp_tests
   test_pose.cpp
   test_dsp.cpp
   test_renderer.cpp
-  test_scene_json.cpp)
+  test_scene_json.cpp
+  test_live_update.cpp)
 if(SP_WITH_STEAM_AUDIO)
   target_sources(sp_tests PRIVATE test_steam.cpp)
 endif()

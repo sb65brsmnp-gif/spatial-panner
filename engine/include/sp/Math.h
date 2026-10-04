@@ -50,6 +50,9 @@ struct Vec3 {
     }
 
     static Vec3 lerp(const Vec3& a, const Vec3& b, float t) { return a + (b - a) * t; }
+
+    bool operator==(const Vec3& o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Vec3& o) const { return !(*this == o); }
 };
 
 inline Vec3 operator*(float s, const Vec3& v) { return v * s; }

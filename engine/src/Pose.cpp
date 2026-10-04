@@ -242,6 +242,30 @@ float PoseEvaluator::distanceAlongPath(double time, const ListenerControls& cont
     return clamp(s, 0.0f, path->length());
 }
 
+namespace {
+
+void keyedHeadAngles(const std::vector<HeadKey>& k, double time, float& yaw, float& pitch, float& roll) {
+    yaw = pitch = roll = 0;
+    if (k.empty()) return;
+    if (time <= k.front().time) {
+        yaw = k.front().yawDeg; pitch = k.front().pitchDeg; roll = k.front().rollDeg;
+    } else if (time >= k.back().time) {
+        yaw = k.back().yawDeg; pitch = k.back().pitchDeg; roll = k.back().rollDeg;
+    } else {
+        size_t i = 0;
+        while (i + 1 < k.size() && k[i + 1].time <= time) ++i;
+        const auto& a = k[i];
+        const auto& b = k[i + 1];
+        const double span = b.time - a.time;
+        const float u = applyEasing(a.easing, span > 0 ? static_cast<float>((time - a.time) / span) : 1.0f);
+        yaw = lerp(a.yawDeg, b.yawDeg, u);
+        pitch = lerp(a.pitchDeg, b.pitchDeg, u);
+        roll = lerp(a.rollDeg, b.rollDeg, u);
+    }
+}
+
+}  // namespace
+
 Quat PoseEvaluator::orientationAt(double time, const Vec3& position, const Vec3& tangent,
                                   const ListenerControls& controls) const {
     const auto& head = scene_.listener.head;
@@ -262,29 +286,17 @@ Quat PoseEvaluator::orientationAt(double time, const Vec3& position, const Vec3&
             base = Quat::lookRotation(fwd);
             break;
         }
-        case HeadMode::Keyframed: {
-            const auto& k = head.keys;
-            float yaw = 0, pitch = 0, roll = 0;
-            if (!k.empty()) {
-                if (time <= k.front().time) {
-                    yaw = k.front().yawDeg; pitch = k.front().pitchDeg; roll = k.front().rollDeg;
-                } else if (time >= k.back().time) {
-                    yaw = k.back().yawDeg; pitch = k.back().pitchDeg; roll = k.back().rollDeg;
-                } else {
-                    size_t i = 0;
-                    while (i + 1 < k.size() && k[i + 1].time <= time) ++i;
-                    const auto& a = k[i];
-                    const auto& b = k[i + 1];
-                    const double span = b.time - a.time;
-                    const float u = applyEasing(a.easing, span > 0 ? static_cast<float>((time - a.time) / span) : 1.0f);
-                    yaw = lerp(a.yawDeg, b.yawDeg, u);
-                    pitch = lerp(a.pitchDeg, b.pitchDeg, u);
-                    roll = lerp(a.rollDeg, b.rollDeg, u);
-                }
-            }
-            base = Quat::fromYawPitchRoll(degToRad(yaw), degToRad(pitch), degToRad(roll));
+        case HeadMode::Keyframed:
             break;
-        }
+    }
+    // Keyframes are the absolute head direction in Keyframed mode, and a
+    // time-varying turn of the head on top of the path direction or look-at
+    // target in the other modes ("look 60 degrees left while walking").
+    if (head.mode == HeadMode::Keyframed || !head.keys.empty()) {
+        float yaw = 0, pitch = 0, roll = 0;
+        keyedHeadAngles(head.keys, time, yaw, pitch, roll);
+        const Quat keyed = Quat::fromYawPitchRoll(degToRad(yaw), degToRad(pitch), degToRad(roll));
+        base = head.mode == HeadMode::Keyframed ? keyed : base * keyed;
     }
     const Quat offset = Quat::fromYawPitchRoll(
         degToRad(head.yawOffsetDeg + controls.yawOffsetDeg),

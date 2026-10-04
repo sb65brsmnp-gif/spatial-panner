@@ -15,11 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libopenblas-dev liblapacke-dev zlib1g-dev
+          sudo apt-get install -y ninja-build libopenblas-dev liblapacke-dev zlib1g-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -28,14 +36,54 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
+      - name: Build (engine, tools, app)
         run: cmake --build build
 
-      - name: Test
+      - name: Test (engine and app session)
         run: ctest --test-dir build --output-on-failure
+
+      - name: Generate the demo signals (used by the demos and the editor tests)
+        run: ./build/tools/gensignals/sp-gensignals signals --seconds 6
+
+      - name: Editor unit tests
+        working-directory: ui
+        run: npm test
+
+      - name: Editor end-to-end tests (browser + engine analysis)
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
+      - name: Upload editor screenshots
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-screenshots
+          path: ui/test-results/
+          if-no-files-found: ignore
 
       - name: Render a demo
         run: |
-          ./build/tools/gensignals/sp-gensignals signals --seconds 6
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
           ./build/tools/render/sp-render scenes/occluder.json -o occluder.wav --duration 4 --steam-threads 2 --bench --normalize
+
+      - name: Package the macOS app with the demo scenes
+        if: runner.os == 'macOS'
+        run: |
+          pkg="build/package/Spatial Panner"
+          mkdir -p "$pkg"
+          ditto "build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app" "$pkg/Spatial Panner.app"
+          cp -R scenes "$pkg/scenes"
+          ./build/tools/gensignals/sp-gensignals "$pkg/signals" --seconds 40
+          # ditto keeps the executable bits and the code signature, which the
+          # artifact upload alone would drop.
+          (cd build/package && ditto -c -k --keepParent "Spatial Panner" Spatial-Panner-macOS.zip)
+
+      - name: Upload the macOS app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spatial-panner-macos
+          path: build/package/Spatial-Panner-macOS.zip

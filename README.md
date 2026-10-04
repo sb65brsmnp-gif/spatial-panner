@@ -6,10 +6,11 @@ binaural (HRTF) or multichannel loudspeaker output. Target: Logic Pro on macOS
 (AUv2 + standalone). The architecture spec lives in the project's
 `spec/architecture.md`.
 
-This repository currently contains **the engine** (thread 2 of the plan): plain
-C++17, no JUCE, with a command-line renderer and listenable test renders. The
-3D editor / standalone app and the plugin come next and build on the
-interfaces described in [docs/engine.md](docs/engine.md).
+This repository contains **the engine** (plain C++17, no JUCE, with a
+command-line renderer, see [docs/engine.md](docs/engine.md)) and **the
+standalone app**: a Three.js scene and path editor in a JUCE window that plays
+through the engine live, see [docs/editor.md](docs/editor.md). The AU plugin
+and DAW automation come next.
 
 ## Layout
 
@@ -18,6 +19,9 @@ engine/            the DSP engine (library sp::engine)
   include/sp/      public headers: Scene, Pose, Renderer, SceneJson, SpeakerLayout
   src/             implementation, src/dsp/ holds the signal processing blocks
   tests/           Catch2 unit tests
+app/               the standalone JUCE app (audio device, playback, bridge to the editor)
+ui/                the editor: TypeScript + Three.js, built into one HTML file
+tools/scene/       sp-scene: path/pose analysis and normalisation for the editor
 tools/render/      sp-render: scene.json + audio -> WAV (binaural, speakers, ambiX)
 tools/gensignals/  sp-gensignals: synthesises the demo sources (no third-party audio)
 scenes/            demo scenes (lshape.obj is a room mesh)
@@ -28,10 +32,12 @@ cmake/             dependency fetching (SAF, libmysofa, nlohmann/json, dr_libs, 
 
 ## Building
 
-Requirements: CMake 3.22+, a C++17 compiler, git, network access on first
-configure (dependencies and the default HRTF are fetched and pinned).
+Requirements: CMake 3.22+, a C++17 compiler, git, Node.js 20+ with npm (for
+the editor UI), network access on first configure (dependencies, JUCE and the
+default HRTF are fetched and pinned). Pass `-DSP_BUILD_APP=OFF` to build only
+the engine and tools.
 
-macOS (Apple Accelerate is used for BLAS/LAPACK, nothing to install):
+macOS (Apple Accelerate is used for BLAS/LAPACK; only Node is needed, e.g. `brew install node`):
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -42,7 +48,8 @@ ctest --test-dir build
 Linux (Debian/Ubuntu):
 
 ```sh
-sudo apt install build-essential cmake ninja-build libopenblas-dev liblapacke-dev zlib1g-dev
+sudo apt install build-essential cmake ninja-build libopenblas-dev liblapacke-dev zlib1g-dev \
+  nodejs npm libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libfreetype-dev libfontconfig1-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
