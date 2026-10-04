@@ -48,6 +48,9 @@ export interface Backend {
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
   chooseAudioFiles(): Promise<AudioInfo[]>;
+  // One file of any kind through the native open dialog (e.g. an impulse
+  // response WAV); `wildcard` as JUCE takes it ("*.wav;*.aif"). null if cancelled.
+  chooseFile(title: string, wildcard: string): Promise<{ path: string; name: string } | null>;
   audioInfo(paths: string[]): Promise<AudioInfo[]>;
   openScene(): Promise<{ path: string; scene: SceneDoc; raw: unknown } | null>;
   saveScene(scene: SceneDoc, path: string | null): Promise<{ path: string } | null>;
@@ -117,6 +120,7 @@ class AppBackend implements Backend {
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles() { return (await this.call<AudioInfo[]>('chooseAudioFiles')) ?? []; }
+  chooseFile(title: string, wildcard: string) { return this.call<{ path: string; name: string } | null>('chooseFile', { title, wildcard }); }
   async audioInfo(paths: string[]) { return (await this.call<AudioInfo[]>('audioInfo', { paths })) ?? []; }
   openScene() { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('openScene'); }
   saveScene(scene: SceneDoc, path: string | null) { return this.call<{ path: string } | null>('saveScene', { scene, path }); }
@@ -195,6 +199,10 @@ class DevBackend implements Backend {
   async chooseAudioFiles() {
     const r = await fetch('/api/signals');
     return (await r.json()) as AudioInfo[];
+  }
+  async chooseFile(title: string) {
+    const path = window.prompt(`${title}\nPath to a file (browser preview: nothing is read):`, '');
+    return path ? { path, name: path.split(/[\\/]/).pop() ?? path } : null;
   }
   async audioInfo(paths: string[]) {
     return paths.map((p) => ({ path: p, name: p.split('/').pop() ?? p, duration: 6, channels: 1, sampleRate: 48000 }));

@@ -156,7 +156,8 @@ async function sync(): Promise<void> {
 }
 
 async function requestAudioInfo(): Promise<void> {
-  const missing = [...new Set(store.scene.layers.map((l) => l.audio).filter((p) => p && !store.audioInfo.has(p)))];
+  const ir = store.scene.room.impulse_response?.file;
+  const missing = [...new Set([...store.scene.layers.map((l) => l.audio), ir ?? ''].filter((p) => p && !store.audioInfo.has(p)))];
   if (!missing.length) return;
   const infos = await backend.audioInfo(missing);
   for (const i of infos) {

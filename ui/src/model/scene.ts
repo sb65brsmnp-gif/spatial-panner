@@ -89,6 +89,16 @@ export interface ObjectDoc {
   material: MaterialDoc;
 }
 
+// A WAV impulse response as the late reverb of a box room instead of the
+// built-in reverb (docs/engine.md). `file` is absolute in the editor and
+// relative to the scene file on disk, like layer audio.
+export interface ImpulseResponseDoc {
+  file: string;
+  gain_db: number;
+  channels: number;   // 0 = from the file, 1 mono (diffuse), 2 stereo L/R, 4 first-order ambiX
+  enabled: boolean;   // false: keep the file but play the built-in reverb
+}
+
 export interface RoomDoc {
   // 'mesh': the room is a triangle mesh (an OBJ file or inline), ray-traced.
   type: 'box' | 'outdoor' | 'none' | 'mesh';
@@ -103,6 +113,7 @@ export interface RoomDoc {
   reverb_time_scale: number;
   reflections: boolean;
   reverb: boolean;
+  impulse_response?: ImpulseResponseDoc;
 }
 
 export interface EnvironmentDoc {

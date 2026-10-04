@@ -102,7 +102,8 @@ export class Sidebar {
         + (this.plugin ? JSON.stringify(this.info?.tracks ?? []) : '');
       case 'path': return base + JSON.stringify(s.listener) + JSON.stringify(s.editor) + JSON.stringify(this.tools.opts)
         + (a ? `${a.arrival_time}|${a.paths.map((p) => p.length).join(',')}` : '') + s.layers.map((l) => l.name).join('|');
-      case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment);
+      case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment)
+        + (s.room.impulse_response ? JSON.stringify(this.store.audioInfo.get(s.room.impulse_response.file) ?? null) : '');
       case 'output': return base + JSON.stringify(s.editor) + JSON.stringify(this.info);
     }
   }
@@ -401,22 +402,72 @@ export class Sidebar {
         ...R.objects.map((o) => row(o.name || 'object', el('span', { class: 'muted' }, `${o.material.name}, ${o.max.map((v, i) => (v - o.min[i]).toFixed(1)).join(' × ')} m`))),
         el('p', { class: 'muted' }, 'Walls and objects block and reflect sound when the ray-traced room model is in use. They are set in the scene file for now.')));
     }
-    this.body.append(section('Reflections and reverb',
-      row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
-        select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
-          { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
-      row('Refl. level', numberInput(R.reflections_level_db, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
-      box ? row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; })),
-        numberInput(R.reverb_level_db, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }), { step: 0.5, width: 64 }), 'dB') : '',
-      box ? row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64 })) : '',
-      el('p', { class: 'muted' }, 'Room changes restart the room model, so you may hear a short fade.'),
-    ));
+    const db = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+    if (R.type !== 'none') {
+      this.body.append(section('Early reflections',
+        row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
+          select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
+            { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
+        row('Level', slider(R.reflections_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }, 'refl-level'), db, () => this.store.endGesture())),
+        el('p', { class: 'muted' }, 'Mirror images of each layer in the walls, moving with it. Walls scatter part of each echo into the reverb (the material\'s scattering).'),
+      ));
+    }
+    if (box) this.renderLateReverb();
+    this.body.append(el('p', { class: 'muted' }, 'Room changes restart the room model, so you may hear a short fade.'));
     this.body.append(section('Air',
       row('Temperature', numberInput(E.temperature_c, (v) => this.upd((sc) => { sc.environment.temperature_c = v; }), { step: 1, width: 64 }), '°C'),
       row('Humidity', numberInput(E.humidity, (v) => this.upd((sc) => { sc.environment.humidity = Math.max(0, Math.min(100, v)); }), { step: 5, width: 64 }), '%'),
       row('', checkbox(E.air_absorption, (v) => this.upd((sc) => { sc.environment.air_absorption = v; }), 'High-frequency loss over distance')),
       row('Speed of sound', numberInput(E.speed_of_sound, (v) => this.upd((sc) => { sc.environment.speed_of_sound = Math.max(50, v); }), { step: 1, width: 64 }), 'm/s'),
     ));
+  }
+
+  // Late reverb: the built-in room model or a loaded impulse response.
+  private renderLateReverb(): void {
+    const R = this.store.scene.room;
+    const ir = R.impulse_response;
+    const usingIr = !!ir && ir.enabled;
+    const db = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+    const kind = select(['builtin', 'ir'], usingIr ? 'ir' : 'builtin', (v) => this.upd((sc) => {
+      if (v === 'ir') sc.room.impulse_response = { file: '', gain_db: 0, channels: 0, ...(sc.room.impulse_response ?? {}), enabled: true };
+      else if (sc.room.impulse_response) {
+        if (sc.room.impulse_response.file) sc.room.impulse_response.enabled = false;
+        else delete sc.room.impulse_response;
+      }
+    }), { builtin: 'Built-in (from the room)', ir: 'Impulse response (WAV)' });
+    const rows: (Node | string)[] = [
+      row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; })), kind),
+      row('Level', slider(R.reverb_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }, 'rev-level'), db, () => this.store.endGesture())),
+    ];
+    if (usingIr && ir) {
+      const load = el('button', { class: 'btn small' }, ir.file ? 'Replace…' : 'Load IR…');
+      load.addEventListener('click', async () => {
+        const f = await this.backend.chooseFile('Load an impulse response', '*.wav;*.wave');
+        if (!f) return;
+        const infos = await this.backend.audioInfo([f.path]);
+        for (const i of infos) this.store.audioInfo.set(i.path, i);
+        this.upd((sc) => { sc.room.impulse_response = { gain_db: 0, channels: 0, ...(sc.room.impulse_response ?? {}), file: f.path, enabled: true }; });
+      });
+      const info = ir.file ? this.store.audioInfo.get(ir.file) : undefined;
+      const name = ir.file ? ir.file.split(/[\\/]/).pop() ?? ir.file : 'none';
+      const interp = (ch: number) => ch === 1 ? 'mono, played as a diffuse field' : ch === 2 ? 'stereo, left and right of the head'
+        : ch >= 4 ? 'first-order ambiX, fixed to the room' : `${ch} channels: the first is used as mono`;
+      const effective = ir.channels || info?.channels || 0;
+      rows.push(
+        row('IR file', el('span', { class: 'file', title: ir.file }, name), load),
+        info && !info.error ? el('p', { class: 'muted' }, `${info.channels} ch · ${fmtTime(info.duration, true)} · ${(info.sampleRate / 1000).toFixed(1)} kHz — ${interp(effective)}.`) : '',
+        info?.error ? el('p', { class: 'warn-text' }, `Cannot read the file: ${info.error}`) : '',
+        row('Channels', select(['0', '1', '2', '4'], String(ir.channels), (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.channels = parseInt(v, 10); }),
+          { '0': 'as in the file', '1': 'mono (diffuse)', '2': 'stereo L / R', '4': 'ambiX (4 ch, world-fixed)' })),
+        row('IR gain', slider(ir.gain_db, -24, 12, 0.5, (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.gain_db = v; }, 'ir-gain'), db, () => this.store.endGesture())),
+        el('p', { class: 'muted' }, 'The IR is scaled to the room\'s calibrated reverb level (gain is a trim on top) and arrives 4.7 ms late. '
+          + 'It replaces the built-in tail only; turn the early reflections off above if the recording has its own.'),
+      );
+    } else {
+      rows.push(row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64 }),
+        'of the room\'s Eyring RT60'));
+    }
+    this.body.append(section('Late reverb', ...rows));
   }
 
   // -------------------------------------------------------------- output
