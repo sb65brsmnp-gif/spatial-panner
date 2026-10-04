@@ -35,6 +35,7 @@ export class Store {
   playing = false;
   loop = false;
   livePose: number[] | null = null;  // pose from the audio engine while playing
+  hostDriven = false;           // plugin: the host's playhead drives time and pose
   meters: number[] = [];        // per-layer dBFS
   filePath: string | null = null;
   dirty = false;
@@ -125,6 +126,19 @@ export class Store {
     this.emit('selection');
   }
 
+  // Takes a document the native side changed (plugin: tracks added or
+  // renamed) without losing undo history, the file or the playhead.
+  replace(scene: SceneDoc): void {
+    if (JSON.stringify(scene) === JSON.stringify(this.scene)) return;
+    this.undoStack.push(JSON.stringify(this.scene));
+    if (this.undoStack.length > 300) this.undoStack.shift();
+    this.coalesceKey = null;
+    this.scene = completeScene(scene);
+    this.revision++;
+    this.validateSelection();
+    this.emit('scene');
+  }
+
   select(sel: Selection): void {
     this.selection = sel;
     this.emit('selection');
@@ -162,9 +176,10 @@ export class Store {
     }
   }
 
-  // Pose at the playhead: the audio engine's while playing, else the analysis.
+  // Pose at the playhead: the audio engine's while playing (always, when the
+  // host drives it: its automation is not in the analysis), else the analysis.
   poseAt(t: number): number[] | null {
-    if (this.playing && this.livePose) return this.livePose;
+    if ((this.playing || this.hostDriven) && this.livePose) return this.livePose;
     const a = this.analysis;
     if (!a || !a.poses.length) return null;
     const f = t / a.dt;

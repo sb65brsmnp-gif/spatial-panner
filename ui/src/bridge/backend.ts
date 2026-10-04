@@ -1,5 +1,7 @@
 // The editor's connection to the native app. Inside the JUCE WebView it calls
-// the app's native functions (app/Source/Bridge.cpp); in a plain browser
+// the app's native functions (app/Source/Bridge.cpp), or the plugin's
+// (plugin/Source/PluginEditor.cpp: the host owns the transport, the tracks
+// own the audio, the scene lives in the host's project); in a plain browser
 // (npm run dev) it talks to the Vite dev server, which runs the engine's
 // sp-scene tool for analysis and simulates the transport, so the editor can
 // be developed and tested without the app.
@@ -17,6 +19,8 @@ export interface EngineInfo {
   cpu: number;           // fraction of the audio callback budget
   output: OutputConfig;
   status: string;        // human-readable engine state ("Playing", "Loading audio...")
+  host?: 'plugin';
+  tracks?: { id: string; name: string }[];  // plugin: the tracks running a layer instance
 }
 
 // Pushed at ~30 Hz by the app while it runs.
@@ -26,14 +30,17 @@ export interface Tick {
   pose?: number[];       // [x, y, z, yaw, pitch, roll, distance, speed]
   meters?: number[];     // per-layer dBFS (post level, pre spatialisation)
   cpu?: number;
+  host?: boolean;        // the host's playhead: follow it even while stopped
 }
 
 export interface BounceRequest { mode: OutputMode; layout: string; start: number; end: number; sampleRate: number }
 
 export interface Backend {
-  readonly kind: 'app' | 'dev';
+  readonly kind: 'app' | 'dev' | 'plugin';
   analyze(scene: SceneDoc, duration: number): Promise<Analysis>;
-  setScene(scene: SceneDoc, duration: number): Promise<{ ok: boolean; error?: string }>;
+  // `scene` is what the engine plays; `doc` the full document with editor keys
+  // (the plugin stores it in the host's project).
+  setScene(scene: SceneDoc, duration: number, doc?: SceneDoc): Promise<{ ok: boolean; error?: string }>;
   transport(cmd: { action: 'play' | 'pause' | 'stop' | 'seek' | 'loop'; time?: number; loop?: boolean }): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
@@ -47,6 +54,9 @@ export interface Backend {
   onOpenFile(fn: (r: { path: string; scene: SceneDoc; raw: unknown }) => void): void;
   onTick(fn: (t: Tick) => void): void;
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void): void;
+  // The native side changed the document (plugin: a track was added, renamed
+  // or duplicated, or the host restored the project).
+  onSceneReplaced(fn: (doc: SceneDoc) => void): void;
 }
 
 // ------------------------------------------------------------------ app
@@ -64,11 +74,13 @@ declare global {
 }
 
 class AppBackend implements Backend {
-  readonly kind = 'app' as const;
+  readonly kind: 'app' | 'plugin';
   private nextId = 1;
   private pending = new Map<number, (v: unknown) => void>();
 
   constructor() {
+    const host = window.__JUCE__!.initialisationData?.spHost;
+    this.kind = (Array.isArray(host) ? host[0] : host) === 'plugin' ? 'plugin' : 'app';
     const b = window.__JUCE__!.backend;
     b.addEventListener('__juce__complete', ({ promiseId, result }: { promiseId: number; result: unknown }) => {
       const r = this.pending.get(promiseId);
@@ -90,7 +102,9 @@ class AppBackend implements Backend {
   }
 
   analyze(scene: SceneDoc, duration: number) { return this.call<Analysis>('analyze', { scene, duration }); }
-  setScene(scene: SceneDoc, duration: number) { return this.call<{ ok: boolean; error?: string }>('setScene', { scene, duration }); }
+  setScene(scene: SceneDoc, duration: number, doc?: SceneDoc) {
+    return this.call<{ ok: boolean; error?: string }>('setScene', doc ? { scene, duration, doc } : { scene, duration });
+  }
   async transport(cmd: Parameters<Backend['transport']>[0]) { await this.call('transport', cmd); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
@@ -107,6 +121,9 @@ class AppBackend implements Backend {
   onTick(fn: (t: Tick) => void) { window.__JUCE__!.backend.addEventListener('tick', fn); }
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void) {
     window.__JUCE__!.backend.addEventListener('message', fn);
+  }
+  onSceneReplaced(fn: (doc: SceneDoc) => void) {
+    window.__JUCE__!.backend.addEventListener('sceneReplaced', (raw: unknown) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw as SceneDoc));
   }
 }
 
@@ -195,6 +212,7 @@ class DevBackend implements Backend {
   onOpenFile() {}
   onTick(fn: (t: Tick) => void) { this.tickFns.push(fn); }
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void) { this.msgFns.push(fn); }
+  onSceneReplaced() {}
 }
 
 export function createBackend(): Backend {

@@ -51,6 +51,7 @@ export class Timeline {
     this.durationInput = numberInput(0, (v) => this.store.update((s) => { s.duration = Math.max(0, v); }), { step: 1, min: 0, width: 56 });
     this.durationInput.title = 'Scene length in seconds (0 = automatic: longest non-looping audio, or the path)';
     this.keyBar = el('div', { class: 'tl-keybar' });
+    if (backend.kind === 'plugin') for (const b of [stopBtn, this.playBtn, this.loopBtn]) b.style.display = 'none';
     bar.append(stopBtn, this.playBtn, this.loopBtn, this.timeLabel, el('span', { class: 'tl-sep' }, 'Length'), this.durationInput,
       el('span', { class: 'tl-unit' }, 's'), this.keyBar);
     this.canvas = el('canvas', { class: 'tl-canvas' }) as HTMLCanvasElement;
@@ -294,7 +295,22 @@ export class Timeline {
 
   // ---------------------------------------------------------- input
 
-  private togglePlay(): void { this.transport(this.store.playing ? 'pause' : 'play'); }
+  private togglePlay(): void {
+    if (this.hostTransport()) return;
+    this.transport(this.store.playing ? 'pause' : 'play');
+  }
+
+  // Plugin: Logic owns the transport; the playhead here follows Logic's.
+  private lastHint = -Infinity;
+  private hostTransport(): boolean {
+    if (this.backend.kind !== 'plugin') return false;
+    const now = performance.now();
+    if (now - this.lastHint > 3000) {
+      this.lastHint = now;
+      window.dispatchEvent(new CustomEvent('sp-message', { detail: { text: 'Move the playhead and play in Logic; the editor follows it.', level: 'info' } }));
+    }
+    return true;
+  }
 
   private transport(action: 'play' | 'pause' | 'stop'): void {
     if (action === 'play') this.backend.transport({ action: 'seek', time: this.store.time });
@@ -305,6 +321,7 @@ export class Timeline {
   }
 
   private scrubTo(t: number): void {
+    if (this.hostTransport()) return;
     t = Math.max(0, Math.min(this.store.duration, t));
     this.store.setTime(t);
     const now = performance.now();

@@ -13,6 +13,8 @@ import { Timeline } from './panels/timeline';
 import { el, fmtTime } from './panels/dom';
 
 const backend = createBackend();
+const plugin = backend.kind === 'plugin';
+if (plugin) document.body.classList.add('plugin');
 const app = document.getElementById('app')!;
 const viewportEl = el('div', { id: 'viewport' });
 const hud = el('div', { class: 'hud' });
@@ -25,8 +27,11 @@ const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
 let follow = false;
 
-const toolbar = new Toolbar(tools, {
-  newScene: () => { if (!store.dirty || confirm('Discard unsaved changes?')) { store.load(defaultScene(), null); frame(); } },
+const toolbar = new Toolbar(tools, plugin, {
+  newScene: () => {
+    if (plugin) { if (confirm('Start over with an empty scene? The tracks stay as layers.')) store.replace({ ...defaultScene(), name: store.scene.name }); return; }
+    if (!store.dirty || confirm('Discard unsaved changes?')) { store.load(defaultScene(), null); frame(); }
+  },
   open: () => openScene(),
   save: (saveAs) => saveScene(saveAs),
   undo: () => store.undo(),
@@ -82,7 +87,8 @@ function frame(): void {
 
 function refreshToolbar(): void {
   const name = store.filePath ? store.filePath.split(/[\\/]/).pop()! : store.scene.name || 'Untitled scene';
-  const title = `${name}${store.dirty ? ' •' : ''}`;
+  // Plugin: the scene is saved with the Logic project, so nothing is ever "unsaved".
+  const title = `${name}${store.dirty && !plugin ? ' •' : ''}`;
   document.title = `${title} · Spatial Panner`;
   toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title });
 }
@@ -98,7 +104,7 @@ function updateHud(): void {
     + ` &nbsp; head ${Math.abs(yaw).toFixed(0)}° ${yaw >= 0 ? 'left' : 'right'}, ${Math.abs(pitch).toFixed(0)}° ${pitch >= 0 ? 'up' : 'down'}`
     + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '');
   const s = store.scene;
-  emptyHint.textContent = !s.layers.length ? 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.'
+  emptyHint.textContent = !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
     : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
   emptyHint.style.display = emptyHint.textContent ? '' : 'none';
 }
@@ -133,7 +139,7 @@ async function sync(): Promise<void> {
   const scene = engineScene(store.scene);
   const duration = store.duration;
   await requestAudioInfo();
-  backend.setScene(scene, duration).then((r) => { if (r && !r.ok && r.error) toast(r.error, 'error'); }).catch((e) => toast(String(e), 'error'));
+  backend.setScene(scene, duration, plugin ? store.scene : undefined).then((r) => { if (r && !r.ok && r.error) toast(r.error, 'error'); }).catch((e) => toast(String(e), 'error'));
   try {
     const a = await backend.analyze(scene, duration);
     if (a.error) { toast(a.error, 'error'); return; }
@@ -158,14 +164,19 @@ async function requestAudioInfo(): Promise<void> {
 
 backend.onTick((t) => {
   const wasPlaying = store.playing;
+  const host = !!t.host;
+  const moved = host && Math.abs(t.time - store.time) > 1e-6;
+  store.hostDriven = host;
   store.playing = t.playing;
-  if (t.playing || wasPlaying) store.time = t.time;
+  if (t.playing || wasPlaying || host) store.time = t.time;
   store.livePose = t.pose ?? null;
   if (t.meters) { store.meters = t.meters; store.emit('meters'); }
-  if (t.playing || wasPlaying !== t.playing) store.emit('time');
+  // The host's automation turns the head even while the playhead stands.
+  if (t.playing || wasPlaying !== t.playing || moved || host) store.emit('time');
   if (wasPlaying !== t.playing) store.emit('transport');
 });
 backend.onMessage((m) => toast(m.text, m.level));
+backend.onSceneReplaced((doc) => store.replace(mergeEditorKeys(doc, doc)));
 window.addEventListener('sp-message', (e) => { const d = (e as CustomEvent).detail; toast(d.text, d.level); });
 
 async function refreshInfo(): Promise<void> {
@@ -193,7 +204,7 @@ store.subscribe((kinds) => {
 // --------------------------------------------------------------- files
 
 async function openScene(): Promise<void> {
-  if (store.dirty && !confirm('Discard unsaved changes?')) return;
+  if (plugin ? !confirm('Replace this session\'s scene with a scene file?') : store.dirty && !confirm('Discard unsaved changes?')) return;
   try {
     const r = await backend.openScene();
     if (r) loadOpened(r);
@@ -202,16 +213,31 @@ async function openScene(): Promise<void> {
   }
 }
 
-function loadOpened(r: { path: string; scene: SceneDoc; raw: unknown }): void {
+function loadOpened(r: { path: string | null; scene: SceneDoc; raw: unknown }): void {
   store.audioInfo.clear();
-  store.load(mergeEditorKeys(r.scene, r.raw), r.path);
+  const doc = mergeEditorKeys(r.scene, r.raw);
+  if (plugin && r.path) {
+    // Importing into a Logic session: layers named like a track play that
+    // track; the session keeps its own document, so there is no file to save.
+    const tracks = sidebar.info?.tracks ?? [];
+    const taken = new Set<string>();
+    for (const l of doc.layers) {
+      const t = l.host_id ? undefined : tracks.find((x) => x.name === l.name && !taken.has(x.id));
+      if (t) l.host_id = t.id;
+      if (l.host_id) taken.add(l.host_id);
+    }
+    store.replace(doc);
+  } else {
+    store.load(doc, plugin ? null : r.path);
+  }
   setTimeout(frame, 100);
 }
 
 async function saveScene(saveAs: boolean): Promise<void> {
   try {
-    const r = await backend.saveScene(store.scene, saveAs ? null : store.filePath);
+    const r = await backend.saveScene(store.scene, saveAs || plugin ? null : store.filePath);
     if (!r) return;
+    if (plugin) { toast(`Exported ${r.path.split(/[\\/]/).pop()}`, 'info'); return; }
     store.filePath = r.path;
     store.dirty = false;
     store.emit('file');

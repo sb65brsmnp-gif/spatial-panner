@@ -29,6 +29,11 @@ struct EngineConfig {
     sp::SpeakerLayout layout;   // Speakers mode
     bool render = true;         // false: only the listener timeline (a scene instance that passes audio through)
     std::string hrtfPath;
+    // Offline bounce: Steam Audio simulates in line with the audio so every
+    // block sees up-to-date reflections. In real time it simulates on a
+    // worker thread (about one core at the defaults) and the audio thread
+    // only convolves. Ignored by renderers that do not use Steam Audio.
+    bool offline = false;
 
     bool operator==(const EngineConfig& o) const;
     bool operator!=(const EngineConfig& o) const { return !(*this == o); }
@@ -55,6 +60,8 @@ public:
     std::string lastError() const;
     float tailSeconds() const { return tail_.load(); }
     bool hasProgram() const { return hasProgram_.load(); }
+    bool usesSteamAudio() const { return usesSteam_.load(); }  // the current program
+    bool simulatesInline() const { return usesSteam_.load() && offlineProgram_.load(); }
     int latencySamples() const { return 32; }   // the renderer's sub-block (RenderConfig default)
 
     // ---- audio thread
@@ -107,6 +114,8 @@ private:
     int fadePos_ = 0;
     std::atomic<bool> hasProgram_{false};
     std::atomic<float> tail_{3.0f};
+    std::atomic<bool> usesSteam_{false};
+    std::atomic<bool> offlineProgram_{false};
     std::array<std::atomic<float>, 6> pose_{};
     std::vector<float> fadeBuf_;
 };

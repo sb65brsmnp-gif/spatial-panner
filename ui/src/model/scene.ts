@@ -27,6 +27,7 @@ export interface LayerDoc {
   // editor-only
   color?: string;
   solo?: boolean;
+  host_id?: string;   // plugin: the track (layer instance) that plays this layer
 }
 
 export type SegmentType = 'line' | 'bezier' | 'catmull_rom' | 'arc';
@@ -212,6 +213,7 @@ export function mergeEditorKeys(canonical: SceneDoc, raw: any): SceneDoc {
         const r = raw.layers[i];
         if (r?.color) l.color = r.color;
         if (r?.solo) l.solo = true;
+        if (typeof r?.host_id === 'string') l.host_id = r.host_id;
       });
   }
   return s;

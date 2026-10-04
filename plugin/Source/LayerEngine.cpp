@@ -78,8 +78,19 @@ juce::ThreadPool& buildPool() {
 
 bool EngineConfig::operator==(const EngineConfig& o) const {
     return sampleRate == o.sampleRate && maxBlock == o.maxBlock && mode == o.mode && render == o.render &&
-           hrtfPath == o.hrtfPath && (mode != sp::OutputMode::Speakers || sameLayout(layout, o.layout));
+           hrtfPath == o.hrtfPath && offline == o.offline &&
+           (mode != sp::OutputMode::Speakers || sameLayout(layout, o.layout));
 }
+
+namespace {
+// Whether a program built for `built` can serve `wanted`: the offline flag
+// only matters to a renderer that uses Steam Audio.
+bool serves(const EngineConfig& built, bool builtUsesSteam, const EngineConfig& wanted) {
+    EngineConfig w = wanted;
+    if (!builtUsesSteam) w.offline = built.offline;
+    return built == w;
+}
+}  // namespace
 
 struct LayerEngine::Program {
     EngineConfig cfg;
@@ -91,6 +102,8 @@ struct LayerEngine::Program {
     std::vector<float*> outPtrs;
     sp::ListenerControls lastControls;
     double lastTime = 0;
+    bool usesSteam = false;
+    float tail = 3.0f;   // seconds of output after the input stops
 };
 
 struct LayerEngine::Patch {
@@ -202,7 +215,7 @@ void LayerEngine::update() {
         pubRev = inbox_->publishedRevision;
     }
     if (pub && pubRev == revision_) return;   // up to date
-    if (pub && pubCfg == config_) {
+    if (pub && serves(pubCfg, pub->usesSteam, config_)) {
         // Same output setup: try a live update of the published renderer.
         std::unique_ptr<sp::SceneUpdate> u;
         if (pub->renderer) u = pub->renderer->prepareUpdate(renderScene(scene_));
@@ -247,7 +260,16 @@ void LayerEngine::startBuildLocked() {
                     throw std::runtime_error("the HRTF file (sadie_d1.sofa) is missing from the plugin bundle");
                 const sp::Scene rs = renderScene(scene);
                 rc.maxDistance = headroomDistance(rs);
+                // Ray tracing (mesh rooms, objects) runs on Steam Audio's own
+                // worker in real time, never on the audio thread. One tracing
+                // thread per instance: a session has one instance per track.
+                rc.steam.asyncSimulation = !cfg.offline;
+                rc.steam.threads = 1;
                 p->renderer = std::make_unique<sp::Renderer>(rs, rc, 1.0);
+                const auto st = p->renderer->stats();
+                p->usesSteam = st.backend == sp::ReflectionsBackend::SteamAudio;
+                const float decay = p->usesSteam ? st.irSeconds : st.reverbRt60Mid * 1.5f;
+                p->tail = std::min(30.0f, decay + st.maxDistance / 343.0f + 0.1f);
                 p->numOut = std::min(p->renderer->numOutputs(), kMaxOutputs);
                 p->out.assign(static_cast<size_t>(p->numOut), std::vector<float>(static_cast<size_t>(std::max(cfg.maxBlock, 64)), 0.0f));
                 p->outPtrs.resize(static_cast<size_t>(p->numOut));
@@ -314,10 +336,9 @@ void LayerEngine::handleInbox(bool blocking) {
                 fadePos_ = 0;
             }
             hasProgram_ = true;
-            if (current_->renderer) {
-                const auto st = current_->renderer->stats();
-                tail_ = std::min(30.0f, st.reverbRt60Mid * 1.5f + st.maxDistance / 343.0f + 0.1f);
-            }
+            if (current_->renderer) tail_ = current_->tail;
+            usesSteam_ = current_->usesSteam;
+            offlineProgram_ = current_->cfg.offline;
         } else if (m.patch) {
             Patch& p = *m.patch;
             if (p.target && p.target == current_) {

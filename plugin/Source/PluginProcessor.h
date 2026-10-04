@@ -36,6 +36,7 @@ public:
     const juce::String getName() const override { return "Spatial Panner"; }
     void prepareToPlay(double sampleRate, int maxBlock) override;
     void releaseResources() override {}
+    void setNonRealtime(bool nonRealtime) noexcept override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
@@ -132,6 +133,10 @@ private:
     std::atomic<int> slotForAudio_{-1};
     std::atomic<bool> recordHistory_{false};   // this instance owns the scene
     std::atomic<bool> passThrough_{false};      // scene without a layer of its own
+    // Set when the host switches to an offline bounce while the renderer
+    // simulates Steam Audio asynchronously: the next block waits for the
+    // offline renderer so the bounce is deterministic.
+    std::atomic<bool> awaitOfflineProgram_{false};
     std::atomic<float> docLevelGain_{1.0f}, docDoppler_{1.0f}, docSpread_{0.0f};
 
     // audio thread

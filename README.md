@@ -9,8 +9,11 @@ binaural (HRTF) or multichannel loudspeaker output. Target: Logic Pro on macOS
 This repository contains **the engine** (plain C++17, no JUCE, with a
 command-line renderer, see [docs/engine.md](docs/engine.md)) and **the
 standalone app**: a Three.js scene and path editor in a JUCE window that plays
-through the engine live, see [docs/editor.md](docs/editor.md). The AU plugin
-and DAW automation come next.
+through the engine live, see [docs/editor.md](docs/editor.md), and **the
+Logic plugin** (AUv2): one instance per track renders that track's layer,
+one holds the scene, and the listener follows Logic's playhead and
+automation, see [docs/plugin.md](docs/plugin.md) for building, installing
+and using it.
 
 ## Layout
 
@@ -20,12 +23,13 @@ engine/            the DSP engine (library sp::engine)
   src/             implementation, src/dsp/ holds the signal processing blocks
   tests/           Catch2 unit tests
 app/               the standalone JUCE app (audio device, playback, bridge to the editor)
+plugin/            the Audio Unit: layer and scene instances, shared session, automation
 ui/                the editor: TypeScript + Three.js, built into one HTML file
 tools/scene/       sp-scene: path/pose analysis and normalisation for the editor
 tools/render/      sp-render: scene.json + audio -> WAV (binaural, speakers, ambiX)
 tools/gensignals/  sp-gensignals: synthesises the demo sources (no third-party audio)
 scenes/            demo scenes (lshape.obj is a room mesh)
-scripts/           render_demos.sh renders every demo
+scripts/           render_demos.sh renders every demo; install_au.sh installs the plugin
 cmake/             dependency fetching (SAF, libmysofa, nlohmann/json, dr_libs, Catch2,
                    Steam Audio with FlatBuffers and pffft, built from source)
 ```
@@ -43,6 +47,7 @@ macOS (Apple Accelerate is used for BLAS/LAPACK; only Node is needed, e.g. `brew
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build
+scripts/install_au.sh          # installs and validates the Logic plugin (docs/plugin.md)
 ```
 
 Linux (Debian/Ubuntu):

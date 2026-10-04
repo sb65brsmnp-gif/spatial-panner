@@ -519,6 +519,52 @@ TEST_CASE("A layer on a 7.1.4 track renders to the speakers and leaves the LFE a
     CHECK(energy[static_cast<size_t>(lfe)] < total * 1e-6);
 }
 
+TEST_CASE("In a room with objects, ray tracing runs on a worker in real time and in line during a bounce") {
+    if (!sp::Renderer::steamAudioAvailable()) SKIP("built without Steam Audio");
+    FreshSession fs;
+    PlayHead ph;
+    auto scene = makeInstance(ph);
+    scene->setRole(SpatialPannerProcessor::Role::Scene, false);
+    auto a = makeInstance(ph);
+    a->setRole(SpatialPannerProcessor::Role::Layer);
+    tickAll({scene.get(), a.get()}, 3);
+    std::string error;
+    json d = loadDoc("occluder.json");
+    d["layers"] = json::array();
+    REQUIRE(scene->setSceneDoc(d, error));
+    tickAll({scene.get(), a.get()}, 3);
+    REQUIRE(a->sceneDoc()["room"]["objects"].size() == 3);
+    waitEngines({a.get()});
+
+    juce::AudioBuffer<float> buf(2, kBlock);
+    juce::MidiBuffer midi;
+    auto play = [&](int blocks) {
+        float peak = 0;
+        for (int i = 0; i < blocks; ++i) {
+            ph.pos = static_cast<juce::int64>(i) * kBlock;
+            buf.clear();
+            for (int k = 0; k < kBlock; ++k) buf.setSample(0, k, std::sin(0.05f * static_cast<float>(ph.pos + k)) * 0.5f);
+            a->processBlock(buf, midi);
+            peak = std::max(peak, buf.getMagnitude(0, kBlock));
+        }
+        return peak;
+    };
+    CHECK(play(4) > 1e-3f);
+    CHECK(a->engineForTesting().usesSteamAudio());
+    CHECK_FALSE(a->engineForTesting().simulatesInline());
+
+    // Logic switches to an offline bounce: the next block waits for a
+    // renderer that simulates in line.
+    a->setNonRealtime(true);
+    CHECK(play(4) > 1e-3f);
+    CHECK(a->engineForTesting().simulatesInline());
+
+    a->setNonRealtime(false);
+    waitEngines({a.get()});
+    play(1);
+    CHECK_FALSE(a->engineForTesting().simulatesInline());
+}
+
 int main(int argc, char* argv[]) {
     juce::ScopedJuceInitialiser_GUI juce;
     return Catch::Session().run(argc, argv);

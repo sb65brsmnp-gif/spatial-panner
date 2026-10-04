@@ -186,6 +186,20 @@ bool SpatialPannerProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return false;
 }
 
+void SpatialPannerProcessor::setNonRealtime(bool nonRealtime) noexcept {
+    const bool changed = nonRealtime != isNonRealtime();
+    AudioProcessor::setNonRealtime(nonRealtime);
+    if (!changed) return;
+    // Only a renderer using Steam Audio is rebuilt (LayerEngine ignores the
+    // flag otherwise); the host calls this outside processBlock.
+    if (nonRealtime && engine_.usesSteamAudio()) awaitOfflineProgram_ = true;
+    try {
+        reconfigureEngine();
+    } catch (...) {
+        awaitOfflineProgram_ = false;   // keep the current renderer
+    }
+}
+
 EngineConfig SpatialPannerProcessor::engineConfig() const {
     EngineConfig c;
     c.sampleRate = sampleRate_;
@@ -201,6 +215,7 @@ EngineConfig SpatialPannerProcessor::engineConfig() const {
     }
     c.render = !(role_ == Role::Scene && !sceneIsLayer_);
     c.hrtfPath = findHrtf();
+    c.offline = isNonRealtime();
     return c;
 }
 
@@ -556,9 +571,10 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     }
     const bool useHistory = session_->sceneOwner() != 0;
 
-    if (isNonRealtime() && !engine_.hasProgram()) {
-        // Offline bounce right after loading: wait for the renderer instead of
-        // bouncing silence.
+    if (isNonRealtime() && (!engine_.hasProgram() || awaitOfflineProgram_.exchange(false))) {
+        // Offline bounce right after loading, or right after switching from
+        // real time: wait for the renderer instead of bouncing silence or
+        // asynchronous reflections.
         engine_.waitUntilCurrent(30000);
         engine_.drainInboxBlocking();
     }
