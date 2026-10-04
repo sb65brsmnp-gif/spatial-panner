@@ -1,0 +1,33 @@
+{
+  "name": "Walk through a 12 x 3.5 x 16 m room past five layers, with a slow close pass of the voice",
+  "duration": 30,
+  "layers": [
+    {"name": "voice",  "audio": "../signals/voice.wav",  "position": [-3.5, 1.6, -4.0], "level_db": -8, "min_distance": 0.4,
+     "directivity": 0.7, "directivity_forward": [1, 0, 0.3], "loop": true},
+    {"name": "pluck",  "audio": "../signals/pluck.wav",  "position": [3.0, 1.2, -2.0], "level_db": -6, "loop": true},
+    {"name": "clicks", "audio": "../signals/clicks.wav", "position": [-4.0, 2.0, 3.0], "level_db": -8, "loop": true},
+    {"name": "drone",  "audio": "../signals/drone.wav",  "position": [0.0, 2.6, -7.2], "level_db": -8, "spread_deg": 45, "loop": true},
+    {"name": "bell",   "audio": "../signals/bell.wav",   "position": [4.5, 1.8, 5.0], "level_db": -6, "loop": true}
+  ],
+  "room": {
+    "type": "box", "size": [12, 3.5, 16],
+    "materials": {"walls": "plaster", "back": "curtain", "floor": "wood_floor", "ceiling": "acoustic_tile"},
+    "reflection_order": 2
+  },
+  "listener": {
+    "path": {"type": "catmull_rom",
+             "points": [[4.5, 1.7, 7.0], [3.0, 1.7, 3.0], [0.5, 1.7, 0.0], [-2.5, 1.7, -2.5],
+                        [-3.2, 1.7, -4.5], [-2.0, 1.7, -6.0], [2.0, 1.7, -6.5], [4.5, 1.7, -4.0]]},
+    "speed": [
+      {"time": 0,  "speed": 0.0, "easing": "smooth"},
+      {"time": 1,  "speed": 1.3, "easing": "linear"},
+      {"time": 9,  "speed": 1.3, "easing": "smooth"},
+      {"time": 11, "speed": 0.4, "easing": "linear"},
+      {"time": 14, "speed": 0.4, "easing": "smooth"},
+      {"time": 16, "speed": 1.4, "easing": "linear"},
+      {"time": 24, "speed": 1.4, "easing": "smooth"},
+      {"time": 27, "speed": 0.0, "easing": "hold"}
+    ],
+    "head": {"mode": "along_path"}
+  }
+}
