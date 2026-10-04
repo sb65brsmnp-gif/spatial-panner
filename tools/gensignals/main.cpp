@@ -3,7 +3,9 @@
 //
 //   sp-gensignals OUT_DIR [--rate 48000] [--seconds 30]
 //
-// Writes mono 24-bit WAVs: engine, clicks, pluck, voice, bell, drone, noise_bursts, stream.
+// Writes mono 24-bit WAVs: engine, clicks, pluck, voice, bell, drone, noise_bursts, stream,
+// and two synthetic room impulse responses: hall_ir (stereo, 2.5 s), plate_ir (mono, 1.4 s).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -229,6 +231,70 @@ std::vector<float> stream(int n, float fs) {
     return v;
 }
 
+// ------------------------------------------------------------------ test impulse responses
+// Synthetic room impulse responses for the Room tab's "Impulse response" late
+// reverb (docs/editor.md): exponentially decaying noise, shorter at high
+// frequencies, with a few early echoes in front of the diffuse tail. They are
+// not recordings of a real room; they exist so the IR path can be exercised
+// and heard without third-party files.
+
+// One decaying-noise tail: RT60 `t60` at low frequencies falling to `t60High`
+// above ~2 kHz, with a sparse early part before `mix` seconds.
+std::vector<float> irTail(int n, float fs, float t60, float t60High, float mix, unsigned seed) {
+    std::vector<float> v(n, 0.0f);
+    Rng rng;
+    rng.g.seed(seed);
+    // Two bands: low-passed noise decays slowly, the remainder decays faster.
+    OnePoleLp lp;
+    lp.set(2000, fs);
+    const float kLow = -3.0f * std::log(10.0f) / (t60 * fs);        // per-sample log-amplitude slope
+    const float kHigh = -3.0f * std::log(10.0f) / (t60High * fs);
+    for (int i = 0; i < n; ++i) {
+        const float t = i / fs;
+        const float w = rng.next();
+        const float low = lp.process(w);
+        const float high = w - low;
+        // Sparse until `mix` (echo density grows as t^2), dense afterwards.
+        float density = t < mix ? 0.02f + 0.98f * (t / mix) * (t / mix) : 1.0f;
+        const bool on = std::fabs(rng.next()) < density;
+        if (!on) continue;
+        v[i] = (low * std::exp(kLow * i) + high * std::exp(kHigh * i)) / std::sqrt(density);
+    }
+    return v;
+}
+
+// A medium hall, stereo (2.5 s, RT60 ~2.2 s low / 1.1 s high): the two
+// channels are independent noise so they decorrelate like spaced microphones,
+// with a common first echo set so the early part stays centred.
+std::vector<std::vector<float>> hallIr(float fs) {
+    const int n = static_cast<int>(2.5f * fs);
+    std::vector<std::vector<float>> ch = {irTail(n, fs, 2.2f, 1.1f, 0.08f, 11u), irTail(n, fs, 2.2f, 1.1f, 0.08f, 23u)};
+    const int preDelay = static_cast<int>(0.018f * fs);
+    for (auto& c : ch) {
+        std::rotate(c.rbegin(), c.rbegin() + preDelay, c.rend());
+        std::fill(c.begin(), c.begin() + preDelay, 0.0f);
+    }
+    // Shared early echoes (ms, gain) with a little left/right difference.
+    const float echoes[][2] = {{21, 0.5f}, {27, 0.35f}, {34, 0.3f}, {45, 0.22f}};
+    for (const auto& e : echoes) {
+        const int i = static_cast<int>(e[0] * 1e-3f * fs);
+        ch[0][i] += e[1] * 1.1f;
+        ch[1][i + 3] += e[1] * 0.9f;
+    }
+    float peak = 0;
+    for (const auto& c : ch) for (float x : c) peak = std::max(peak, std::fabs(x));
+    for (auto& c : ch) for (float& x : c) x *= dbToGain(-1.0f) / peak;
+    return ch;
+}
+
+// A bright plate, mono (1.4 s, nearly flat decay): dense from the start.
+std::vector<std::vector<float>> plateIr(float fs) {
+    const int n = static_cast<int>(1.4f * fs);
+    std::vector<float> v = irTail(n, fs, 1.3f, 1.0f, 0.002f, 37u);
+    normalise(v, -1.0f);
+    return {v};
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -254,6 +320,13 @@ int main(int argc, char** argv) {
     for (const auto& g : gens) {
         const std::string path = (std::filesystem::path(outDir) / (std::string(g.name) + ".wav")).string();
         tools::writeWav(path, {g.fn(n, fs)}, rate);
+        std::fprintf(stderr, "wrote %s\n", path.c_str());
+    }
+    struct IrGen { const char* name; std::vector<std::vector<float>> (*fn)(float); };
+    const IrGen irs[] = {{"hall_ir", hallIr}, {"plate_ir", plateIr}};
+    for (const auto& g : irs) {
+        const std::string path = (std::filesystem::path(outDir) / (std::string(g.name) + ".wav")).string();
+        tools::writeWav(path, g.fn(fs), rate);
         std::fprintf(stderr, "wrote %s\n", path.c_str());
     }
     return 0;
