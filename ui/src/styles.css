@@ -104,3 +104,5 @@ input.num { width: 64px; }
 .tl-keybar { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .tl-keybar .hint { margin: 0; }
 .tl-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+.progress { height: 6px; background: #262b34; border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
+.progress-fill { height: 100%; width: 0; background: var(--blue); transition: width 0.2s; }

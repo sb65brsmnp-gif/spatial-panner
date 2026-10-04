@@ -2,7 +2,7 @@
 import type { Store } from '../model/store';
 import { defaultLayer, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
-import type { Backend, EngineInfo, OutputMode } from '../bridge/backend';
+import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
 import { checkbox, el, fmtTime, numberInput, row, section, select, slider, vec3Inputs } from './dom';
 
@@ -18,6 +18,13 @@ export class Sidebar {
   private pointerInside = false;
   info: EngineInfo | null = null;
   private meterEls: HTMLElement[] = [];
+  // Bounce settings live here, not in the panel, because the Output tab is
+  // rebuilt whenever the engine info changes (every couple of seconds).
+  private bounceFrom = 0;
+  private bounceTo: number | null = null;  // null: the scene's length
+  private bounceRate: number | null = null;  // null: the device's rate
+  private bounceState: BounceEvent | null = null;
+  private bounceBar: HTMLElement | null = null;
 
   constructor(private store: Store, private backend: Backend, private tools: Interaction) {
     this.root = el('div', { id: 'sidebar' });
@@ -46,6 +53,14 @@ export class Sidebar {
       if (kinds.has('scene') || kinds.has('selection') || kinds.has('analysis') || kinds.has('file') || kinds.has('tool')) this.render();
     });
     this.setTab('layers');
+    backend.onBounce((e) => this.onBounce(e));
+  }
+
+  private onBounce(e: BounceEvent): void {
+    this.bounceState = e;
+    // Progress only moves the bar; start and finish rebuild the section.
+    if (!e.done && this.bounceBar && (e.progress ?? 0) > 0) { this.bounceBar.style.width = `${Math.round((e.progress ?? 0) * 100)}%`; return; }
+    if (this.tab === 'output') this.render(true);
   }
 
   setTab(t: Tab): void {
@@ -428,18 +443,40 @@ export class Sidebar {
       info ? el('p', { class: 'muted' }, `${info.device} · ${(info.sampleRate / 1000).toFixed(1)} kHz · ${info.outputChannels} outputs · ${info.status}`) : '',
     ));
 
-    let start = 0, end = this.store.duration, rate = info?.sampleRate ?? 48000;
-    const bounce = el('button', { class: 'btn primary' }, 'Bounce to WAV…');
+    const end = this.bounceTo ?? this.store.duration;
+    const rate = this.bounceRate ?? info?.sampleRate ?? 48000;
+    const st = this.bounceState;
+    const running = !!st && !st.done;
+    const bounce = el('button', { class: 'btn primary' }, running ? 'Bouncing…' : 'Bounce to WAV…') as HTMLButtonElement;
+    bounce.disabled = running;
     bounce.addEventListener('click', async () => {
-      const r = await this.backend.bounce({ mode: out.mode, layout: out.layout, start, end, sampleRate: rate });
-      if (r) this.flash(`Bouncing to ${r.path}`);
+      try {
+        await this.backend.bounce({ mode: out.mode, layout: out.layout, start: this.bounceFrom, end, sampleRate: rate });
+      } catch (e) {
+        this.flash(String(e instanceof Error ? e.message : e), 'error');
+      }
     });
+    const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
+    let status: HTMLElement | string = '';
+    this.bounceBar = null;
+    if (running) {
+      this.bounceBar = el('div', { class: 'progress-fill' });
+      this.bounceBar.style.width = `${Math.round((st.progress ?? 0) * 100)}%`;
+      status = el('div', {}, el('p', { class: 'muted' }, `Rendering ${name(st.path)}…`), el('div', { class: 'progress' }, this.bounceBar));
+    } else if (st?.error) {
+      status = el('p', { class: 'warn-text' }, `Bounce failed: ${st.error}`);
+    } else if (st) {
+      const show = el('button', { class: 'btn' }, 'Show in Finder');
+      show.addEventListener('click', () => { void this.backend.revealFile(st.path); });
+      status = el('div', {}, el('p', { class: 'muted' }, `Saved ${st.path}`), el('div', { class: 'btn-row' }, show));
+    }
     this.body.append(section('Bounce',
-      row('From', numberInput(start, (v) => { start = Math.max(0, v); }, { step: 1, width: 64 }), 's  to',
-        numberInput(end, (v) => { end = Math.max(0, v); }, { step: 1, width: 64 }), 's'),
-      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { rate = parseInt(v, 10); })),
+      row('From', numberInput(this.bounceFrom, (v) => { this.bounceFrom = Math.max(0, v); }, { step: 1, width: 64 }), 's  to',
+        numberInput(end, (v) => { this.bounceTo = Math.max(0, v); }, { step: 1, width: 64 }), 's'),
+      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { this.bounceRate = parseInt(v, 10); })),
       el('p', { class: 'muted' }, 'Renders offline with the output setting above: binaural stereo, the speaker layout, or ambiX.'),
       el('div', { class: 'btn-row' }, bounce),
+      status,
     ));
   }
 
@@ -453,8 +490,8 @@ export class Sidebar {
     ));
   }
 
-  private flash(text: string): void {
-    window.dispatchEvent(new CustomEvent('sp-message', { detail: { text, level: 'info' } }));
+  private flash(text: string, level: 'info' | 'error' = 'info'): void {
+    window.dispatchEvent(new CustomEvent('sp-message', { detail: { text, level } }));
   }
 }
 

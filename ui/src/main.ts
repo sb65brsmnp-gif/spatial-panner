@@ -28,9 +28,12 @@ const tools = new Interaction(vp, view, store);
 let follow = false;
 
 const toolbar = new Toolbar(tools, plugin, {
-  newScene: () => {
-    if (plugin) { if (confirm('Start over with an empty scene? The tracks stay as layers.')) store.replace({ ...defaultScene(), name: store.scene.name }); return; }
-    if (!store.dirty || confirm('Discard unsaved changes?')) { store.load(defaultScene(), null); frame(); }
+  newScene: async () => {
+    if (plugin) {
+      if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
+      return;
+    }
+    if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
   },
   open: () => openScene(),
   save: (saveAs) => saveScene(saveAs),
@@ -206,7 +209,8 @@ store.subscribe((kinds) => {
 // --------------------------------------------------------------- files
 
 async function openScene(): Promise<void> {
-  if (plugin ? !confirm('Replace this session\'s scene with a scene file?') : store.dirty && !confirm('Discard unsaved changes?')) return;
+  if (plugin ? !await backend.confirm('Replace this session\'s scene with a scene file?', 'Import…')
+    : store.dirty && !await backend.confirm('Discard unsaved changes?', 'Discard')) return;
   try {
     const r = await backend.openScene();
     if (r) loadOpened(r);
@@ -280,8 +284,8 @@ window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind
 // ---------------------------------------------------------------- start
 
 store.load(defaultScene(), null);
-backend.onOpenFile((r) => {
-  if (!store.dirty || confirm('Discard unsaved changes?')) loadOpened(r);
+backend.onOpenFile(async (r) => {
+  if (!store.dirty || await backend.confirm(`Discard unsaved changes and open ${r.path.split(/[\\/]/).pop()}?`, 'Discard')) loadOpened(r);
 });
 // A scene given on the command line / opened from the Finder (app), or ?scene=name.json (dev).
 backend.startupScene().then((r) => { if (r) loadOpened(r); }).catch((e) => toast(String(e), 'error'));

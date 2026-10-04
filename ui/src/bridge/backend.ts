@@ -35,6 +35,8 @@ export interface Tick {
 }
 
 export interface BounceRequest { mode: OutputMode; layout: string; start: number; end: number; sampleRate: number }
+// Progress of a running bounce; `done` with or without `error` at the end.
+export interface BounceEvent { path: string; progress?: number; done?: boolean; error?: string }
 
 export interface Backend {
   readonly kind: 'app' | 'dev' | 'plugin';
@@ -51,6 +53,11 @@ export interface Backend {
   saveScene(scene: SceneDoc, path: string | null): Promise<{ path: string } | null>;
   bounce(req: BounceRequest): Promise<{ path: string } | null>;
   showAudioSettings(): Promise<void>;
+  // OK/Cancel question. The app's web view cannot show window.confirm on
+  // macOS (it silently answers Cancel), so the native side asks.
+  confirm(message: string, ok?: string): Promise<boolean>;
+  revealFile(path: string): Promise<void>;
+  onBounce(fn: (e: BounceEvent) => void): void;
   startupScene(): Promise<{ path: string; scene: SceneDoc; raw: unknown } | null>;
   onOpenFile(fn: (r: { path: string; scene: SceneDoc; raw: unknown }) => void): void;
   onTick(fn: (t: Tick) => void): void;
@@ -115,6 +122,13 @@ class AppBackend implements Backend {
   saveScene(scene: SceneDoc, path: string | null) { return this.call<{ path: string } | null>('saveScene', { scene, path }); }
   bounce(req: BounceRequest) { return this.call<{ path: string } | null>('bounce', req); }
   async showAudioSettings() { await this.call('showAudioSettings'); }
+  async confirm(message: string, ok?: string) {
+    return !!(await this.call<{ ok: boolean } | null>('confirm', { message, ok: ok ?? 'OK' }))?.ok;
+  }
+  async revealFile(path: string) { await this.call('revealFile', { path }); }
+  onBounce(fn: (e: BounceEvent) => void) {
+    window.__JUCE__!.backend.addEventListener('bounce', (raw: unknown) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw as BounceEvent));
+  }
   startupScene() { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('startupScene'); }
   onOpenFile(fn: (r: { path: string; scene: SceneDoc; raw: unknown }) => void) {
     window.__JUCE__!.backend.addEventListener('openFile', (raw: string) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw));
@@ -206,6 +220,9 @@ class DevBackend implements Backend {
   async showAudioSettings() {
     for (const f of this.msgFns) f({ text: 'Audio settings are in the app.', level: 'info' });
   }
+  async confirm(message: string) { return window.confirm(message); }
+  async revealFile() {}
+  onBounce() {}
   async startupScene() {
     const name = new URLSearchParams(location.search).get('scene');
     return name ? this.post<{ path: string; scene: SceneDoc; raw: unknown }>('/api/open', { name }) : null;

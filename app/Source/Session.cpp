@@ -242,7 +242,8 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
     const sp::Scene scene = scene_;
     const double duration = duration_;
     auto alive = alive_;
-    t->body = [raw, scene, duration, out, start, end, rate, file, progress, done, alive] {
+    const juce::File partial = file.getSiblingFile("." + file.getFileNameWithoutExtension() + ".partial.wav");
+    t->body = [raw, scene, duration, out, start, end, rate, file, partial, progress, done, alive] {
         juce::String error;
         auto report = [alive](std::function<void()> f) {
             juce::MessageManager::callAsync([alive, f] { if (*alive) f(); });
@@ -263,9 +264,12 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
             const auto pre = static_cast<juce::int64>(std::min(start, 3.0) * rate);
             const auto first = static_cast<juce::int64>(start * rate) - pre;
             const auto total = static_cast<juce::int64>((t1 - start) * rate);
-            file.deleteFile();
-            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(file);
-            if (static_cast<juce::FileOutputStream*>(os.get())->failedToOpen()) throw std::runtime_error("Cannot write " + file.getFullPathName().toStdString());
+            // Render into a hidden file next to the target and move it into
+            // place at the end, so the chosen name only ever holds a complete
+            // bounce (a failed or cancelled one leaves nothing behind).
+            partial.deleteFile();
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(partial);
+            if (static_cast<juce::FileOutputStream*>(os.get())->failedToOpen()) throw std::runtime_error("Cannot write in " + file.getParentDirectory().getFullPathName().toStdString());
             juce::WavAudioFormat wav;
             auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions{}.withSampleRate(rate).withNumChannels(nOut).withBitsPerSample(24));
             if (!writer) throw std::runtime_error("Cannot create a WAV writer for " + std::to_string(nOut) + " channels");
@@ -308,8 +312,10 @@ void Session::bounce(const juce::File& file, OutputSetup out, double start, doub
                 if (pr - lastReported > 0.01f) { lastReported = pr; report([progress, pr] { progress(pr); }); }
             }
             writer.reset();
+            if (!partial.moveFileTo(file)) throw std::runtime_error("Cannot write " + file.getFullPathName().toStdString());
         } catch (const std::exception& e) {
             error = e.what();
+            partial.deleteFile();
         }
         report([done, error] { done(error); });
     };

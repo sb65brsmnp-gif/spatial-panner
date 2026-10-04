@@ -83,7 +83,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -176,6 +176,17 @@ private:
         if (name == "startupScene") {
             const json d = proc_.sceneDoc();
             done(json{{"path", nullptr}, {"scene", d}, {"raw", d}}.dump());
+            return;
+        }
+        if (name == "confirm") {
+            // WKWebView answers window.confirm with Cancel unless the host
+            // implements it (JUCE does not), so the editor asks here.
+            auto opts = juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::QuestionIcon, "Spatial Panner",
+                                                                     juce::String::fromUTF8(a.value("message", "").c_str()),
+                                                                     juce::String::fromUTF8(a.value("ok", "OK").c_str()), "Cancel", this);
+            juce::NativeMessageBox::showAsync(opts, [self = juce::Component::SafePointer<juce::Component>(this), done](int button) {
+                if (self != nullptr) done(json{{"ok", button == 0}}.dump());  // button index: 0 is OK
+            });
             return;
         }
         if (name == "openScene") { openScene(done); return; }
