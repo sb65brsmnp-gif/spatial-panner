@@ -16,6 +16,15 @@
 
 include(FetchContent)
 
+# FlatBuffers 1.12 and pffft declare cmake_minimum_required 2.8; CMake 4
+# (GitHub's macOS runners) refuses that without this. Steam Audio itself is 3.17.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+# We call FetchContent_Populate + add_subdirectory(EXCLUDE_FROM_ALL) so only
+# the libraries phonon needs get built; CMake 3.30 deprecates that form.
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 # ----------------------------------------------------------- FlatBuffers 1.12
 set(FLATBUFFERS_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(FLATBUFFERS_BUILD_FLATLIB  OFF CACHE BOOL "" FORCE)
