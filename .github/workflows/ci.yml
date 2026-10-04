@@ -36,14 +36,22 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build (engine, tools, app)
+      - name: Build (engine, tools, app, plugin)
         run: cmake --build build
 
-      - name: Test (engine and app session)
+      - name: Test (engine, app session, plugin)
         run: ctest --test-dir build --output-on-failure
 
       - name: Generate the demo signals (used by the demos and the editor tests)
         run: ./build/tools/gensignals/sp-gensignals signals --seconds 6
+
+      - name: Check the plugin is a universal binary
+        if: runner.os == 'macOS'
+        run: lipo -info "build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component/Contents/MacOS/Spatial Panner" | grep -q "x86_64 arm64\|arm64 x86_64"
+
+      - name: Validate the Audio Unit (auval)
+        if: runner.os == 'macOS'
+        run: scripts/install_au.sh build
 
       - name: Editor unit tests
         working-directory: ui
@@ -87,3 +95,17 @@ jobs:
         with:
           name: spatial-panner-macos
           path: build/package/Spatial-Panner-macOS.zip
+
+      - name: Package the Audio Unit
+        if: runner.os == 'macOS'
+        run: |
+          # ditto keeps the executable bits and the signature (see the app above).
+          (cd "build/plugin/SpatialPannerPlugin_artefacts/Release/AU" && \
+            ditto -c -k --keepParent "Spatial Panner.component" "$GITHUB_WORKSPACE/build/package/Spatial-Panner-AU.zip")
+
+      - name: Upload the Audio Unit
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spatial-panner-au
+          path: build/package/Spatial-Panner-AU.zip

@@ -95,6 +95,19 @@ TEST_CASE("prepareUpdate: what updates live and what needs a new renderer") {
     Scene far = s;
     far.layers[0].position = {0, 1.6f, -400};  // beyond the delay line sized for the original scene
     CHECK(r.prepareUpdate(far) == nullptr);
+
+    // Geometry the ray tracer is built from (objects, a mesh, transmission).
+    Scene object = s;
+    object.room.objects.push_back(SceneObject{});
+    CHECK(r.prepareUpdate(object) == nullptr);
+
+    Scene mesh = s;
+    mesh.room.mesh.addBox({-1, 0, -1}, {1, 2, 1}, mesh.room.mesh.addMaterial(materials::byName("brick")), false);
+    CHECK(r.prepareUpdate(mesh) == nullptr);
+
+    Scene transmissive = s;
+    transmissive.room.materials[WallNegX].transmission = {0.1f, 0.05f, 0.01f};
+    CHECK(r.prepareUpdate(transmissive) == nullptr);
 }
 
 TEST_CASE("Applying an unchanged scene leaves the output bit-identical") {

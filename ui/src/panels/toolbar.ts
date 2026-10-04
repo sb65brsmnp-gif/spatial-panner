@@ -26,18 +26,25 @@ export class Toolbar {
   private shapeSel: HTMLSelectElement;
   readonly title: HTMLElement;
 
-  constructor(private tools: Interaction, actions: ToolbarActions) {
+  // `plugin`: the scene lives in the host's project, so files are only
+  // imported and exported.
+  constructor(private tools: Interaction, plugin: boolean, actions: ToolbarActions) {
     this.root = el('div', { id: 'toolbar' });
     const b = (label: string, title: string, fn: () => void, cls = 'tbtn') => {
       const x = el('button', { class: cls, title }, label) as HTMLButtonElement;
       x.addEventListener('click', fn);
       return x;
     };
-    const file = el('div', { class: 'group' },
-      b('New', 'New scene', () => actions.newScene()),
-      b('Open…', 'Open a scene (⌘O)', () => actions.open()),
-      b('Save', 'Save (⌘S)', () => actions.save(false)),
-      b('Save as…', 'Save as (⇧⌘S)', () => actions.save(true)));
+    const file = plugin
+      ? el('div', { class: 'group' },
+        b('Clear', 'Start over with an empty scene (the tracks stay as layers)', () => actions.newScene()),
+        b('Import…', 'Replace this session\'s scene with a scene file', () => actions.open()),
+        b('Export…', 'Save this session\'s scene to a file', () => actions.save(true)))
+      : el('div', { class: 'group' },
+        b('New', 'New scene', () => actions.newScene()),
+        b('Open…', 'Open a scene (⌘O)', () => actions.open()),
+        b('Save', 'Save (⌘S)', () => actions.save(false)),
+        b('Save as…', 'Save as (⇧⌘S)', () => actions.save(true)));
     this.undoBtn = b('↶', 'Undo (⌘Z)', () => actions.undo());
     this.redoBtn = b('↷', 'Redo (⇧⌘Z)', () => actions.redo());
     const hist = el('div', { class: 'group' }, this.undoBtn, this.redoBtn);

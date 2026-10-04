@@ -83,7 +83,8 @@ export class Sidebar {
     const a = this.store.analysis;
     const base = `${this.tab}|${sel}|${this.store.filePath}`;
     switch (this.tab) {
-      case 'layers': return base + JSON.stringify(s.layers) + JSON.stringify([...this.store.audioInfo.keys()]);
+      case 'layers': return base + JSON.stringify(s.layers) + JSON.stringify([...this.store.audioInfo.keys()])
+        + (this.plugin ? JSON.stringify(this.info?.tracks ?? []) : '');
       case 'path': return base + JSON.stringify(s.listener) + JSON.stringify(s.editor) + JSON.stringify(this.tools.opts)
         + (a ? `${a.arrival_time}|${a.paths.map((p) => p.length).join(',')}` : '') + s.layers.map((l) => l.name).join('|');
       case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment);
@@ -93,19 +94,33 @@ export class Sidebar {
 
   private upd(fn: (s: SceneDoc) => void, key?: string): void { this.store.update(fn, key); }
 
+  // Plugin: tracks play the layers, the host owns the transport and output.
+  private get plugin(): boolean { return this.backend.kind === 'plugin'; }
+
+  private trackName(id: string | undefined): string | null {
+    if (!id) return null;
+    return this.info?.tracks?.find((t) => t.id === id)?.name ?? null;
+  }
+
   // -------------------------------------------------------------- layers
 
   private renderLayers(): void {
     const s = this.store.scene;
-    const add = el('button', { class: 'btn primary' }, 'Add audio files…');
-    add.addEventListener('click', () => this.addAudioFiles());
-    const addEmpty = el('button', { class: 'btn' }, 'Add empty layer');
-    addEmpty.addEventListener('click', () => this.addLayers([{ path: '', name: '' }]));
-    this.body.append(el('div', { class: 'btn-row' }, add, addEmpty));
-
-    if (!s.layers.length) {
-      this.body.append(el('p', { class: 'hint' }, 'Add audio files to place them in the scene. Each file becomes a layer you can drag in the 3D view.'));
-      return;
+    if (this.plugin) {
+      this.body.append(el('p', { class: 'hint' }, s.layers.length
+        ? 'Each track running Spatial Panner plays its layer. Drag layers in the 3D view to place them.'
+        : 'Insert Spatial Panner on a track to add it here as a layer. Each track plays its own layer.'));
+      if (!s.layers.length) return;
+    } else {
+      const add = el('button', { class: 'btn primary' }, 'Add audio files…');
+      add.addEventListener('click', () => this.addAudioFiles());
+      const addEmpty = el('button', { class: 'btn' }, 'Add empty layer');
+      addEmpty.addEventListener('click', () => this.addLayers([{ path: '', name: '' }]));
+      this.body.append(el('div', { class: 'btn-row' }, add, addEmpty));
+      if (!s.layers.length) {
+        this.body.append(el('p', { class: 'hint' }, 'Add audio files to place them in the scene. Each file becomes a layer you can drag in the 3D view.'));
+        return;
+      }
     }
     const list = el('div', { class: 'layer-list' });
     const sel = this.store.selection;
@@ -114,7 +129,10 @@ export class Sidebar {
       const color = el('input', { type: 'color', class: 'swatch' });
       color.value = l.color ?? '#4f9cf9';
       color.addEventListener('input', () => this.upd((sc) => { sc.layers[i].color = color.value; }, `color-${i}`));
-      const name = el('span', { class: 'layer-name', title: l.audio || 'no audio file' }, l.name || `Layer ${i + 1}`);
+      const unbound = this.plugin && !this.trackName(l.host_id);
+      const name = el('span', { class: 'layer-name' + (unbound ? ' muted' : ''),
+        title: this.plugin ? (unbound ? 'No track plays this layer' : `Track: ${this.trackName(l.host_id)}`) : l.audio || 'no audio file' },
+        l.name || `Layer ${i + 1}`);
       const mute = el('button', { class: 'ms' + (l.mute ? ' on mute' : ''), title: 'Mute' }, 'M');
       mute.addEventListener('click', (e) => { e.stopPropagation(); this.upd((sc) => { sc.layers[i].mute = !sc.layers[i].mute; }); });
       const solo = el('button', { class: 'ms' + (l.solo ? ' on solo' : ''), title: 'Solo' }, 'S');
@@ -154,14 +172,39 @@ export class Sidebar {
     const facing = Math.round(Math.atan2(-l.directivity_forward[0], -l.directivity_forward[2]) * 180 / Math.PI);
     const remove = el('button', { class: 'btn danger' }, 'Remove layer');
     remove.addEventListener('click', () => { this.store.select({ kind: 'layer', index: i }); this.tools.deleteSelection(); });
-    this.body.append(section('Layer',
-      row('Name', nameIn),
-      row('Audio', el('span', { class: 'file', title: l.audio }, audioDesc), replace),
-      row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
-      row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
-      row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
-        checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
-    ));
+    const bound = this.plugin && !!this.trackName(l.host_id);
+    if (this.plugin) {
+      // The track plays the audio and its name names the layer.
+      const tracks = this.info?.tracks ?? [];
+      const ids = ['', ...tracks.map((t) => t.id)];
+      if (l.host_id && !tracks.some((t) => t.id === l.host_id)) ids.push(l.host_id);
+      const labels: Record<string, string> = { '': 'none' };
+      for (const id of ids.slice(1)) labels[id] = this.trackName(id) ?? 'a track that is not running';
+      const track = select(ids, l.host_id ?? '', (v) => this.upd((s) => {
+        for (const x of s.layers) if (v && x.host_id === v) delete x.host_id;
+        if (v) s.layers[i].host_id = v; else delete s.layers[i].host_id;
+        const n = this.trackName(v);
+        if (n) s.layers[i].name = n;
+      }), labels);
+      nameIn.disabled = bound;
+      if (bound) nameIn.title = 'Follows the track name in Logic';
+      this.body.append(section('Layer',
+        row('Track', track),
+        row('Name', nameIn),
+        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+        el('p', { class: 'muted' }, 'The track\'s Level and Position offset parameters adjust this live and can be automated in Logic.'),
+      ));
+    } else {
+      this.body.append(section('Layer',
+        row('Name', nameIn),
+        row('Audio', el('span', { class: 'file', title: l.audio }, audioDesc), replace),
+        row('Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+        row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
+          checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
+      ));
+    }
     this.body.append(section('Sound source',
       row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
       row('Width', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
@@ -178,7 +221,7 @@ export class Sidebar {
       row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64 }), 'dB'),
       row('Reflections', select(['-1', '0', '1', '2', '3'], String(l.reflection_order), (v) => u((x) => { x.reflection_order = parseInt(v, 10); }),
         { '-1': 'room default', '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
-    ), el('div', { class: 'btn-row' }, remove));
+    ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
   }
 
   async addAudioFiles(): Promise<void> {
@@ -364,6 +407,7 @@ export class Sidebar {
   // -------------------------------------------------------------- output
 
   private renderOutput(): void {
+    if (this.plugin) { this.renderPluginOutput(); return; }
     const out = this.store.scene.editor?.output ?? { mode: 'binaural' as OutputMode, layout: '7.1.4' };
     const setOut = (mode: OutputMode, layout: string) => {
       this.upd((sc) => { sc.editor = { ...sc.editor, output: { mode, layout } }; });
@@ -396,6 +440,16 @@ export class Sidebar {
       row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { rate = parseInt(v, 10); })),
       el('p', { class: 'muted' }, 'Renders offline with the output setting above: binaural stereo, the speaker layout, or ambiX.'),
       el('div', { class: 'btn-row' }, bounce),
+    ));
+  }
+
+  private renderPluginOutput(): void {
+    const info = this.info;
+    this.body.append(section('Listen through',
+      el('p', { class: 'muted' }, 'Each track sets its own output. On a stereo track Spatial Panner renders binaural for headphones '
+        + '(or plain stereo speakers, chosen in the plugin header); on a surround track it renders that track\'s speaker layout, up to 7.1.4.'),
+      el('p', { class: 'muted' }, 'To bounce, use File > Bounce in Logic: every track renders its own layer and the mix sums them.'),
+      info ? el('p', { class: 'muted' }, `${info.device} · ${(info.sampleRate / 1000).toFixed(1)} kHz · ${info.status}`) : '',
     ));
   }
 
