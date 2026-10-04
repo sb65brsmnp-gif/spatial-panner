@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  appendSegments, circle, closedSmooth, deletePoint, evaluateSegment, fitFreehand, insertPoint, jointPoints, movePoint, samplePath, simplify,
+  appendSegments, circle, closedSmooth, deletePoint, evaluateSegment, fitFreehand, insertPoint, jointPoints, movePoint, samplePath, simplify, translatePath,
 } from '../../src/model/geometry';
 import type { PathDoc, V3 } from '../../src/model/scene';
-import { applyEasing, engineScene, defaultScene, defaultLayer, speedAt, headKeyAt, mergeEditorKeys } from '../../src/model/scene';
+import { applyEasing, engineScene, defaultScene, defaultLayer, speedAt, headKeyAt, mergeEditorKeys, completeScene, firstPoint, layerHome } from '../../src/model/scene';
 
 const pathLength = (p: PathDoc) => {
   const s = samplePath(p, 400);
@@ -125,5 +125,29 @@ describe('scene helpers', () => {
     const m = mergeEditorKeys(s, raw);
     expect(m.layers[0].color).toBe('#123456');
     expect(m.editor!.draw_height).toBe(2.5);
+  });
+});
+
+describe('moving the start', () => {
+  it('translatePath moves every point, arc centres included, keeping the shape', () => {
+    const p: PathDoc = { name: 'p', closed: false, segments: [
+      { type: 'arc', points: [[0, 1.7, 0], [2, 1.7, 0], [0, 1.7, 2]] },
+      { type: 'line', points: [[0, 1.7, 2], [3, 1.7, 2]] },
+    ] };
+    translatePath(p, [1, 0, -2]);
+    expect(p.segments[0].points).toEqual([[1, 1.7, -2], [3, 1.7, -2], [1, 1.7, 0]]);
+    expect(p.segments[1].points[1]).toEqual([4, 1.7, 0]);
+    expect(firstPoint(p)).toEqual([3, 1.7, -2]);
+  });
+
+  it('a loaded scene remembers where layers and paths are as their home', () => {
+    const s = completeScene({ layers: [{ position: [1, 2, 3] } as never],
+      listener: { paths: [{ name: 'p', closed: false, segments: [{ type: 'line', points: [[4, 1.7, 5], [6, 1.7, 5]] }] }] } as never });
+    expect(s.layers[0].home).toEqual([1, 2, 3]);
+    expect(layerHome(s.layers[0])).toEqual([1, 2, 3]);
+    expect(s.listener.paths[0].home).toEqual([4, 1.7, 5]);
+    const kept = mergeEditorKeys(s, { layers: [{ home: [9, 9, 9] }], listener: { paths: [{ home: [7, 1.7, 7] }] } });
+    expect(kept.layers[0].home).toEqual([9, 9, 9]);
+    expect(kept.listener.paths[0].home).toEqual([7, 1.7, 7]);
   });
 });

@@ -27,15 +27,20 @@ const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
 let follow = false;
 
+async function newScene(): Promise<void> {
+  if (plugin) {
+    if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
+    return;
+  }
+  if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
+}
+
 const toolbar = new Toolbar(tools, plugin, {
-  newScene: async () => {
-    if (plugin) {
-      if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
-      return;
-    }
-    if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
-  },
+  newScene: () => newScene(),
   open: () => openScene(),
+  recent: () => backend.recentScenes(),
+  openRecent: (path) => openRecent(path),
+  clearRecent: () => backend.clearRecentScenes(),
   save: (saveAs) => saveScene(saveAs),
   undo: () => store.undo(),
   redo: () => store.redo(),
@@ -220,6 +225,18 @@ async function openScene(): Promise<void> {
   }
 }
 
+// Open Recent (toolbar list or the app's File menu).
+async function openRecent(path: string): Promise<void> {
+  if (plugin ? !await backend.confirm('Replace this session\'s scene with a scene file?', 'Import')
+    : store.dirty && !await backend.confirm(`Discard unsaved changes and open ${path.split(/[\\/]/).pop()}?`, 'Discard')) return;
+  try {
+    const r = await backend.openScenePath(path);
+    if (r) loadOpened(r);
+  } catch (e) {
+    toast(`Could not open: ${e instanceof Error ? e.message : e}`, 'error');
+  }
+}
+
 function loadOpened(r: { path: string | null; scene: SceneDoc; raw: unknown }): void {
   store.audioInfo.clear();
   const doc = mergeEditorKeys(r.scene, r.raw);
@@ -253,6 +270,60 @@ async function saveScene(saveAs: boolean): Promise<void> {
     toast(`Could not save: ${e}`, 'error');
   }
 }
+
+// ------------------------------------------------------- drag and drop
+
+// Where a drop at (x, y) in the page lands in the scene: on the drawing
+// plane under the pointer, or null outside the 3D view.
+function dropPoint(x: number, y: number): [number, number, number] | null {
+  const r = vp.renderer.domElement.getBoundingClientRect();
+  if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+  const h = store.scene.editor?.draw_height ?? 1.7;
+  const hit = vp.intersect({ clientX: x, clientY: y } as MouseEvent, vp.editPlane(new THREE.Vector3(0, h, 0)));
+  if (!hit || hit.length() > 500) return null;
+  return [hit.x, hit.y, hit.z];
+}
+
+// Mono and stereo audio files dropped on the window become layers where they
+// were dropped (on the ring around the start when dropped on the panels).
+async function dropAudio(paths: string[], x: number, y: number): Promise<void> {
+  if (plugin) { toast('In Logic each track is a layer: insert Spatial Panner on a track to add it.', 'info'); return; }
+  if (!paths.length) return;
+  const infos = await backend.audioInfo(paths);
+  const ok = [];
+  for (const i of infos) {
+    store.audioInfo.set(i.path, i);
+    if (i.error) toast(`${i.name}: ${i.error}`, 'error');
+    else if (i.channels > 2) toast(`${i.name} has ${i.channels} channels; drop takes mono and stereo files. Use Add audio files… in the Layers tab for it.`, 'warning');
+    else ok.push(i);
+  }
+  if (!ok.length) return;
+  sidebar.addLayers(ok, dropPoint(x, y) ?? undefined);
+  sidebar.setTab('layers');
+}
+
+backend.onDropFiles((d) => { viewportEl.classList.remove('file-drop'); void dropAudio(d.paths, d.x, d.y); });
+backend.onDropHover((over) => viewportEl.classList.toggle('file-drop', over));
+// The browser preview (npm run dev) gets the drop itself, with names only.
+if (backend.kind === 'dev') {
+  window.addEventListener('dragover', (e) => { e.preventDefault(); viewportEl.classList.add('file-drop'); });
+  window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) viewportEl.classList.remove('file-drop'); });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    viewportEl.classList.remove('file-drop');
+    const names = [...(e.dataTransfer?.files ?? [])].map((f) => f.name);
+    void dropAudio(names, e.clientX, e.clientY);
+  });
+}
+
+// The app's File menu (macOS menu bar).
+backend.onMenu((m) => {
+  if (m.action === 'new') void newScene();
+  else if (m.action === 'open') void openScene();
+  else if (m.action === 'save') void saveScene(false);
+  else if (m.action === 'saveAs') void saveScene(true);
+  else if (m.action === 'openRecent' && m.path) void openRecent(m.path);
+});
 
 // ------------------------------------------------------------ messages
 
@@ -311,4 +382,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project, dropAudio, openRecent };

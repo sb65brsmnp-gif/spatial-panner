@@ -23,12 +23,13 @@ export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number
 }
 
 // A layer is a ball on a stem; a stereo layer is two balls (left, right) on
-// stems joined by a bar, with the label at the centre; an Ambisonic layer is
+// stems joined by a bar, marked L and R, with a handle and the label at the
+// centre (drag the handle or the bar to move the pair); an Ambisonic layer is
 // the ball inside a translucent sphere, with an arrow for the recording's
 // front and a handle on its surface that sets the radius.
 interface LayerEnd { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; tag: CSS2DObject }
 interface Sphere { group: THREE.Group; shell: THREE.Mesh; wire: THREE.LineSegments; equator: THREE.Line; front: THREE.ArrowHelper; handle: THREE.Mesh }
-interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; right: LayerEnd; bar: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; leftTag: CSS2DObject; right: LayerEnd; bar: THREE.Mesh; hub: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
@@ -43,6 +44,9 @@ export class SceneView {
   readonly listener = new THREE.Group();
   private layers: LayerObj[] = [];
   pointHandles: PointHandle[] = [];
+  // The listener's starting point: a disc on the floor under it (drag it to
+  // move the start, and the path with it).
+  startHandles: THREE.Object3D[] = [];
   private lineMaterials: LineMaterial[] = [];
   private head = new THREE.Group();
 
@@ -152,8 +156,8 @@ export class SceneView {
     const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.24, 32), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: 0.6 }));
     ring.rotation.x = -Math.PI / 2;
     group.add(ring);
+    // The L / R letter sits on the ball (placeEnd moves it with the ball).
     const tag = makeLabel(end === 'R' ? 'R' : 'L', 'layer-end');
-    tag.position.set(0, -LAYER_RADIUS - 0.18, 0);
     group.add(tag);
     return { ball, stem, ring, tag };
   }
@@ -181,12 +185,14 @@ export class SceneView {
     const sphere = this.makeSphere(group, index);
     const left = this.makeEnd(group, index, 'centre');
     const { ball, stem, ring } = left;
-    group.userData.leftTag = left.tag;
     const right = this.makeEnd(group, index, 'R');
     const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1, 12, 1),
       new THREE.MeshStandardMaterial({ roughness: 0.6, transparent: true, opacity: 0.85 }));
     bar.userData = { kind: 'layer', index, end: 'centre' };
     group.add(bar);
+    const hub = new THREE.Mesh(new THREE.OctahedronGeometry(0.13), new THREE.MeshStandardMaterial({ roughness: 0.3, color: 0xffffff }));
+    hub.userData = { kind: 'layer', index, end: 'centre' };
+    group.add(hub);
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 0.7, 0xffffff, 0.18, 0.12);
     group.add(arrow);
     const div = document.createElement('div');
@@ -201,12 +207,13 @@ export class SceneView {
     label.position.set(0, LAYER_RADIUS + 0.25, 0);
     group.add(label);
     this.layerGroup.add(group);
-    return { group, ball, stem, ring, right, bar, arrow, sphere, label, meter, name };
+    return { group, ball, stem, ring, leftTag: left.tag, right, bar, hub, arrow, sphere, label, meter, name };
   }
 
   // Places a ball and its stem and floor ring at `p` (group-local).
-  private placeEnd(e: { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh }, p: THREE.Vector3, floorY: number, color: THREE.Color): void {
+  private placeEnd(e: { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh }, p: THREE.Vector3, floorY: number, color: THREE.Color, tag?: CSS2DObject): void {
     e.ball.position.copy(p);
+    tag?.position.copy(p);
     const h = p.y - floorY;
     (e.stem.geometry as THREE.BufferGeometry).setFromPoints([p, new THREE.Vector3(p.x, p.y - h, p.z)]);
     e.stem.computeLineDistances();
@@ -238,13 +245,16 @@ export class SceneView {
       const spread = stereo && !st.mono;
       const d = spread ? stereoOffset(st) : [0, 0, 0];
       const floor = floorY - l.position[1];  // group-local floor height
-      this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color);
+      this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color, o.leftTag);
       o.ball.userData.end = stereo ? 'L' : 'centre';
       o.right.ball.visible = o.right.stem.visible = o.right.ring.visible = spread;
       o.right.tag.visible = spread;
-      (o.group.userData.leftTag as CSS2DObject).visible = spread;
+      o.leftTag.visible = spread;
+      o.hub.visible = spread;
       if (spread) {
-        this.placeEnd(o.right, new THREE.Vector3(d[0], d[1], d[2]), floor, color);
+        this.placeEnd(o.right, new THREE.Vector3(d[0], d[1], d[2]), floor, color, o.right.tag);
+        (o.hub.material as THREE.MeshStandardMaterial).emissive.copy(selected ? color : new THREE.Color(0));
+        (o.hub.material as THREE.MeshStandardMaterial).emissiveIntensity = selected ? 0.5 : 0;
         const rm = o.right.ball.material as THREE.MeshStandardMaterial;
         rm.color.copy(mat.color);
         rm.emissive.copy(mat.emissive);
@@ -308,6 +318,7 @@ export class SceneView {
     clear(this.markerGroup);
     this.lineMaterials = [];
     this.pointHandles = [];
+    this.startHandles = [];
     const L = this.store.scene.listener;
     const a = this.store.analysis;
     const fresh = a && a.revision === this.store.revision;
@@ -324,11 +335,37 @@ export class SceneView {
       if (active) {
         this.pathGroup.add(endMarker(pts[0] as V3, 0x5fd38d));
         if (!p.closed) this.pathGroup.add(endMarker(pts[pts.length - 1] as V3, 0xeb5757));
+        this.buildStart(pts[0] as V3);
         this.buildPointHandles(p, i);
       }
     });
+    if (!L.paths.length) this.buildStart(L.static_position);
     this.buildTimeMarkers();
     this.vp.invalidate();
+  }
+
+  // The start disc on the floor under `p`, with a stem up to it and a label.
+  private buildStart(p: V3): void {
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(0.45, 40),
+      new THREE.MeshBasicMaterial({ color: 0x5fd38d, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false }));
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.set(p[0], floorY + 0.012, p[2]);
+    disc.userData = { kind: 'start' };
+    const rim = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.47, 40), new THREE.MeshBasicMaterial({ color: 0x5fd38d, side: THREE.DoubleSide }));
+    rim.rotation.x = -Math.PI / 2;
+    rim.position.set(p[0], floorY + 0.014, p[2]);
+    rim.userData = { kind: 'start' };
+    const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p[0], floorY, p[2]), v3(p)]),
+      new THREE.LineDashedMaterial({ color: 0x5fd38d, dashSize: 0.08, gapSize: 0.06 }));
+    stem.computeLineDistances();
+    const label = makeLabel('Start', 'start-label');
+    label.position.set(p[0], floorY + 0.05, p[2] + 0.62);
+    g.add(disc, rim, stem, label);
+    this.pathGroup.add(g);
+    this.startHandles.push(disc, rim);
   }
 
   private fatLine(points: V3[], color: number, width: number, opacity: number): Line2 {
@@ -456,11 +493,19 @@ export class SceneView {
 
   clearPreview(): void { this.setPreview([]); }
 
+  // The listener figure (head and body) when it is drawn.
+  pickableListener(): THREE.Object3D[] {
+    if (!this.listener.visible) return [];
+    const out: THREE.Object3D[] = [];
+    this.listener.traverse((o) => { if ((o as THREE.Mesh).isMesh) out.push(o); });
+    return out;
+  }
+
   pickableLayers(): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
     for (const l of this.layers) {
       out.push(l.ball);
-      if (l.right.ball.visible) out.push(l.right.ball, l.bar);
+      if (l.right.ball.visible) out.push(l.right.ball, l.hub, l.bar);
       if (l.sphere.group.visible) out.push(l.sphere.handle);
     }
     return out;
@@ -482,6 +527,7 @@ function endMarker(p: V3, color: number): THREE.Mesh {
 
 function disposeLayer(l: LayerObj): void {
   l.label.element.remove();
+  l.leftTag.element.remove();
   l.right.tag.element.remove();
 }
 

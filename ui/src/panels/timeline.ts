@@ -98,7 +98,7 @@ export class Timeline {
       this.refreshBar();
     });
     this.timeLabel = el('span', { class: 'tl-time' }, '0:00.0');
-    this.durationInput = numberInput(0, (v) => this.store.update((s) => { s.duration = Math.max(0, v); }), { step: 1, min: 0, width: 56 });
+    this.durationInput = numberInput(0, (v) => this.store.update((s) => { s.duration = Math.max(0, v); }), { step: 1, min: 0, width: 56, def: 0 });
     this.durationInput.title = 'Scene length in seconds (0 = automatic: longest non-looping audio, or the path)';
     this.keyBar = el('div', { class: 'tl-keybar' });
     const transport = [startBtn, backBtn, stopBtn, this.playBtn, fwdBtn, endBtn, this.loopBtn];
@@ -322,15 +322,15 @@ export class Timeline {
       numberInput(key.time, (v) => upd(() => { key.time = Math.max(0, v); }), { step: 0.1, width: 56 }), el('span', { class: 'tl-unit' }, 's'));
     if (s.lane === 'speed') {
       const k = key as SpeedKey;
-      this.keyBar.append(numberInput(k.speed, (v) => upd(() => { k.speed = Math.max(0, v); }), { step: 0.1, width: 52 }),
+      this.keyBar.append(numberInput(k.speed, (v) => upd(() => { k.speed = Math.max(0, v); }), { step: 0.1, width: 52, def: 1.4 }),
         el('span', { class: 'tl-unit' }, 'm/s'));
     } else {
       const k = key as HeadKey;
-      this.keyBar.append(el('span', { class: 'tl-sep' }, 'Yaw'), numberInput(k.yaw, (v) => upd(() => { k.yaw = v; }), { step: 1, width: 52 }),
-        el('span', { class: 'tl-sep' }, 'Pitch'), numberInput(k.pitch, (v) => upd(() => { k.pitch = Math.max(-90, Math.min(90, v)); }), { step: 1, width: 52 }));
+      this.keyBar.append(el('span', { class: 'tl-sep' }, 'Yaw'), numberInput(k.yaw, (v) => upd(() => { k.yaw = v; }), { step: 1, width: 52, def: 0 }),
+        el('span', { class: 'tl-sep' }, 'Pitch'), numberInput(k.pitch, (v) => upd(() => { k.pitch = Math.max(-90, Math.min(90, v)); }), { step: 1, width: 52, def: 0 }));
     }
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'then'),
-      select(EASINGS, key.easing, (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }));
+      select(EASINGS, key.easing, (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }, 'linear'));
     const del = el('button', { class: 'tbtn small', title: 'Delete key (Delete)' }, '✕');
     del.addEventListener('click', () => this.deleteKey());
     this.keyBar.append(del);
@@ -477,6 +477,18 @@ export class Timeline {
     const hit = this.hitKey(x, y);
     if (hit && !(hit.lane === 'speed' && this.store.scene.listener.position_mode === 'along_path')) {
       this.selKey = hit;
+      if (e.altKey) {
+        // Option-click: the key's value back to its default (time stays).
+        const L = this.store.scene.listener;
+        this.store.update(() => {
+          if (hit.lane === 'speed') L.speed[hit.index].speed = 1.4;
+          else if (hit.lane === 'yaw') L.head.keys[hit.index].yaw = 0;
+          else L.head.keys[hit.index].pitch = 0;
+        });
+        this.refreshBar();
+        this.draw();
+        return;
+      }
       this.drag = { kind: 'key', sel: hit };
       this.refreshBar();
       this.draw();

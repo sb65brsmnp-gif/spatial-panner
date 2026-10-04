@@ -196,6 +196,112 @@ await check('layer level slider changes level_db', async () => {
   assert((await ed(() => window.spEditor.store.scene.layers[0].level_db)) === -12, 'level');
 });
 
+await check('Option-click on a slider returns it to its default', async () => {
+  const slider = page.locator('.layer-item').first().locator('input[type=range]');
+  await slider.click({ modifiers: ['Alt'] });
+  assert((await ed(() => window.spEditor.store.scene.layers[0].level_db)) === 0, 'level not reset');
+  await ed(() => window.spEditor.store.select({ kind: 'layer', index: 0 }));
+  await page.waitForTimeout(50);
+  const doppler = page.locator('.row', { hasText: 'Doppler' }).locator('input[type=range]');
+  await doppler.fill('20');
+  assert(Math.abs((await ed(() => window.spEditor.store.scene.layers[0].doppler)) - 0.2) < 1e-6, 'doppler set');
+  await page.waitForTimeout(50);
+  await page.locator('.row', { hasText: 'Doppler' }).locator('input[type=range]').click({ modifiers: ['Alt'] });
+  assert((await ed(() => window.spEditor.store.scene.layers[0].doppler)) === 1, 'doppler not reset');
+  const ref = page.locator('.row', { hasText: 'Reference' }).locator('input');
+  await ref.fill('4'); await ref.press('Enter');
+  assert((await ed(() => window.spEditor.store.scene.layers[0].reference_distance)) === 4, 'reference set');
+  await page.locator('.row', { hasText: 'Reference' }).locator('input').click({ modifiers: ['Alt'] });
+  assert((await ed(() => window.spEditor.store.scene.layers[0].reference_distance)) === 1, 'reference not reset');
+});
+
+await check('Option-click on a layer puts it back where it was placed; Option-drag still moves', async () => {
+  const home = await ed(() => window.spEditor.store.scene.layers[0].home);
+  assert(Array.isArray(home), 'no home');
+  const p0 = await ed(() => window.spEditor.store.scene.layers[0].position);
+  await page.mouse.move(...(await screen(p0)));
+  await page.mouse.down();
+  await page.mouse.move(...(await screen([p0[0] + 1.5, p0[1], p0[2]])), { steps: 6 });
+  await page.mouse.up();
+  const p1 = await ed(() => window.spEditor.store.scene.layers[0].position);
+  assert(Math.abs(p1[0] - p0[0] - 1.5) < 0.05, `not moved ${p1}`);
+  await page.keyboard.down('Alt');
+  await page.mouse.move(...(await screen(p1)));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Alt');
+  const p2 = await ed(() => window.spEditor.store.scene.layers[0].position);
+  assert(JSON.stringify(p2) === JSON.stringify(home), `not home: ${p2} vs ${home}`);
+});
+
+await check('dropped audio files become layers where they are dropped', async () => {
+  const n0 = await ed(() => window.spEditor.store.scene.layers.length);
+  const [x, y] = await screen([2, 1.7, 2]);
+  await ed(([x, y]) => window.spEditor.dropAudio(['/tmp/drop_a.wav', '/tmp/drop_b.wav'], x, y), [x, y]);
+  const layers = await ed(() => window.spEditor.store.scene.layers);
+  assert(layers.length === n0 + 2, `layers ${layers.length}`);
+  const a = layers[n0].position, b = layers[n0 + 1].position;
+  const mid = [(a[0] + b[0]) / 2, a[1], (a[2] + b[2]) / 2];
+  assert(Math.abs(mid[0] - 2) < 0.1 && Math.abs(mid[2] - 2) < 0.1, `dropped at ${a} / ${b}`);
+  assert(layers[n0].name === 'drop_a.wav' || layers[n0].name.startsWith('drop_a'), layers[n0].name);
+  await ed(() => window.spEditor.store.undo());
+});
+
+await check('stereo layer: L and R on the balls, the centre handle moves the pair', async () => {
+  await ed(() => window.spEditor.store.update((s) => { s.layers[0].channels = 2; s.layers[0].stereo = { width: 3, rotation: 0, elevation: 0, mono: false }; }));
+  await page.waitForTimeout(100);
+  const tags = await page.$$eval('.layer-end', (els) => els.filter((e) => e.style.display !== 'none' && e.offsetParent !== null).map((e) => e.textContent));
+  assert(tags.includes('L') && tags.includes('R'), `tags ${tags}`);
+  const c0 = await ed(() => window.spEditor.store.scene.layers[0].position);
+  const [lx] = await screen([c0[0] - 1.5, c0[1], c0[2]]);
+  const lTag = await page.$$eval('.layer-end', (els) => els.filter((e) => e.textContent === 'L' && e.offsetParent !== null).map((e) => { const r = e.getBoundingClientRect(); return r.left + r.width / 2; }));
+  assert(lTag.some((x) => Math.abs(x - lx) < 6), `L tag at ${lTag}, ball at ${lx}`);
+  await page.mouse.move(...(await screen(c0)));
+  await page.mouse.down();
+  await page.mouse.move(...(await screen([c0[0], c0[1], c0[2] + 1])), { steps: 6 });
+  await page.mouse.up();
+  const l = await ed(() => window.spEditor.store.scene.layers[0]);
+  assert(Math.abs(l.position[2] - c0[2] - 1) < 0.05 && l.stereo.width === 3, `centre drag: ${l.position} w ${l.stereo.width}`);
+  // Option-click an end: width and angle back to the defaults, centre stays.
+  await page.keyboard.down('Alt');
+  await page.mouse.move(...(await screen([l.position[0] + 1.5, l.position[1], l.position[2]])));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Alt');
+  const l2 = await ed(() => window.spEditor.store.scene.layers[0]);
+  assert(l2.stereo.width === 2 && JSON.stringify(l2.position) === JSON.stringify(l.position), `end reset: ${JSON.stringify(l2.stereo)}`);
+  await ed(() => window.spEditor.store.update((s) => { s.layers[0].channels = 1; delete s.layers[0].stereo; }));
+});
+
+await check('dragging the start disc moves the path with it; Option-click puts it back', async () => {
+  const before = await ed(() => { const L = window.spEditor.store.scene.listener; return JSON.parse(JSON.stringify(L.paths[L.active_path])); });
+  const first = (seg) => seg.type === 'arc' ? seg.points[1] : seg.points[0];
+  const s0 = first(before.segments[0]);
+  const grab = [s0[0] + 0.3, 0, s0[2]];
+  await page.mouse.move(...(await screen(grab)));
+  await page.mouse.down();
+  await page.mouse.move(...(await screen([grab[0] + 2, 0, grab[2] - 1])), { steps: 8 });
+  await page.mouse.up();
+  const after = await ed(() => { const L = window.spEditor.store.scene.listener; return L.paths[L.active_path]; });
+  const s1 = first(after.segments[0]);
+  assert(Math.abs(s1[0] - s0[0] - 2) < 0.06 && Math.abs(s1[2] - s0[2] + 1) < 0.06 && s1[1] === s0[1], `start ${s0} -> ${s1}`);
+  const last0 = before.segments.at(-1).points.at(-1), last1 = after.segments.at(-1).points.at(-1);
+  assert(Math.abs(last1[0] - last0[0] - 2) < 0.06, 'path did not move with the start');
+  await page.keyboard.down('Alt');
+  await page.mouse.move(...(await screen([s1[0] + 0.3, 0, s1[2]])));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Alt');
+  await page.waitForFunction((h) => {
+    const L = window.spEditor.store.scene.listener; const sg = L.paths[L.active_path].segments[0];
+    const q = sg.type === 'arc' ? sg.points[1] : sg.points[0];
+    return Math.abs(q[0] - h[0]) < 1e-6 && Math.abs(q[2] - h[2]) < 1e-6;
+  }, before.home, { timeout: 2000 }).catch(() => {});
+  const back = await ed(() => { const L = window.spEditor.store.scene.listener; return L.paths[L.active_path]; });
+  const s2 = first(back.segments[0]);
+  assert(Math.abs(s2[0] - before.home[0]) < 1e-6 && Math.abs(s2[2] - before.home[2]) < 1e-6, `reset ${s2} vs home ${before.home}`);
+});
+
 await check('timeline: double-click adds a speed key and a head yaw key; the engine follows', async () => {
   await ed(() => window.spEditor.store.update((s) => { s.listener.active_path = 1; s.duration = 20; }));
   await waitAnalysis();
@@ -255,6 +361,17 @@ await check('demo scene opens and its path matches the engine', async () => {
   assert(Math.abs(a.arrival_time - 22) < 0.5, `arrival ${a.arrival_time}`);
   await page.waitForTimeout(300);
   await page.screenshot({ path: resolve(outDir, 'room_walk.png') });
+});
+
+await check('Recent lists opened scenes and reopens them', async () => {
+  page.once('dialog', (d) => d.accept());
+  await ed(() => window.spEditor.openRecent('occluder.json'));
+  await page.waitForFunction(() => (window.spEditor.store.filePath ?? '').endsWith('occluder.json'));
+  await page.click('text=Recent ▾');
+  await page.waitForSelector('.recent-item');
+  const items = await page.$$eval('.recent-item', (els) => els.map((e) => e.textContent));
+  assert(items.includes('occluder.json'), `recent ${items}`);
+  await page.keyboard.press('Escape');
 });
 
 await check('a scene with objects shows them in the view and the Room tab', async () => {

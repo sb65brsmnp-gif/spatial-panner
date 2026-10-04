@@ -251,7 +251,7 @@ private:
     }
 
     void openScene(std::function<void(std::string)> done) {
-        chooser_ = std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.json");
+        chooser_ = std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.spscene;*.json");
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this, done](const juce::FileChooser& fc) {
                                   const auto f = fc.getResult();
@@ -292,12 +292,12 @@ private:
             return;
         }
         const std::string nm = a.contains("scene") ? a["scene"].value("name", "scene") : "scene";
-        chooser_ = std::make_unique<juce::FileChooser>("Export the scene", lastDir_.getChildFile(juce::File::createLegalFileName(nm) + ".json"), "*.json");
+        chooser_ = std::make_unique<juce::FileChooser>("Export the scene", lastDir_.getChildFile(juce::File::createLegalFileName(nm) + ".spscene"), "*.spscene");
         chooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
                               [write, done](const juce::FileChooser& fc) {
                                   auto f = fc.getResult();
                                   if (f == juce::File()) { done("null"); return; }
-                                  if (!f.hasFileExtension("json")) f = f.withFileExtension("json");
+                                  if (!f.hasFileExtension("spscene;json")) f = f.withFileExtension("spscene");
                                   write(f);
                               });
     }

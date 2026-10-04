@@ -41,9 +41,9 @@ dev server instead of the built-in page, with hot reload.
 AIFF, FLAC, MP3, M4A, Ogg, CAF; kept in memory). A mono file is one source.
 A stereo file becomes a **stereo pair**: two balls, L and R, joined by a bar,
 playing the file's left and right channels from their own places, so the
-listener can walk between or through them. Drag the bar to move the pair,
-drag an end to widen, narrow or turn it (Option-drag an end keeps the centre
-fixed), or use the *Stereo field* sliders: width (metres), rotation,
+listener can walk between or through them. Drag the white handle at the
+centre (or the bar) to move the pair, drag the L or R ball to widen, narrow
+or turn it (Option-drag an end keeps the centre fixed), or use the *Stereo field* sliders: width (metres), rotation,
 elevation and *Mono*, which sums both channels at the centre. *Play as* turns
 a stereo file into a single summed source instead. A 4-, 9- or 16-channel
 file is an **Ambisonic recording** (first to third order) and becomes a
@@ -62,7 +62,11 @@ from 4, 9 or 16 mono files, taken in name order (W X Y Z sorts right for
 FuMa; 0 1 2 3 … for ambiX). Each layer also has mute
 and solo, level, start time and loop, Doppler amount, spread, directivity and
 facing, distance rolloff, room send and reflections. Drag a layer in the view
-to move it; Shift+drag changes its height. Any number of layers can be added;
+to move it; Shift+drag changes its height. Audio files can also be **dragged
+from the Finder** onto the window: mono and stereo files become layers where
+they are dropped (in a row when there are several; dropped on the panels,
+they go on the ring around the start like *Add audio files…*). Multichannel
+files go through *Add audio files…*. Any number of layers can be added;
 CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
 layers, an Ambisonic sphere about four).
 
@@ -71,7 +75,7 @@ the path; drawing again appends to the current path's end.
 
 | Tool | Use |
 | --- | --- |
-| Select (V) | Move layers, path points and Bézier handles. Alt+click on a path inserts a point, Delete removes the selected point or layer. |
+| Select (V) | Move layers, path points, Bézier handles and the listener's start. Alt+click on a path inserts a point, Delete removes the selected point or layer. |
 | Freehand (F) | Drag to draw; the stroke is simplified and fitted with smooth curves. |
 | Point to point (L) | Click points joined by straight lines; double-click or Enter finishes. |
 | Curve (C) | Click points for a smooth curve through them; double-click or Enter finishes. |
@@ -81,6 +85,22 @@ the path; drawing again appends to the current path's end.
 Paths are drawn on a plane at the height set under **Path & head** (default
 ear height, 1.6 m); draw in the Front or Side view to draw vertically. Grid
 snap is on the same tab.
+
+**Start**: the green disc on the floor marks where the listener starts (the
+active path's first point, or where the listener stands without a path).
+Drag the disc, or the listener figure, with the Select tool at any time to
+move the start; the active path moves with it and keeps its shape. Shift+drag
+moves it up or down.
+
+**Option-click resets**: Option-click any slider, number field, menu or
+checkbox to return it to its default (sliders also on double-click).
+Option-click a layer's ball or a stereo pair's centre handle to put it back
+where it was first placed; an L or R ball to reset the pair's width and angle
+(the centre stays); an Ambisonic sphere's cube to reset its radius; the
+start disc to put the path back where it was drawn (without a path, the
+listener returns to the room centre); a key on the timeline to reset its
+value. Option-*drag* on an end of a stereo pair still mirrors it about the
+centre: a reset only happens when the pointer does not move.
 
 **Views**: 3D orbit (1), Top (2), Front (3), Side (4), and Ears (5), the
 listener's own view while playing. *Follow* keeps the listener in view.
@@ -135,9 +155,15 @@ relative to the scene, like audio.
 apply while playing. *Bounce to WAV…* renders the scene to a 24-bit WAV in the
 current output format, faster than real time.
 
-Undo/redo (⌘Z / ⇧⌘Z), open (⌘O), save (⌘S / ⇧⌘S). Scenes are the engine's
-scene JSON with a few editor-only keys (layer colour, solo, draw height,
-output); audio paths are stored relative to the scene file.
+Undo/redo (⌘Z / ⇧⌘Z), open (⌘O), save (⌘S / ⇧⌘S); the same in the File
+menu of the menu bar, with **Open Recent** (the last 10 scenes opened or
+saved; also *Recent ▾* in the toolbar). Scenes save as `.spscene` files,
+which the Finder opens in the app on double-click (the app registers the
+type the first time it runs); scenes saved as `.json` before still open with
+*Open…*, a drop on the window, or the Finder's *Open With*. Inside, a scene
+is the engine's scene JSON with a few editor-only keys (layer colour, solo,
+draw height, output, where layers and paths were first placed); audio paths
+are stored relative to the scene file. `sp-render` reads either extension.
 
 ## How it fits together
 

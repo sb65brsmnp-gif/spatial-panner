@@ -1,13 +1,21 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
-import { defaultLayer, defaultStereo, defaultAmbisonic, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
-  LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
+import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoom, layerHome, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
+  LAYOUTS, MATERIALS, WALLS, layerColor, type HeadMode, type LayerDoc, type SceneDoc, type V3 } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
 import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
-import { checkbox, el, fmtTime, numberInput, row, section, select, slider, vec3Inputs } from './dom';
+import { checkbox, el, fmtTime, numberInput, resetOnOptionClick, row, section, select, slider, vec3Inputs } from './dom';
 
 type Tab = 'layers' | 'path' | 'room' | 'output';
+
+// Defaults that Option-click on a control returns to.
+const D = defaultLayer(0);
+const DS = defaultStereo();
+const DA = defaultAmbisonic();
+const DL = defaultScene().listener;
+const DR = defaultRoom();
+const DE = defaultScene().environment;
 
 export class Sidebar {
   readonly root: HTMLElement;
@@ -150,6 +158,7 @@ export class Sidebar {
       const color = el('input', { type: 'color', class: 'swatch' });
       color.value = l.color ?? '#4f9cf9';
       color.addEventListener('input', () => this.upd((sc) => { sc.layers[i].color = color.value; }, `color-${i}`));
+      resetOnOptionClick(color, () => this.upd((sc) => { sc.layers[i].color = layerColor(i); }));
       const unbound = this.plugin && !this.trackName(l.host_id);
       const name = el('span', { class: 'layer-name' + (unbound ? ' muted' : ''),
         title: this.plugin ? (unbound ? 'No track plays this layer' : `Track: ${this.trackName(l.host_id)}`) : l.audio || 'no audio file' },
@@ -159,7 +168,7 @@ export class Sidebar {
       const solo = el('button', { class: 'ms' + (l.solo ? ' on solo' : ''), title: 'Solo' }, 'S');
       solo.addEventListener('click', (e) => { e.stopPropagation(); this.upd((sc) => { sc.layers[i].solo = !sc.layers[i].solo; }); });
       const level = slider(l.level_db, -60, 12, 0.5, (v) => this.upd((sc) => { sc.layers[i].level_db = v; }, `level-${i}`),
-        (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`, () => this.store.endGesture());
+        (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`, () => this.store.endGesture(), D.level_db);
       level.classList.add('level');
       const meter = el('div', { class: 'meter' }, el('div'));
       this.meterEls[i] = meter.firstChild as HTMLElement;
@@ -212,7 +221,8 @@ export class Sidebar {
     const playAs = select(playOptions, String(l.channels ?? 1), (v) => u((x) => {
       x.channels = parseInt(v, 10);
       Object.assign(x, layerExtras(x.channels, x));
-    }), { [String(fileCh)]: `Ambisonic sphere (order ${ambisonicOrder(fileCh)})`, '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' });
+    }), { [String(fileCh)]: `Ambisonic sphere (order ${ambisonicOrder(fileCh)})`, '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' },
+    String(channelsForFile(fileCh || 1)));
     const facing = Math.round(Math.atan2(-l.directivity_forward[0], -l.directivity_forward[2]) * 180 / Math.PI);
     const remove = el('button', { class: 'btn danger' }, 'Remove layer');
     remove.addEventListener('click', () => { this.store.select({ kind: 'layer', index: i }); this.tools.deleteSelection(); });
@@ -255,8 +265,8 @@ export class Sidebar {
           : stereo ? 'stereo: the layer is a left/right pair' : 'mono: the layer is one source')),
         row('Recording', el('span', { class: 'file', title: l.audio }, l.audio ? audioDesc : 'none (the track plays this layer)'), pick, l.audio ? clearFile : ''),
         el('p', { class: 'muted' }, 'A first-order recording plays from a quad track in Logic. For second or third order (9 or 16 channels), choose the file here: this track then plays it in sync with the song.'),
-        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
-        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }), 0.1, layerHome(l))),
+        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64, def: D.level_db }), 'dB'),
         el('p', { class: 'muted' }, 'The track\'s Level and Position offset parameters adjust this live and can be automated in Logic.'),
       ));
     } else {
@@ -264,20 +274,20 @@ export class Sidebar {
         row('Name', nameIn),
         row('Audio', el('span', { class: 'file', title: files.length ? files.join('\n') : l.audio }, audioDesc), replace),
         playOptions.length > 1 && !files.length ? row('Play as', playAs) : '',
-        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
-        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
-        row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
-          checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
+        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }), 0.1, layerHome(l))),
+        row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64, def: D.level_db }), 'dB'),
+        row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64, def: D.start_time }), 's',
+          checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop', D.loop)),
       ));
     }
     if (stereo) {
       const us = (fn: (s: typeof st) => void, key?: string) => u((x) => { x.stereo = x.stereo ?? defaultStereo(); fn(x.stereo); }, key);
       this.body.append(section('Stereo field',
         el('p', { class: 'muted' }, 'Left and right play from the two ends of the bar. Drag the bar to move the pair, drag an end to widen, narrow or turn it; Option-drag an end keeps the centre fixed.'),
-        row('Width', slider(st.width, 0, 12, 0.05, (v) => us((x) => { x.width = v; }, 'stwidth'), (v) => `${v.toFixed(2)} m`, () => this.store.endGesture())),
-        row('Rotation', slider(st.rotation, -180, 180, 1, (v) => us((x) => { x.rotation = v; }, 'strot'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Width', slider(st.width, 0, 12, 0.05, (v) => us((x) => { x.width = v; }, 'stwidth'), (v) => `${v.toFixed(2)} m`, () => this.store.endGesture(), DS.width)),
+        row('Rotation', slider(st.rotation, -180, 180, 1, (v) => us((x) => { x.rotation = v; }, 'strot'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture(), DS.rotation)),
         row('Elevation', slider(st.elevation, -90, 90, 1, (v) => us((x) => { x.elevation = v; }, 'stel'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
-        row('Mono', checkbox(st.mono, (v) => us((x) => { x.mono = v; }), 'sum left and right at the centre')),
+        row('Mono', checkbox(st.mono, (v) => us((x) => { x.mono = v; }), 'sum left and right at the centre', DS.mono)),
         this.plugin ? el('p', { class: 'muted' }, 'The track\'s Stereo Width, Stereo Rotation and Mono parameters adjust this live and can be automated in Logic.') : '',
       ));
     }
@@ -289,41 +299,41 @@ export class Sidebar {
           + 'At the centre it is the recording as it was. Drag the ball to move the sphere and the small cube on its surface to resize it; the arrow is the recording\'s front.'),
         files.length ? el('p', { class: 'muted' }, `Channels from ${files.length} files, in name order: ${files.map((f) => f.split(/[\\/]/).pop()).join(', ')}.`) : '',
         row('Format', select(order === 1 ? ['ambix', 'fuma'] : ['ambix'], am.format, (v) => ua((a) => { a.format = v as typeof a.format; }),
-          { ambix: 'ambiX (ACN / SN3D)', fuma: 'FuMa (W X Y Z)' })),
-        row('Radius', slider(am.radius, 0.5, 30, 0.1, (v) => ua((a) => { a.radius = v; }, 'amradius'), (v) => `${v.toFixed(1)} m`, () => this.store.endGesture())),
+          { ambix: 'ambiX (ACN / SN3D)', fuma: 'FuMa (W X Y Z)' }, DA.format)),
+        row('Radius', slider(am.radius, 0.5, 30, 0.1, (v) => ua((a) => { a.radius = v; }, 'amradius'), (v) => `${v.toFixed(1)} m`, () => this.store.endGesture(), DA.radius)),
         row('Yaw', slider(am.yaw, -180, 180, 1, (v) => ua((a) => { a.yaw = v; }, 'amyaw'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
         row('Pitch', slider(am.pitch, -90, 90, 1, (v) => ua((a) => { a.pitch = v; }, 'ampitch'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
         row('Roll', slider(am.roll, -180, 180, 1, (v) => ua((a) => { a.roll = v; }, 'amroll'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
-        row('Room', checkbox(am.room_send, (v) => ua((a) => { a.room_send = v; }), 'send the recording to the room\'s reverb (it carries its own room already)')),
+        row('Room', checkbox(am.room_send, (v) => ua((a) => { a.room_send = v; }), 'send the recording to the room\'s reverb (it carries its own room already)', DA.room_send)),
         this.plugin ? el('p', { class: 'muted' }, 'The track\'s Sphere Radius and Sphere Rotation parameters adjust this live and can be automated in Logic.') : '',
       ));
       this.body.append(section('Sound source',
-        row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
+        row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture(), D.doppler * 100)),
         el('p', { class: 'muted' }, 'Outside the sphere the recording falls off with distance like a source; spread and directivity do not apply.'),
       ));
       this.body.append(section('Distance',
-        row('Closest', numberInput(l.min_distance, (v) => u((x) => { x.min_distance = Math.max(0.01, v); }), { step: 0.05, width: 64 }), 'm'),
-        row('Rolloff', numberInput(l.rolloff, (v) => u((x) => { x.rolloff = Math.max(0, v); }), { step: 0.1, width: 64 }), '(1 = −6 dB per doubling)'),
-        row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+        row('Closest', numberInput(l.min_distance, (v) => u((x) => { x.min_distance = Math.max(0.01, v); }), { step: 0.05, width: 64, def: D.min_distance }), 'm'),
+        row('Rolloff', numberInput(l.rolloff, (v) => u((x) => { x.rolloff = Math.max(0, v); }), { step: 0.1, width: 64, def: D.rolloff }), '(1 = −6 dB per doubling)'),
+        row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64, def: D.reverb_send_db }), 'dB'),
       ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
       return;
     }
     this.body.append(section('Sound source',
-      row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
+      row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture(), D.doppler * 100)),
       row('Spread', slider(l.spread_deg, 0, 180, 1, (v) => u((x) => { x.spread_deg = v; }, 'spread'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
       row('Directivity', slider(l.directivity, 0, 1, 0.01, (v) => u((x) => { x.directivity = v; }, 'dir'), (v) => v < 0.01 ? 'omni' : v > 0.99 ? 'cardioid' : v.toFixed(2), () => this.store.endGesture())),
       row('Facing', slider(facing, -180, 180, 1, (v) => u((x) => {
         const r = v * Math.PI / 180;
         x.directivity_forward = [Math.round(-Math.sin(r) * 1000) / 1000, 0, Math.round(-Math.cos(r) * 1000) / 1000];
-      }, 'facing'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+      }, 'facing'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture(), 180)),
     ));
     this.body.append(section('Distance',
-      row('Reference', numberInput(l.reference_distance, (v) => u((x) => { x.reference_distance = Math.max(0.05, v); }), { step: 0.1, width: 64 }), 'm'),
-      row('Closest', numberInput(l.min_distance, (v) => u((x) => { x.min_distance = Math.max(0.01, v); }), { step: 0.05, width: 64 }), 'm'),
-      row('Rolloff', numberInput(l.rolloff, (v) => u((x) => { x.rolloff = Math.max(0, v); }), { step: 0.1, width: 64 }), '(1 = −6 dB per doubling)'),
-      row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+      row('Reference', numberInput(l.reference_distance, (v) => u((x) => { x.reference_distance = Math.max(0.05, v); }), { step: 0.1, width: 64, def: D.reference_distance }), 'm'),
+      row('Closest', numberInput(l.min_distance, (v) => u((x) => { x.min_distance = Math.max(0.01, v); }), { step: 0.05, width: 64, def: D.min_distance }), 'm'),
+      row('Rolloff', numberInput(l.rolloff, (v) => u((x) => { x.rolloff = Math.max(0, v); }), { step: 0.1, width: 64, def: D.rolloff }), '(1 = −6 dB per doubling)'),
+      row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64, def: D.reverb_send_db }), 'dB'),
       row('Reflections', select(['-1', '0', '1', '2', '3'], String(l.reflection_order), (v) => u((x) => { x.reflection_order = parseInt(v, 10); }),
-        { '-1': 'room default', '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
+        { '-1': 'room default', '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' }, String(D.reflection_order))),
     ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
   }
 
@@ -356,21 +366,28 @@ export class Sidebar {
     this.addLayers([{ path: '', name, channels: files.length, files: sorted.map((f) => f.path) }]);
   }
 
-  // New layers go on a ring around the listener's start, facing it. Stereo
-  // files become left/right pairs; 4 / 9 / 16-channel files Ambisonic spheres.
-  private addLayers(files: { path: string; name: string; channels?: number; files?: string[] }[]): void {
+  // New layers go on a ring around the listener's start, facing it; dropped
+  // files go where they were dropped (in a row, 1.5 m apart, when there are
+  // several). Stereo files become left/right pairs; 4 / 9 / 16-channel files
+  // Ambisonic spheres.
+  addLayers(files: { path: string; name: string; channels?: number; files?: string[] }[], at?: V3): void {
     const L = this.store.scene.listener;
     const first = L.paths[L.active_path]?.segments[0]?.points[0] ?? L.static_position;
+    const r2 = (v: number) => Math.round(v * 100) / 100;
     this.upd((s) => {
       const n0 = s.layers.length;
       files.forEach((f, k) => {
         const i = n0 + k;
-        const a = (i * 2.399963) % (Math.PI * 2);  // golden angle: spreads any number of layers evenly
-        const r = 3 + 0.4 * Math.floor(i / 6);
-        const pos: [number, number, number] = [
-          Math.round((first[0] - r * Math.sin(a)) * 100) / 100, 1.6, Math.round((first[2] - r * Math.cos(a)) * 100) / 100];
+        let pos: V3;
+        if (at) {
+          pos = [r2(at[0] + (k - (files.length - 1) / 2) * 1.5), r2(at[1]), r2(at[2])];
+        } else {
+          const a = (i * 2.399963) % (Math.PI * 2);  // golden angle: spreads any number of layers evenly
+          const r = 3 + 0.4 * Math.floor(i / 6);
+          pos = [r2(first[0] - r * Math.sin(a)), 1.6, r2(first[2] - r * Math.cos(a))];
+        }
         const channels = channelsForFile(f.channels || 1);
-        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos, channels,
+        s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos, home: [...pos] as V3, channels,
           ...(f.files ? { audio_files: f.files } : {}), ...layerExtras(channels) }));
       });
     });
@@ -397,13 +414,13 @@ export class Sidebar {
     const ed = s.editor ?? {};
 
     this.body.append(section('Drawing',
-      row('Height', numberInput(ed.draw_height ?? 1.7, (v) => this.upd((sc) => { sc.editor = { ...sc.editor, draw_height: v }; }), { step: 0.1, width: 64 }), 'm (ear height)'),
+      row('Height', numberInput(ed.draw_height ?? 1.7, (v) => this.upd((sc) => { sc.editor = { ...sc.editor, draw_height: v }; }), { step: 0.1, width: 64, def: 1.7 }), 'm (ear height)'),
       row('Snap', select(['0', '0.1', '0.25', '0.5', '1'], String(o.grid), (v) => { o.grid = parseFloat(v); this.render(true); },
-        { '0': 'off', '0.1': '10 cm', '0.25': '25 cm', '0.5': '50 cm', '1': '1 m' })),
-      row('', checkbox(o.append, (v) => { o.append = v; this.render(true); }, 'New strokes continue the active path')),
-      row('Spiral', numberInput(o.spiralTurns, (v) => { o.spiralTurns = Math.max(0.25, v); }, { step: 0.5, width: 56 }), 'turns'),
-      row('Helix', numberInput(o.helixTurns, (v) => { o.helixTurns = Math.max(0.25, v); }, { step: 0.5, width: 56 }), 'turns,',
-        numberInput(o.helixRise, (v) => { o.helixRise = v; }, { step: 0.5, width: 56 }), 'm rise'),
+        { '0': 'off', '0.1': '10 cm', '0.25': '25 cm', '0.5': '50 cm', '1': '1 m' }, '0')),
+      row('', checkbox(o.append, (v) => { o.append = v; this.render(true); }, 'New strokes continue the active path', false)),
+      row('Spiral', numberInput(o.spiralTurns, (v) => { o.spiralTurns = Math.max(0.25, v); }, { step: 0.5, width: 56, def: 3 }), 'turns'),
+      row('Helix', numberInput(o.helixTurns, (v) => { o.helixTurns = Math.max(0.25, v); }, { step: 0.5, width: 56, def: 3 }), 'turns,',
+        numberInput(o.helixRise, (v) => { o.helixRise = v; }, { step: 0.5, width: 56, def: 2 }), 'm rise'),
     ));
 
     const list = el('div', { class: 'path-list' });
@@ -454,15 +471,15 @@ export class Sidebar {
     }
 
     // Listener movement.
-    const startPos = row('Start', numberInput(L.path_start_time, (v) => this.upd((sc) => { sc.listener.path_start_time = Math.max(0, v); }), { step: 0.5, width: 64 }), 's',
-      checkbox(L.loop_path, (v) => this.upd((sc) => { sc.listener.loop_path = v; }), 'loop the path'));
+    const startPos = row('Start', numberInput(L.path_start_time, (v) => this.upd((sc) => { sc.listener.path_start_time = Math.max(0, v); }), { step: 0.5, width: 64, def: DL.path_start_time }), 's',
+      checkbox(L.loop_path, (v) => this.upd((sc) => { sc.listener.loop_path = v; }), 'loop the path', DL.loop_path));
     const fraction = row('Position', slider(L.path_fraction * 100, 0, 100, 0.1, (v) => this.upd((sc) => { sc.listener.path_fraction = v / 100; }, 'fraction'),
-      (v) => `${v.toFixed(1)} %`, () => this.store.endGesture()));
+      (v) => `${v.toFixed(1)} %`, () => this.store.endGesture(), DL.path_fraction * 100));
     this.body.append(section('Listener movement',
       row('Moves by', select(['speed', 'along_path'], L.position_mode, (v) => this.upd((sc) => { sc.listener.position_mode = v as 'speed' | 'along_path'; }),
-        { speed: 'speed curve (timeline)', along_path: 'position along path' })),
+        { speed: 'speed curve (timeline)', along_path: 'position along path' }, DL.position_mode)),
       L.position_mode === 'speed' ? startPos : fraction,
-      L.paths.length ? '' : row('Stands at', vec3Inputs(L.static_position, (v) => this.upd((sc) => { sc.listener.static_position = v; }))),
+      L.paths.length ? '' : row('Stands at', vec3Inputs(L.static_position, (v) => this.upd((sc) => { sc.listener.static_position = v; }), 0.1, DL.static_position)),
     ));
 
     // Head.
@@ -471,12 +488,12 @@ export class Sidebar {
     const lookAt = H.mode === 'look_at' ? [
       row('Target', select(['-1', ...layerNames.map((_, i) => String(i))], String(H.look_at_layer),
         (v) => this.upd((sc) => { sc.listener.head.look_at_layer = parseInt(v, 10); }),
-        Object.fromEntries([['-1', 'a point'], ...layerNames.map((n, i) => [String(i), n])]))),
-      H.look_at_layer < 0 ? row('Point', vec3Inputs(H.look_at_point, (v) => this.upd((sc) => { sc.listener.head.look_at_point = v; }))) : '',
+        Object.fromEntries([['-1', 'a point'], ...layerNames.map((n, i) => [String(i), n])]), '-1')),
+      H.look_at_layer < 0 ? row('Point', vec3Inputs(H.look_at_point, (v) => this.upd((sc) => { sc.listener.head.look_at_point = v; }), 0.1, DL.head.look_at_point)) : '',
     ] : [];
     this.body.append(section('Head',
       row('Faces', select(['along_path', 'look_at', 'keyframed'], H.mode, (v) => this.upd((sc) => { sc.listener.head.mode = v as HeadMode; }),
-        { along_path: 'where it walks', look_at: 'a target', keyframed: 'keyframes only' })),
+        { along_path: 'where it walks', look_at: 'a target', keyframed: 'keyframes only' }, DL.head.mode)),
       ...lookAt,
       el('p', { class: 'muted' }, H.mode === 'keyframed'
         ? 'Yaw and pitch keys on the timeline set the head direction.'
@@ -499,14 +516,14 @@ export class Sidebar {
     const types = mesh || R.mesh ? ['box', 'mesh', 'outdoor', 'none'] : ['box', 'outdoor', 'none'];
     const mats = WALLS.filter((w) => box || w === 'floor').map((w) =>
       row(box ? w[0].toUpperCase() + w.slice(1) : 'Ground', select(MATERIALS, R.materials[w].name, (v) => this.upd((sc) => { sc.room.materials[w] = { name: v }; }),
-        Object.fromEntries(MATERIALS.map((m) => [m, m.replace('_', ' ')])))));
+        Object.fromEntries(MATERIALS.map((m) => [m, m.replace('_', ' ')])), DR.materials[w].name)));
     this.body.append(section('Space',
       row('Type', select(types, R.type, (v) => this.upd((sc) => { sc.room.type = v as SceneDoc['room']['type']; }),
-        { box: 'room (box)', mesh: 'room (mesh)', outdoor: 'outdoors (ground only)', none: 'free field (no reflections)' })),
+        { box: 'room (box)', mesh: 'room (mesh)', outdoor: 'outdoors (ground only)', none: 'free field (no reflections)' }, DR.type)),
       mesh ? el('p', { class: 'muted' }, meshNote(R.mesh, this.info?.steamAudio)) : '',
-      box ? row('Size', vec3Inputs(R.size, (v) => this.upd((sc) => { sc.room.size = v.map((x) => Math.max(1, x)) as typeof v; }), 0.5)) : '',
+      box ? row('Size', vec3Inputs(R.size, (v) => this.upd((sc) => { sc.room.size = v.map((x) => Math.max(1, x)) as typeof v; }), 0.5, DR.size)) : '',
       box ? el('p', { class: 'muted' }, 'Width (x), height (y), depth (z) in metres.') : '',
-      box ? row('Centre', vec3Inputs(R.origin, (v) => this.upd((sc) => { sc.room.origin = v; }), 0.5)) : '',
+      box ? row('Centre', vec3Inputs(R.origin, (v) => this.upd((sc) => { sc.room.origin = v; }), 0.5, DR.origin)) : '',
     ));
     if (R.type !== 'none' && !mesh) this.body.append(section(box ? 'Surfaces' : 'Ground', ...mats));
     if (R.objects?.length) {
@@ -517,20 +534,20 @@ export class Sidebar {
     const db = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
     if (R.type !== 'none') {
       this.body.append(section('Early reflections',
-        row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; })),
+        row('Reflections', checkbox(R.reflections, (v) => this.upd((sc) => { sc.room.reflections = v; }), undefined, DR.reflections),
           select(['0', '1', '2', '3'], String(R.reflection_order), (v) => this.upd((sc) => { sc.room.reflection_order = parseInt(v, 10); }),
-            { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' })),
-        row('Level', slider(R.reflections_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }, 'refl-level'), db, () => this.store.endGesture())),
+            { '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' }, String(DR.reflection_order))),
+        row('Level', slider(R.reflections_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reflections_level_db = v; }, 'refl-level'), db, () => this.store.endGesture(), DR.reflections_level_db)),
         el('p', { class: 'muted' }, 'Mirror images of each layer in the walls, moving with it. Walls scatter part of each echo into the reverb (the material\'s scattering).'),
       ));
     }
     if (box) this.renderLateReverb();
     this.body.append(el('p', { class: 'muted' }, 'Room changes restart the room model, so you may hear a short fade.'));
     this.body.append(section('Air',
-      row('Temperature', numberInput(E.temperature_c, (v) => this.upd((sc) => { sc.environment.temperature_c = v; }), { step: 1, width: 64 }), '°C'),
-      row('Humidity', numberInput(E.humidity, (v) => this.upd((sc) => { sc.environment.humidity = Math.max(0, Math.min(100, v)); }), { step: 5, width: 64 }), '%'),
-      row('', checkbox(E.air_absorption, (v) => this.upd((sc) => { sc.environment.air_absorption = v; }), 'High-frequency loss over distance')),
-      row('Speed of sound', numberInput(E.speed_of_sound, (v) => this.upd((sc) => { sc.environment.speed_of_sound = Math.max(50, v); }), { step: 1, width: 64 }), 'm/s'),
+      row('Temperature', numberInput(E.temperature_c, (v) => this.upd((sc) => { sc.environment.temperature_c = v; }), { step: 1, width: 64, def: DE.temperature_c }), '°C'),
+      row('Humidity', numberInput(E.humidity, (v) => this.upd((sc) => { sc.environment.humidity = Math.max(0, Math.min(100, v)); }), { step: 5, width: 64, def: DE.humidity }), '%'),
+      row('', checkbox(E.air_absorption, (v) => this.upd((sc) => { sc.environment.air_absorption = v; }), 'High-frequency loss over distance', DE.air_absorption)),
+      row('Speed of sound', numberInput(E.speed_of_sound, (v) => this.upd((sc) => { sc.environment.speed_of_sound = Math.max(50, v); }), { step: 1, width: 64, def: DE.speed_of_sound }), 'm/s'),
     ));
   }
 
@@ -546,10 +563,10 @@ export class Sidebar {
         if (sc.room.impulse_response.file) sc.room.impulse_response.enabled = false;
         else delete sc.room.impulse_response;
       }
-    }), { builtin: 'Built-in (from the room)', ir: 'Impulse response (WAV)' });
+    }), { builtin: 'Built-in (from the room)', ir: 'Impulse response (WAV)' }, 'builtin');
     const rows: (Node | string)[] = [
-      row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; })), kind),
-      row('Level', slider(R.reverb_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }, 'rev-level'), db, () => this.store.endGesture())),
+      row('Reverb', checkbox(R.reverb, (v) => this.upd((sc) => { sc.room.reverb = v; }), undefined, DR.reverb), kind),
+      row('Level', slider(R.reverb_level_db, -24, 12, 0.5, (v) => this.upd((sc) => { sc.room.reverb_level_db = v; }, 'rev-level'), db, () => this.store.endGesture(), DR.reverb_level_db)),
     ];
     if (usingIr && ir) {
       const load = el('button', { class: 'btn small' }, ir.file ? 'Replace…' : 'Load IR…');
@@ -570,13 +587,13 @@ export class Sidebar {
         info && !info.error ? el('p', { class: 'muted' }, `${info.channels} ch · ${fmtTime(info.duration, true)} · ${(info.sampleRate / 1000).toFixed(1)} kHz — ${interp(effective)}.`) : '',
         info?.error ? el('p', { class: 'warn-text' }, `Cannot read the file: ${info.error}`) : '',
         row('Channels', select(['0', '1', '2', '4'], String(ir.channels), (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.channels = parseInt(v, 10); }),
-          { '0': 'as in the file', '1': 'mono (diffuse)', '2': 'stereo L / R', '4': 'ambiX (4 ch, world-fixed)' })),
+          { '0': 'as in the file', '1': 'mono (diffuse)', '2': 'stereo L / R', '4': 'ambiX (4 ch, world-fixed)' }, '0')),
         row('IR gain', slider(ir.gain_db, -24, 12, 0.5, (v) => this.upd((sc) => { if (sc.room.impulse_response) sc.room.impulse_response.gain_db = v; }, 'ir-gain'), db, () => this.store.endGesture())),
         el('p', { class: 'muted' }, 'The IR is scaled to the room\'s calibrated reverb level (gain is a trim on top) and arrives 4.7 ms late. '
           + 'It replaces the built-in tail only; turn the early reflections off above if the recording has its own.'),
       );
     } else {
-      rows.push(row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64 }),
+      rows.push(row('Decay ×', numberInput(R.reverb_time_scale, (v) => this.upd((sc) => { sc.room.reverb_time_scale = Math.max(0.1, v); }), { step: 0.1, width: 64, def: DR.reverb_time_scale }),
         'of the room\'s Eyring RT60'));
     }
     this.body.append(section('Late reverb', ...rows));
@@ -597,8 +614,8 @@ export class Sidebar {
     const needed = out.mode === 'binaural' ? 2 : out.mode === 'ambix' ? 16 : layoutChannels(out.layout);
     this.body.append(section('Listen through',
       row('Output', select(['binaural', 'speakers', 'ambix'], out.mode, (v) => setOut(v as OutputMode, out.layout),
-        { binaural: 'Headphones (binaural)', speakers: 'Speakers', ambix: 'Ambisonics (ambiX, 3rd order)' })),
-      out.mode === 'speakers' ? row('Layout', select(LAYOUTS, out.layout, (v) => setOut('speakers', v))) : '',
+        { binaural: 'Headphones (binaural)', speakers: 'Speakers', ambix: 'Ambisonics (ambiX, 3rd order)' }, 'binaural')),
+      out.mode === 'speakers' ? row('Layout', select(LAYOUTS, out.layout, (v) => setOut('speakers', v), {}, '7.1.4')) : '',
       el('p', { class: 'muted' }, out.mode === 'binaural' ? 'Uses the SADIE II KU100 head (HRTF). Wear headphones.'
         : `Needs ${needed} output channels, sent to outputs 1–${needed} in ${out.mode === 'ambix' ? 'ACN/SN3D order' : 'the layout\'s order'}.`),
       info && info.outputChannels < needed ? el('p', { class: 'warn-text' }, `The current device has ${info.outputChannels} outputs; only the first ${info.outputChannels} channels will play.`) : '',
@@ -634,9 +651,10 @@ export class Sidebar {
       status = el('div', {}, el('p', { class: 'muted' }, `Saved ${st.path}`), el('div', { class: 'btn-row' }, show));
     }
     this.body.append(section('Bounce',
-      row('From', numberInput(this.bounceFrom, (v) => { this.bounceFrom = Math.max(0, v); }, { step: 1, width: 64 }), 's  to',
-        numberInput(end, (v) => { this.bounceTo = Math.max(0, v); }, { step: 1, width: 64 }), 's'),
-      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { this.bounceRate = parseInt(v, 10); })),
+      row('From', numberInput(this.bounceFrom, (v) => { this.bounceFrom = Math.max(0, v); }, { step: 1, width: 64, def: 0 }), 's  to',
+        numberInput(end, (v) => { this.bounceTo = v === this.store.duration ? null : Math.max(0, v); }, { step: 1, width: 64, def: this.store.duration }), 's'),
+      row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { this.bounceRate = parseInt(v, 10); }, {},
+        String(info?.sampleRate ?? 48000))),
       el('p', { class: 'muted' }, 'Renders offline with the output setting above: binaural stereo, the speaker layout, or ambiX.'),
       el('div', { class: 'btn-row' }, bounce),
       status,

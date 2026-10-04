@@ -30,13 +30,20 @@ add_custom_command(
 
 juce_add_binary_data(sp_ui_data SOURCES ${SP_UI_OUT}/index.html)
 
+# The plist goes to JUCE as text, on one line, without the XML header.
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/Resources/DocumentTypes.plist SP_DOC_TYPES_PLIST)
+string(REGEX REPLACE "<\\?xml[^>]*>|<!DOCTYPE[^>]*>|<!--[^>]*-->" "" SP_DOC_TYPES_PLIST "${SP_DOC_TYPES_PLIST}")
+string(REGEX REPLACE "[\r\n]+ *" "" SP_DOC_TYPES_PLIST "${SP_DOC_TYPES_PLIST}")
+
 juce_add_gui_app(SpatialPannerApp
   PRODUCT_NAME "Spatial Panner"
   VERSION ${PROJECT_VERSION}
   COMPANY_NAME "Spatial Panner"
   BUNDLE_ID com.spatialpanner.app
   NEEDS_WEB_BROWSER TRUE
-  MICROPHONE_PERMISSION_ENABLED FALSE)
+  MICROPHONE_PERMISSION_ENABLED FALSE
+  # .spscene files open in the app from the Finder (Resources/DocumentTypes.plist).
+  PLIST_TO_MERGE "${SP_DOC_TYPES_PLIST}")
 
 target_sources(SpatialPannerApp PRIVATE
   Source/Main.cpp
@@ -44,6 +51,9 @@ target_sources(SpatialPannerApp PRIVATE
   Source/Session.cpp
   Source/Bridge.cpp
   Source/AudioLibrary.cpp)
+if(APPLE)
+  target_sources(SpatialPannerApp PRIVATE Source/MacSupport.mm)
+endif()
 
 target_compile_definitions(SpatialPannerApp PRIVATE
   JUCE_WEB_BROWSER=1

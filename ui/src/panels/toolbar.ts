@@ -6,6 +6,9 @@ import { el } from './dom';
 export interface ToolbarActions {
   newScene(): void;
   open(): void;
+  recent(): Promise<string[]>;
+  openRecent(path: string): void;
+  clearRecent(): Promise<void>;
   save(saveAs: boolean): void;
   undo(): void;
   redo(): void;
@@ -43,6 +46,7 @@ export class Toolbar {
       : el('div', { class: 'group' },
         b('New', 'New scene', () => actions.newScene()),
         b('Open…', 'Open a scene (⌘O)', () => actions.open()),
+        this.recentButton(actions),
         b('Save', 'Save (⌘S)', () => actions.save(false)),
         b('Save as…', 'Save as (⇧⌘S)', () => actions.save(true)));
     this.undoBtn = b('↶', 'Undo (⌘Z)', () => actions.undo());
@@ -82,6 +86,38 @@ export class Toolbar {
     viewGroup.append(b('Frame', 'Fit the scene in view', () => actions.frame()), this.followBtn);
     this.title = el('div', { class: 'doc-title' });
     this.root.append(file, hist, toolGroup, viewGroup, this.title);
+  }
+
+  // "Recent ▾": the scenes opened or saved lately, newest first.
+  private recentButton(actions: ToolbarActions): HTMLElement {
+    const wrap = el('div', { class: 'recent' });
+    const btn = el('button', { class: 'tbtn', title: 'Open a recent scene' }, 'Recent ▾') as HTMLButtonElement;
+    const menu = el('div', { class: 'recent-menu' });
+    menu.style.display = 'none';
+    const close = () => { menu.style.display = 'none'; };
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (menu.style.display !== 'none') { close(); return; }
+      const files = await actions.recent();
+      menu.replaceChildren();
+      if (!files.length) menu.append(el('div', { class: 'recent-empty' }, 'No recent scenes'));
+      for (const f of files) {
+        const name = f.split(/[\\/]/).pop() ?? f;
+        const item = el('button', { class: 'recent-item', title: f }, name);
+        item.addEventListener('click', () => { close(); actions.openRecent(f); });
+        menu.append(item);
+      }
+      if (files.length) {
+        const clear = el('button', { class: 'recent-item recent-clear' }, 'Clear Menu');
+        clear.addEventListener('click', () => { close(); void actions.clearRecent(); });
+        menu.append(clear);
+      }
+      menu.style.display = '';
+    });
+    window.addEventListener('pointerdown', (e) => { if (!wrap.contains(e.target as Node)) close(); });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    wrap.append(btn, menu);
+    return wrap;
   }
 
   refresh(state: { view: ViewName; follow: boolean; canUndo: boolean; canRedo: boolean; title: string }): void {

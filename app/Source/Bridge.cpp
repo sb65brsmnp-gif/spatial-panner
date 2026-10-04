@@ -109,6 +109,45 @@ void relativiseIrPath(json& scene, const juce::File& dir) {
 
 Bridge::Bridge(Session& s, juce::AudioDeviceManager& d) : session_(s), devices_(d) {
     lastDir_ = juce::File::getSpecialLocation(juce::File::userMusicDirectory);
+    recent_.setMaxNumberOfItems(10);
+}
+
+void Bridge::setSettings(juce::PropertiesFile* p) {
+    settings_ = p;
+    if (p) recent_.restoreFromString(p->getValue("recentScenes"));
+}
+
+juce::StringArray Bridge::recentScenes() const {
+    juce::StringArray out;
+    for (int i = 0; i < recent_.getNumFiles(); ++i)
+        if (recent_.getFile(i).existsAsFile()) out.add(recent_.getFile(i).getFullPathName());
+    return out;
+}
+
+void Bridge::clearRecentScenes() {
+    recent_.clear();
+    if (settings_) { settings_->setValue("recentScenes", recent_.toString()); settings_->saveIfNeeded(); }
+    if (onRecentChanged) onRecentChanged();
+}
+
+// Puts a scene first in Open Recent (and, on macOS, the Dock menu's list).
+void Bridge::noteRecent(const juce::File& f) {
+    recent_.addFile(f);
+    juce::RecentlyOpenedFilesList::registerRecentFileNatively(f);
+    if (settings_) { settings_->setValue("recentScenes", recent_.toString()); settings_->saveIfNeeded(); }
+    if (onRecentChanged) onRecentChanged();
+}
+
+void Bridge::dropFiles(const juce::StringArray& paths, int x, int y) {
+    json p = json::array();
+    for (const auto& s : paths) p.push_back(s.toStdString());
+    emit("dropFiles", json{{"paths", p}, {"x", x}, {"y", y}}.dump());
+}
+
+void Bridge::dropHover(bool over) { emit("dropHover", json{{"over", over}}.dump()); }
+
+void Bridge::menuCommand(const juce::String& action, const juce::String& path) {
+    emit("menu", json{{"action", action.toStdString()}, {"path", path.toStdString()}}.dump());
 }
 
 std::string Bridge::call(const std::string& name, const std::string& arg, std::function<void(std::string)> async) {
@@ -172,6 +211,24 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         return json{{"ok", f.exists()}}.dump();
     }
     if (name == "showAudioSettings") { showAudioSettings(); return ""; }
+    if (name == "recentScenes") {
+        json out = json::array();
+        for (const auto& p : recentScenes()) out.push_back(p.toStdString());
+        return out.dump();
+    }
+    if (name == "clearRecentScenes") { clearRecentScenes(); return ""; }
+    // A scene by path (Open Recent): {path} -> as openScene.
+    if (name == "openScenePath") {
+        const juce::File f(juce::String::fromUTF8(a.value("path", "").c_str()));
+        if (!f.existsAsFile()) {
+            recent_.removeFile(f);
+            if (settings_) settings_->setValue("recentScenes", recent_.toString());
+            if (onRecentChanged) onRecentChanged();
+            return json{{"nativeError", f.getFileName().toStdString() + " is no longer there (moved or deleted)"}}.dump();
+        }
+        lastDir_ = f.getParentDirectory();
+        return readScene(f);
+    }
     if (name == "startupScene") {
         pageReady_ = true;
         if (pendingOpen_ == juce::File()) return "null";
@@ -184,7 +241,8 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
 
 juce::WebBrowserComponent::Options Bridge::addTo(juce::WebBrowserComponent::Options o) {
     const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                           "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile"};
+                           "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile",
+                           "recentScenes", "clearRecentScenes", "openScenePath"};
     for (const char* n : names) {
         const std::string name = n;
         o = o.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args, Completion done) {
@@ -274,7 +332,7 @@ void Bridge::chooseFile(const json& a, std::function<void(std::string)> done) {
 }
 
 void Bridge::openScene(std::function<void(std::string)> done) {
-    beginChooser(std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.json"),
+    beginChooser(std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.spscene;*.json"),
                  juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                  [this, done](const juce::FileChooser& fc) {
                      const auto f = fc.getResult();
@@ -293,6 +351,7 @@ std::string Bridge::readScene(const juce::File& f) {
         json scene = json::parse(sp::sceneToJson(sp::sceneFromJson(text, dir.getFullPathName().toStdString())));
         resolveAudioPaths(scene, dir);
         resolveMeshPath(scene, raw, dir);
+        noteRecent(f);
         return json{{"path", f.getFullPathName().toStdString()}, {"scene", scene}, {"raw", raw}}.dump();
     } catch (const std::exception& e) {
         return json{{"nativeError", std::string("Could not read ") + f.getFileName().toStdString() + ": " + e.what()}}.dump();
@@ -315,6 +374,7 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
             relativiseIrPath(scene, f.getParentDirectory());
             if (!f.replaceWithText(juce::String(scene.dump(2)) + "\n")) throw std::runtime_error("Cannot write " + f.getFullPathName().toStdString());
             lastDir_ = f.getParentDirectory();
+            noteRecent(f);
             done(json{{"path", f.getFullPathName().toStdString()}}.dump());
         } catch (const std::exception& e) {
             done(json{{"nativeError", e.what()}}.dump());
@@ -325,12 +385,13 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
         return;
     }
     const std::string name = a["scene"].value("name", "scene");
-    beginChooser(std::make_unique<juce::FileChooser>("Save scene", lastDir_.getChildFile(juce::File::createLegalFileName(name) + ".json"), "*.json"),
+    // New scenes are .spscene files (JSON inside), which Finder opens with the app.
+    beginChooser(std::make_unique<juce::FileChooser>("Save scene", lastDir_.getChildFile(juce::File::createLegalFileName(name) + ".spscene"), "*.spscene"),
                  juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
                  [write, done](const juce::FileChooser& fc) mutable {
                      auto f = fc.getResult();
                      if (f == juce::File()) { done("null"); return; }
-                     if (!f.hasFileExtension("json")) f = f.withFileExtension("json");
+                     if (!isSceneFile(f)) f = f.withFileExtension("spscene");
                      write(f);
                  }, done);
 }
