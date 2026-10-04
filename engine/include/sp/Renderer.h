@@ -70,6 +70,12 @@ struct RenderConfig {
 
     ReflectionsBackend reflections = ReflectionsBackend::Auto;
     SteamAudioSettings steam;
+
+    // Block size of the impulse-response reverb's convolution (a multiple of
+    // subBlockSize). Cost falls with the block; the tail arrives irBlockSize -
+    // subBlockSize samples late (256: 4.7 ms at 48 kHz), which only shifts
+    // the late reverb, not the direct sound or the image-source reflections.
+    int irBlockSize = 256;
 };
 
 // Live per-layer overrides (the plugin's automatable layer parameters).
@@ -146,10 +152,11 @@ public:
         float reverbRt60Mid = 0;      // seconds (Builtin: Eyring; SteamAudio: IR length basis)
         float reverbGain = 0;         // linear, before trims (Builtin)
         float maxDistance = 0;        // metres of delay line
-        float irSeconds = 0;          // SteamAudio: impulse response length
+        float irSeconds = 0;          // SteamAudio or an IR reverb: impulse response length
+        int irChannels = 0;           // IR reverb: channels in use (1 mono, 2 stereo, 4 ambiX); 0 = no IR loaded
         int numTriangles = 0;         // SteamAudio: geometry handed to the ray tracer
         int bounces = 0;              // SteamAudio: bounces per ray in use
-        int reflectionLatency = 0;    // SteamAudio: samples the reflections lag the direct path
+        int reflectionLatency = 0;    // SteamAudio: samples the reflections lag the direct path; IR reverb: the tail's lag
         std::string note;             // e.g. why a requested back-end was not used
     };
     Stats stats() const;

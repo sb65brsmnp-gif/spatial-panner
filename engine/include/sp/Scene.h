@@ -95,6 +95,19 @@ struct SceneObject {
 // Walls of a box room, indexed by the axis they are perpendicular to.
 enum Wall : int { WallNegX = 0, WallPosX, WallNegY /*floor*/, WallPosY /*ceiling*/, WallNegZ, WallPosZ, kNumWalls };
 
+// A measured or library impulse response as the late reverb of a box room,
+// in place of the built-in FDN. The moving image-source reflections stay
+// (turn `reflectionsEnabled` off if the IR carries its own early part). The
+// IR is normalised to unit energy, so the room's calibrated reverb level and
+// the per-layer sends still apply and `gainDb` is a trim.
+struct ImpulseResponse {
+    std::string file;       // WAV; a relative path is resolved against the scene file when loaded from JSON
+    float gainDb = 0;
+    int channels = 0;       // 0 = from the file; 1 mono (diffuse), 2 stereo L/R (head-relative), 4 first-order ambiX (ACN/SN3D, world-fixed)
+    bool enabled = true;    // false keeps the file in the scene but plays the built-in reverb
+    bool active() const { return enabled && !file.empty(); }
+};
+
 struct Room {
     RoomType type = RoomType::Box;
     Vec3 size{8, 3, 10};            // width (x), height (y), depth (z) in metres
@@ -109,6 +122,7 @@ struct Room {
     float reverbTimeScale = 1.0f;   // multiplies the Eyring RT60
     bool reflectionsEnabled = true;
     bool reverbEnabled = true;
+    ImpulseResponse impulseResponse;  // optional; replaces the FDN when active() and the file loads
 
     // RoomType::Mesh: the enclosure as a triangle mesh, loaded by SceneJson
     // from `meshFile` (Wavefront OBJ, `usemtl` names pick materials) or

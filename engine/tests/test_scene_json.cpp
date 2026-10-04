@@ -72,3 +72,34 @@ TEST_CASE("Scene JSON accepts shorthand and reports bad enums") {
     CHECK_THROWS(sceneFromJson(R"({"room": {"type": "cathedral"}})"));
     CHECK_THROWS(sceneFromJson("not json"));
 }
+
+TEST_CASE("Scene JSON: the impulse response block round-trips and older files load without it") {
+    Scene s;
+    s.room.impulseResponse.file = "irs/hall.wav";
+    s.room.impulseResponse.gainDb = -3.5f;
+    s.room.impulseResponse.channels = 2;
+    s.room.impulseResponse.enabled = false;
+    const std::string text = sceneToJson(s);
+    CHECK(text.find("impulse_response") != std::string::npos);
+    const Scene back = sceneFromJson(text);
+    CHECK(back.room.impulseResponse.file == "irs/hall.wav");
+    CHECK(back.room.impulseResponse.gainDb == Approx(-3.5));
+    CHECK(back.room.impulseResponse.channels == 2);
+    CHECK(!back.room.impulseResponse.enabled);
+    CHECK(!back.room.impulseResponse.active());
+
+    // A relative path is resolved against the scene file's directory.
+    const Scene rel = sceneFromJson(R"({"room": {"impulse_response": {"file": "hall.wav"}}})", "/scenes/demo");
+    CHECK(rel.room.impulseResponse.file == "/scenes/demo/hall.wav");
+    CHECK(rel.room.impulseResponse.enabled);
+    CHECK(rel.room.impulseResponse.active());
+    const Scene shorthand = sceneFromJson(R"({"room": {"impulse_response": "/abs/hall.wav"}})", "/scenes/demo");
+    CHECK(shorthand.room.impulseResponse.file == "/abs/hall.wav");
+    CHECK_THROWS(sceneFromJson(R"({"room": {"impulse_response": {"file": "x.wav", "channels": 3}}})"));
+
+    // No block: nothing set, and nothing written.
+    const Scene none = sceneFromJson(R"({"room": {"type": "box"}})");
+    CHECK(none.room.impulseResponse.file.empty());
+    CHECK(!none.room.impulseResponse.active());
+    CHECK(sceneToJson(none).find("impulse_response") == std::string::npos);
+}
