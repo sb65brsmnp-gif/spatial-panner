@@ -4,6 +4,7 @@
 add_library(sp_engine STATIC
   src/Pose.cpp
   src/Materials.cpp
+  src/Geometry.cpp
   src/SpeakerLayout.cpp
   src/SceneJson.cpp
   src/Renderer.cpp
@@ -27,6 +28,12 @@ target_link_libraries(sp_engine
 
 target_compile_options(sp_engine PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wno-unused-parameter>)
+
+if(SP_WITH_STEAM_AUDIO)
+  target_sources(sp_engine PRIVATE src/SteamAudioBackend.cpp)
+  target_link_libraries(sp_engine PRIVATE sp::steamaudio)
+  target_compile_definitions(sp_engine PUBLIC SP_HAVE_STEAM_AUDIO=1)
+endif()
 
 if(SP_DEFAULT_HRTF)
   target_compile_definitions(sp_engine PUBLIC SP_DEFAULT_HRTF="${SP_DEFAULT_HRTF}")

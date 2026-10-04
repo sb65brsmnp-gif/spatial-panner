@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +36,10 @@ struct Layer {
     float rolloff = 1.0f;           // 1 = inverse distance (-6 dB / doubling)
     float reverbSendDb = 0;         // trim for this layer's send into the room
     int reflectionOrder = -1;       // image-source order, -1 = use room default
+    // Ray-traced back-end only: the source is a sphere of this radius for
+    // partial occlusion by geometry between it and the listener.
+    bool occlusion = true;
+    float occlusionRadius = 0.5f;
     float startTime = 0;            // seconds on the timeline when the audio starts
     bool loop = false;
 };
@@ -44,6 +49,12 @@ struct Layer {
 struct Material {
     std::string name;
     std::array<float, kNumBands> absorption{0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    // Ray-traced back-end only (Steam Audio): how much of a reflection is
+    // scattered diffusely (0 = mirror, 1 = fully diffuse), and the energy
+    // fraction transmitted through the surface at low / mid / high
+    // frequencies when it sits between a layer and the listener.
+    float scattering = 0.1f;
+    std::array<float, 3> transmission{0, 0, 0};
 };
 
 namespace materials {
@@ -51,7 +62,35 @@ Material byName(const std::string& name);  // falls back to "plaster" for unknow
 std::vector<std::string> names();
 }  // namespace materials
 
-enum class RoomType { None, Box, Outdoor };
+enum class RoomType { None, Box, Outdoor, Mesh };
+
+// Triangle mesh in world space, metres: what the ray tracer sees. Three
+// vertex indices per triangle and one material index per triangle.
+struct MeshGeometry {
+    std::vector<Vec3> vertices;
+    std::vector<std::array<int, 3>> triangles;
+    std::vector<int> materialIndices;
+    std::vector<Material> materials;
+
+    bool empty() const { return triangles.empty(); }
+    void append(const MeshGeometry& other);
+    int addMaterial(const Material& m);  // returns its index (de-duplicated by name + values)
+    void addBox(const Vec3& minCorner, const Vec3& maxCorner, int material, bool normalsInward);
+    void addQuad(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d, int material);  // a-b-c-d in order
+    Vec3 minCorner() const;
+    Vec3 maxCorner() const;
+    float surfaceArea() const;
+};
+
+// An axis-aligned box placed in the scene: a wall segment, a pillar, a
+// piece of furniture. Blocks and reflects sound in the ray-traced back-end;
+// the image-source model ignores it.
+struct SceneObject {
+    std::string name;
+    Vec3 minCorner{-0.5f, 0, -0.5f};
+    Vec3 maxCorner{0.5f, 1, 0.5f};
+    Material material = materials::byName("wood_panel");
+};
 
 // Walls of a box room, indexed by the axis they are perpendicular to.
 enum Wall : int { WallNegX = 0, WallPosX, WallNegY /*floor*/, WallPosY /*ceiling*/, WallNegZ, WallPosZ, kNumWalls };
@@ -71,10 +110,29 @@ struct Room {
     bool reflectionsEnabled = true;
     bool reverbEnabled = true;
 
-    // Bounds in world space.
-    Vec3 minCorner() const { return origin - Vec3{size.x * 0.5f, 0, size.z * 0.5f}; }
-    Vec3 maxCorner() const { return origin + Vec3{size.x * 0.5f, size.y, size.z * 0.5f}; }
+    // RoomType::Mesh: the enclosure as a triangle mesh, loaded by SceneJson
+    // from `meshFile` (Wavefront OBJ, `usemtl` names pick materials) or
+    // given inline. Only the ray-traced back-end can use it; without Steam
+    // Audio a Mesh room renders as free field.
+    std::string meshFile;
+    MeshGeometry mesh;
+    // Extra geometry inside any room type (occluders, reflectors). Having
+    // any selects the ray-traced back-end when the renderer is on Auto.
+    std::vector<SceneObject> objects;
+
+    // Bounds in world space (Mesh rooms: of the mesh).
+    Vec3 minCorner() const { return type == RoomType::Mesh && !mesh.empty() ? mesh.minCorner() : origin - Vec3{size.x * 0.5f, 0, size.z * 0.5f}; }
+    Vec3 maxCorner() const { return type == RoomType::Mesh && !mesh.empty() ? mesh.maxCorner() : origin + Vec3{size.x * 0.5f, size.y, size.z * 0.5f}; }
 };
+
+// Everything the ray tracer should see for a room: box walls (Box), the
+// ground plane (Outdoor) or the mesh (Mesh), plus the objects.
+MeshGeometry roomGeometry(const Room& room);
+
+// Wavefront OBJ loader for Mesh rooms: `v` and `f` (polygons are fanned),
+// `usemtl NAME` picks the material via `materialFor(NAME)`. Throws on I/O
+// or parse errors.
+MeshGeometry loadObjMesh(const std::string& path, const std::function<Material(const std::string&)>& materialFor);
 
 // ------------------------------------------------------------------- Paths
 

@@ -9,7 +9,9 @@
 namespace sp {
 
 // Throws std::runtime_error with a readable message on malformed input.
-Scene sceneFromJson(const std::string& jsonText);
+// `baseDir` resolves relative file references inside the scene (a Mesh
+// room's OBJ file); loadSceneFile passes the scene file's directory.
+Scene sceneFromJson(const std::string& jsonText, const std::string& baseDir = "");
 std::string sceneToJson(const Scene& scene, int indent = 2);
 
 Scene loadSceneFile(const std::string& path);
