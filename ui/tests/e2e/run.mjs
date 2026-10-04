@@ -257,6 +257,32 @@ await check('demo scene opens and its path matches the engine', async () => {
   await page.screenshot({ path: resolve(outDir, 'room_walk.png') });
 });
 
+await check('a scene with objects shows them in the view and the Room tab', async () => {
+  await page.goto('http://localhost:5199/?scene=occluder.json');
+  await page.waitForFunction(() => window.spEditor?.store.scene.room.objects?.length === 3);
+  await waitAnalysis();
+  const o = await ed(() => window.spEditor.store.scene.room.objects[0]);
+  assert(o.name === 'partition wall' && Math.abs(o.max[0] + 1.9) < 1e-3, JSON.stringify(o));
+  await page.click('.tab:has-text("Room")');
+  await page.waitForSelector('text=partition wall');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: resolve(outDir, 'occluder.png') });
+});
+
+await check('a mesh room opens from its OBJ file and is drawn from the engine', async () => {
+  await page.goto('http://localhost:5199/?scene=lshape.json');
+  await page.waitForFunction(() => window.spEditor?.store.scene.room.type === 'mesh');
+  await waitAnalysis();
+  const mesh = await ed(() => window.spEditor.store.scene.room.mesh);
+  assert(mesh.file.endsWith('/scenes/lshape.obj'), JSON.stringify(mesh));
+  const tris = await ed(() => window.spEditor.store.analysis.room_mesh?.triangles.length ?? 0);
+  assert(tris > 10, `triangles ${tris}`);
+  const lines = await ed(() => window.spEditor.view.roomGroup.children.filter((c) => c.type === 'LineSegments').length);
+  assert(lines >= 1, 'mesh edges not drawn');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: resolve(outDir, 'lshape.png') });
+});
+
 if (errors.length) { failed++; console.log('Page errors:\n' + errors.join('\n')); }
 await browser.close();
 await server.close();

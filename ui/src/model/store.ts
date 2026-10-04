@@ -11,6 +11,8 @@ export interface Analysis {
   paths: { length: number; points: [number, number, number][] }[];
   // [x, y, z, yaw, pitch, roll, distance, speed]
   poses: number[][];
+  // A mesh room's triangles, for drawing.
+  room_mesh?: { vertices: [number, number, number][]; triangles: [number, number, number][] };
   revision?: number;
   error?: string;
 }

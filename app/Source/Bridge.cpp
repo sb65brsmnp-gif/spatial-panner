@@ -55,6 +55,29 @@ void relativiseAudioPaths(json& scene, const juce::File& dir) {
     }
 }
 
+// A mesh room's OBJ file follows the same rule as audio. The editor keeps the
+// mesh as the file wrote it ({"file", "materials"}), not the engine's inline
+// triangles, so saving does not bake the OBJ into the scene.
+void resolveMeshPath(json& scene, const json& raw, const juce::File& dir) {
+    if (!raw.contains("room") || !raw["room"].contains("mesh") || !scene.contains("room")) return;
+    json m = raw["room"]["mesh"];
+    if (m.is_string()) m = json{{"file", m}};
+    if (!m.is_object() || !m.contains("file")) return;
+    const std::string f = m["file"].get<std::string>();
+    if (!juce::File::isAbsolutePath(f)) m["file"] = dir.getChildFile(f).getFullPathName().toStdString();
+    scene["room"]["mesh"] = m;
+}
+
+void relativiseMeshPath(json& scene, const juce::File& dir) {
+    if (!scene.contains("room") || !scene["room"].contains("mesh")) return;
+    json& m = scene["room"]["mesh"];
+    if (!m.is_object() || !m.contains("file")) return;
+    const std::string f = m["file"].get<std::string>();
+    if (!juce::File::isAbsolutePath(f)) return;
+    const auto rel = juce::File(f).getRelativePathFrom(dir);
+    if (!rel.startsWith("../../..") && !juce::File::isAbsolutePath(rel)) m["file"] = rel.replaceCharacter('\\', '/').toStdString();
+}
+
 }  // namespace
 
 Bridge::Bridge(Session& s, juce::AudioDeviceManager& d) : session_(s), devices_(d) {
@@ -102,7 +125,8 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         return json{{"device", session_.deviceName().toStdString()}, {"sampleRate", session_.sampleRate()},
                     {"outputChannels", session_.outputChannels()}, {"cpu", session_.cpuLoad()},
                     {"output", {{"mode", modeName(o.mode)}, {"layout", o.layout.toStdString()}}},
-                    {"status", session_.statusText().toStdString()}}.dump();
+                    {"status", session_.statusText().toStdString()},
+                    {"steamAudio", sp::Renderer::steamAudioAvailable()}}.dump();
     }
     if (name == "audioInfo") {
         json out = json::array();
@@ -188,8 +212,10 @@ std::string Bridge::readScene(const juce::File& f) {
     try {
         const std::string text = f.loadFileAsString().toStdString();
         json raw = json::parse(text);
-        json scene = json::parse(sp::sceneToJson(sp::sceneFromJson(text)));
-        resolveAudioPaths(scene, f.getParentDirectory());
+        const juce::File dir = f.getParentDirectory();
+        json scene = json::parse(sp::sceneToJson(sp::sceneFromJson(text, dir.getFullPathName().toStdString())));
+        resolveAudioPaths(scene, dir);
+        resolveMeshPath(scene, raw, dir);
         return json{{"path", f.getFullPathName().toStdString()}, {"scene", scene}, {"raw", raw}}.dump();
     } catch (const std::exception& e) {
         return json{{"nativeError", std::string("Could not read ") + f.getFileName().toStdString() + ": " + e.what()}}.dump();
@@ -208,6 +234,7 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
             json scene = a.at("scene");
             sp::sceneFromJson(scene.dump());  // validate before writing
             relativiseAudioPaths(scene, f.getParentDirectory());
+            relativiseMeshPath(scene, f.getParentDirectory());
             if (!f.replaceWithText(juce::String(scene.dump(2)) + "\n")) throw std::runtime_error("Cannot write " + f.getFullPathName().toStdString());
             lastDir_ = f.getParentDirectory();
             done(json{{"path", f.getFullPathName().toStdString()}}.dump());

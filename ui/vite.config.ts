@@ -76,10 +76,15 @@ function devApi(): Plugin {
             const { name } = await body(req);
             const path = join(repo, 'scenes', basename(name));
             const text = readFileSync(path, 'utf8');
-            const scene = JSON.parse(await runScene(['normalize'], text));
+            const scene = JSON.parse(await runScene(['normalize', '--base', dirname(path)], text));
             if (scene.error) return send(res, scene);
             for (const l of scene.layers) if (l.audio && !isAbsolute(l.audio)) l.audio = resolve(dirname(path), l.audio);
-            return send(res, { path, scene, raw: JSON.parse(text) });
+            // As in the app: keep a mesh room's file reference (made absolute), not the inlined triangles.
+            const raw = JSON.parse(text);
+            let mesh = raw.room?.mesh;
+            if (typeof mesh === 'string') mesh = { file: mesh };
+            if (mesh?.file) scene.room.mesh = { ...mesh, file: isAbsolute(mesh.file) ? mesh.file : resolve(dirname(path), mesh.file) };
+            return send(res, { path, scene, raw });
           }
         } catch (e) {
           res.statusCode = 500;

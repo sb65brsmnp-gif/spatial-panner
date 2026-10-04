@@ -73,9 +73,11 @@ keeps the head on a point.
 
 **Room**: box size and centre, wall materials (absorption per band),
 reflections and their level, reverb and decay, air temperature and humidity;
-or no room (free field). The room is one box for now; the scene
-format keeps it as its own object so walls and other geometry can be added
-later.
+or no room (free field). Scenes can also carry a mesh room (an OBJ file, as in
+`scenes/lshape.json`) and box objects such as partitions and pillars (as in
+`scenes/occluder.json`); the editor draws them, lists them on the Room tab and
+plays them through the engine's ray-traced back-end (Steam Audio), but they
+are set in the scene file, not placed in the editor yet.
 
 **Output**: binaural (SADIE II KU100 HRTF), speakers (stereo, quad, 5.1, 7.1,
 5.1.4, 7.1.4, 9.1.6, mapped onto the device's first outputs) or ambiX. Changes
@@ -112,6 +114,7 @@ ui/ (TypeScript, Three.js)           app/Source (JUCE)
 
 * DAW integration: the AU plugin, host transport sync and automation are the
   next step.
-* Geometry other than the box room (walls, objects, occlusion).
+* Placing and editing walls, objects and mesh rooms in the editor (they load,
+  show and play, but are edited in the scene file).
 * Audio files are held in memory, about 0.2 GB per hour of mono audio at
   48 kHz. Streaming from disk is a later addition if needed.

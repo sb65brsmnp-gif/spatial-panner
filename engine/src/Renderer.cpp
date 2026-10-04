@@ -15,6 +15,9 @@
 #include "dsp/Hrtf.h"
 #include "dsp/Panning.h"
 #include "dsp/RoomAcoustics.h"
+#ifdef SP_HAVE_STEAM_AUDIO
+#include "SteamAudioBackend.h"
+#endif
 
 #if defined(__SSE__) || defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>
@@ -82,6 +85,8 @@ struct Voice {
 
     float levelCur = 0, levelTarget = 0;
     float sendCur = 0, sendTarget = 0;
+    float steamFeedCur = 0, steamFeedTarget = 0;  // dry feed into the ray-traced reflections
+    ShelfPair steamColour;  // level calibration of the traced reflections, 3 bands
 
     // Binaural direct path
     SpectralInput directIn;
@@ -97,7 +102,8 @@ struct Voice {
 
 // Longest path (direct or image) between any layer and the listener over the
 // timeline, plus headroom: the delay lines are sized from it.
-float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration) {
+float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double duration,
+                          const ListenerControls& controls = {}) {
     const double dur = duration > 0 ? duration : 600.0;
     const int steps = static_cast<int>(std::min(dur / 0.25, 4000.0)) + 1;
     float maxD = 1.0f;
@@ -108,16 +114,35 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
         images.push_back(computeImages(scene.room, l.position, lo));
     }
     for (int i = 0; i < steps; ++i) {
-        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1));
+        const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1), controls);
         for (const auto& imgs : images)
             for (const auto& img : imgs) maxD = std::max(maxD, (img.position - p.position).length());
     }
     return std::min(maxD * 1.15f + 2.0f, 3000.0f);
 }
 
-bool sameMaterial(const Material& a, const Material& b) { return a.name == b.name && a.absorption == b.absorption; }
+bool sameMaterial(const Material& a, const Material& b) {
+    return a.name == b.name && a.absorption == b.absorption && a.scattering == b.scattering && a.transmission == b.transmission;
+}
+
+bool sameMesh(const MeshGeometry& a, const MeshGeometry& b) {
+    if (a.vertices != b.vertices || a.triangles != b.triangles || a.materialIndices != b.materialIndices ||
+        a.materials.size() != b.materials.size())
+        return false;
+    for (size_t i = 0; i < a.materials.size(); ++i)
+        if (!sameMaterial(a.materials[i], b.materials[i])) return false;
+    return true;
+}
+
+bool sameObject(const SceneObject& a, const SceneObject& b) {
+    return a.name == b.name && a.minCorner == b.minCorner && a.maxCorner == b.maxCorner && sameMaterial(a.material, b.material);
+}
 
 bool sameRoom(const Room& a, const Room& b) {
+    // Geometry feeds the ray tracer's scene, which is built once per Renderer.
+    if (a.meshFile != b.meshFile || !sameMesh(a.mesh, b.mesh) || a.objects.size() != b.objects.size()) return false;
+    for (size_t i = 0; i < a.objects.size(); ++i)
+        if (!sameObject(a.objects[i], b.objects[i])) return false;
     if (a.type != b.type || !(a.size == b.size) || !(a.origin == b.origin) || a.reflectionOrder != b.reflectionOrder ||
         a.reflectionsLevelDb != b.reflectionsLevelDb || a.reverbLevelDb != b.reverbLevelDb ||
         a.reverbTimeScale != b.reverbTimeScale || a.reflectionsEnabled != b.reflectionsEnabled ||
@@ -179,6 +204,21 @@ struct Renderer::Impl {
 
     std::vector<Voice> voices;
 
+    // Ray-traced back-end (Steam Audio). When active, the image-source taps
+    // and the FDN are off; it supplies the reflected field and occlusion.
+    ReflectionsBackend backend = ReflectionsBackend::Builtin;
+    bool useSteam = false;
+    std::string note;
+    float steamIrSeconds = 0;
+#ifdef SP_HAVE_STEAM_AUDIO
+    std::unique_ptr<SteamAudioBackend> steam;
+#endif
+    std::vector<float> steamIn;          // B
+    std::vector<float> steamAmbi;        // nSh * B
+    std::vector<float*> steamAmbiPtrs;
+    double lastReflectionSim = -1e9;
+    int directSimCountdown = 0;
+
     // Work buffers (sized at init)
     std::vector<float> bus;        // nSh * B
     std::vector<float> directBuf;  // B
@@ -199,6 +239,9 @@ struct Renderer::Impl {
     Impl(const Scene& s, const RenderConfig& c, double dur);
     void initVoices();
     void initRoom();
+    void initBackend();
+    float estimateIrSeconds() const;
+    float meanFreePath() const;
     void computeTargets(Voice& v, const Pose& pose, double time);
     void rebuildTaps(Voice& v, const Vec3& srcPos);
     void updateHrtf(Voice& v, const Vec3& rel, float dist);
@@ -265,7 +308,7 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
         }
     }
 
-    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration);
+    maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration, listenerControls);
     air = AirAbsorptionTable(scene.environment, fs, maxDistance + 5.0f, 1.0f);
     if (scene.environment.airAbsorption) {
         const float f[3] = {250.0f, 1000.0f, 4000.0f};
@@ -274,9 +317,14 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
                                                             scene.environment.relativeHumidity, scene.environment.pressureKPa);
     }
     initRoom();
+    initBackend();
     initVoices();
 
     bus.assign(static_cast<size_t>(nSh) * B, 0.0f);
+    steamIn.assign(B, 0.0f);
+    steamAmbi.assign(static_cast<size_t>(nSh) * B, 0.0f);
+    steamAmbiPtrs.resize(nSh);
+    for (int c = 0; c < nSh; ++c) steamAmbiPtrs[c] = steamAmbi.data() + static_cast<size_t>(c) * B;
     directBuf.assign(B, 0.0f);
     revIn.assign(B, 0.0f);
     earBuf[0].assign(B, 0.0f);
@@ -314,6 +362,95 @@ void Renderer::Impl::initRoom() {
     }
 }
 
+float Renderer::Impl::estimateIrSeconds() const {
+    const Room& room = scene.room;
+    float rt60 = 1.0f;
+    if (room.type == RoomType::Box) {
+        rt60 = bandAverage(roomStats.rt60, 2, 3);
+    } else if (room.type == RoomType::Mesh && !room.mesh.empty()) {
+        // Eyring on the mesh: bounding-box volume, real surface area,
+        // area-weighted mid-band absorption.
+        const MeshGeometry& g = room.mesh;
+        const Vec3 ext = g.maxCorner() - g.minCorner();
+        const float V = std::max(ext.x * ext.y * ext.z, 1.0f);
+        float S = 0, Sa = 0;
+        for (size_t t = 0; t < g.triangles.size(); ++t) {
+            const Vec3& p0 = g.vertices[g.triangles[t][0]];
+            const float a = 0.5f * (g.vertices[g.triangles[t][1]] - p0).cross(g.vertices[g.triangles[t][2]] - p0).length();
+            const int m = t < g.materialIndices.size() ? g.materialIndices[t] : 0;
+            const float alpha = m >= 0 && m < static_cast<int>(g.materials.size()) ? bandAverage(g.materials[m].absorption, 2, 3) : 0.1f;
+            S += a;
+            Sa += a * alpha;
+        }
+        const float alpha = clamp(S > 0 ? Sa / S : 0.1f, 0.01f, 0.99f);
+        rt60 = 0.161f * V / (-S * std::log(1.0f - alpha));
+    } else {
+        rt60 = 0.6f;  // outdoors / free field with objects: short, sparse echoes
+    }
+    rt60 *= std::max(room.reverbTimeScale, 0.05f);
+    // The IR needs to hold the tail down to roughly -60 dB plus the first arrivals.
+    return clamp(rt60 * 1.1f + 0.15f, 0.3f, 6.0f);
+}
+
+float Renderer::Impl::meanFreePath() const {
+    const Room& room = scene.room;
+    if (room.type == RoomType::Box) return std::max(roomStats.meanFreePath, 0.5f);
+    if (room.type == RoomType::Mesh && !room.mesh.empty()) {
+        const Vec3 ext = room.mesh.maxCorner() - room.mesh.minCorner();
+        const float V = std::max(ext.x * ext.y * ext.z, 1.0f);
+        return std::max(4.0f * V / std::max(room.mesh.surfaceArea(), 1.0f), 0.5f);
+    }
+    return 20.0f;  // outdoors / objects only: sparse, long paths
+}
+
+void Renderer::Impl::initBackend() {
+    const Room& room = scene.room;
+    const bool needsRays = room.type == RoomType::Mesh || !room.objects.empty();
+    const bool available = Renderer::steamAudioAvailable();
+    useSteam = false;
+    switch (cfg.reflections) {
+        case ReflectionsBackend::Auto:
+            useSteam = available && needsRays;
+            if (needsRays && !available) note = "scene has mesh geometry or objects but the engine was built without Steam Audio; rendering without them";
+            break;
+        case ReflectionsBackend::Builtin:
+            if (needsRays) note = "built-in reflections: mesh geometry and objects are ignored";
+            break;
+        case ReflectionsBackend::SteamAudio:
+            useSteam = available;
+            if (!available) note = "Steam Audio back-end requested but not built in (SP_WITH_STEAM_AUDIO); using built-in reflections";
+            break;
+    }
+    if (useSteam && room.type == RoomType::Mesh && room.mesh.empty()) {
+        note = "mesh room without geometry; rendering free field";
+        useSteam = false;
+    }
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (useSteam) {
+        try {
+            SteamBackendSettings st;
+            st.sampleRate = fs;
+            st.subBlock = B;
+            st.ambiOrder = order;
+            st.numSources = static_cast<int>(scene.layers.size());
+            st.steam = cfg.steam;
+            st.irSeconds = cfg.steam.irSeconds > 0 ? cfg.steam.irSeconds : estimateIrSeconds();
+            st.speedOfSound = speedOfSound;
+            st.meanFreePath = meanFreePath();
+            st.airAbsorption = scene.environment.airAbsorption;
+            steam = std::make_unique<SteamAudioBackend>(roomGeometry(room), st);
+            steamIrSeconds = steam->irSeconds();
+        } catch (const std::exception& e) {
+            note = std::string("Steam Audio back-end failed to initialise: ") + e.what() + "; using built-in reflections";
+            steam.reset();
+            useSteam = false;
+        }
+    }
+#endif
+    backend = useSteam ? ReflectionsBackend::SteamAudio : ReflectionsBackend::Builtin;
+    if (useSteam) fdnEnabled = false;  // the traced IR carries the whole tail
+}
+
 void Renderer::Impl::initVoices() {
     voices.clear();
     voices.resize(scene.layers.size());
@@ -324,6 +461,10 @@ void Renderer::Impl::initVoices() {
         v.position = v.layer->position;
         v.delay.init(maxDelay);
         rebuildTaps(v, v.position);
+        // Steam Audio's reconstructed IRs come out below the diffuse-field
+        // level a box room should have, by a band-dependent amount (measured
+        // against statistical theory in two rooms; see docs/engine.md).
+        v.steamColour.set(dbToGain(2.5f), dbToGain(7.7f), dbToGain(4.3f), fs, 800.0f, 8000.0f);
         if (cfg.mode == OutputMode::Binaural) {
             v.directIn.reset(convSpec, *fft);
             for (int k = 0; k < 2; ++k) {
@@ -393,7 +534,7 @@ void Renderer::Impl::rebuildTaps(Voice& v, const Vec3& srcPos) {
     const Layer& L = *v.layer;
     const Room& room = scene.room;
     int ord = L.reflectionOrder >= 0 ? L.reflectionOrder : room.reflectionOrder;
-    if (!room.reflectionsEnabled) ord = 0;
+    if (!room.reflectionsEnabled || useSteam) ord = 0;
     const auto images = computeImages(room, srcPos, ord);
     if (images.size() != v.taps.size()) v.taps.assign(images.size(), Tap{});
     for (size_t i = 0; i < images.size(); ++i) {
@@ -488,9 +629,21 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
         v.sendTarget = 0;
     }
 
+    // Ray-traced reflections: the traced IR is relative to a unit source at
+    // 1 m, so the feed carries the reference-distance gain and the trims.
+    v.steamFeedTarget = (useSteam && scene.room.reflectionsEnabled && !muted)
+        ? refGain * reflGain * reverbTrim * dbToGain(L.reverbSendDb) : 0.0f;
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (useSteam && steam) {
+        steam->setSource(static_cast<int>(&v - voices.data()), srcPos, L.directivityForward,
+                         0.5f * clamp(L.directivity, 0.0f, 1.0f), L.occlusion, L.occlusionRadius);
+    }
+#endif
+
     if (first) {
         v.levelCur = v.levelTarget;
         v.sendCur = v.sendTarget;
+        v.steamFeedCur = v.steamFeedTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
         if (!v.spkCur.empty()) v.spkCur = v.spkTarget;
     }
@@ -508,25 +661,43 @@ void Renderer::Impl::renderSubBlock(double time) {
     std::fill(earBuf[0].begin(), earBuf[0].end(), 0.0f);
     std::fill(earBuf[1].begin(), earBuf[1].end(), 0.0f);
 
+    for (auto& v : voices) computeTargets(v, pose, time);
+
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (useSteam && steam) {
+        steam->setListener(pose.position, pose.orientation.right(), pose.orientation.up(), pose.orientation.forward());
+        if (--directSimCountdown <= 0 || first) {
+            steam->simulateDirect();
+            directSimCountdown = std::max(1, cfg.hrtfUpdateInterval);
+        }
+        if (first || time - lastReflectionSim >= cfg.steam.updateInterval) {
+            steam->simulateReflections();
+            lastReflectionSim = time;
+        }
+    }
+#endif
+
     for (size_t li = 0; li < voices.size(); ++li) {
         Voice& v = voices[li];
-        computeTargets(v, pose, time);
         const float* in = inFifo.data() + li * B;
 
         // Skip silent, inactive layers entirely once their tails have gone.
         const float dLevel = (v.levelTarget - v.levelCur) * invB;
         const float dSend = (v.sendTarget - v.sendCur) * invB;
-        float level = v.levelCur, send = v.sendCur;
+        const float dFeed = (v.steamFeedTarget - v.steamFeedCur) * invB;
+        float level = v.levelCur, send = v.sendCur, feed = v.steamFeedCur;
 
         std::fill(directBuf.begin(), directBuf.end(), 0.0f);
 
-        // Feed the delay line and the reverb send.
+        // Feed the delay line, the reverb send and the ray-traced reflections.
         for (int i = 0; i < B; ++i) {
             level += dLevel;
             send += dSend;
+            feed += dFeed;
             const float x = in[i] * level;
             v.delay.write(x);
             revIn[i] += x * send;
+            steamIn[i] = feed;  // gain ramp; the signal is taken at the direct tap below
         }
         // The delay line now holds this block; reading `delay + (B - 1 - i)`
         // behind the newest sample is the same as reading `delay` behind
@@ -536,12 +707,21 @@ void Renderer::Impl::renderSubBlock(double time) {
             const float dStep = (t.delayTarget - t.delayCur) * invB;
             const float gStep = (t.gainTarget - t.gainCur) * invB;
             float d = t.delayCur, g = t.gainCur;
+            // The traced reflection IR is relative to the direct arrival, so
+            // its feed is the signal at the direct tap: propagation delay and
+            // Doppler included, distance gain and air absorption not.
+            const bool feedsSteam = t.isDirect && useSteam;
             for (int i = 0; i < B; ++i) {
                 d += dStep;
                 g += gStep;
-                float smp = v.delay.read(d + static_cast<float>(B - 1 - i)) * g;
+                const float raw = v.delay.read(d + static_cast<float>(B - 1 - i));
+                if (feedsSteam) steamIn[i] *= v.steamColour.process(raw);
+                const float smp = raw * g;
                 tb[i] = t.isDirect ? t.air.process(smp) : t.colour.process(smp);
             }
+#ifdef SP_HAVE_STEAM_AUDIO
+            if (feedsSteam && steam) steam->applyOcclusion(static_cast<int>(li), tb);
+#endif
             if (!t.isDirect || cfg.mode == OutputMode::Ambisonics) {
                 for (int c = 0; c < nSh; ++c) {
                     const float sh0 = t.shCur[c], shStep = (t.shTarget[c] - sh0) * invB;
@@ -556,7 +736,11 @@ void Renderer::Impl::renderSubBlock(double time) {
         }
         v.levelCur = v.levelTarget;
         v.sendCur = v.sendTarget;
+        v.steamFeedCur = v.steamFeedTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
+#ifdef SP_HAVE_STEAM_AUDIO
+        if (useSteam && steam) steam->pushDry(static_cast<int>(li), steamIn.data());
+#endif
 
         // Direct path output.
         if (cfg.mode == OutputMode::Binaural) {
@@ -590,6 +774,15 @@ void Renderer::Impl::renderSubBlock(double time) {
             v.spkCur = v.spkTarget;
         }
     }
+
+    // Ray-traced reflections (early and late) into the bus.
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (useSteam && steam) {
+        steam->endSubBlock();
+        if (steam->pullReflections(steamAmbiPtrs.data()))
+            for (size_t k = 0; k < bus.size(); ++k) bus[k] += steamAmbi[k];
+    }
+#endif
 
     // Late reverb into the bus.
     if (fdnEnabled) {
@@ -652,6 +845,11 @@ void Renderer::Impl::resetState() {
     }
     for (auto& b : busIn) b.clear();
     if (fdnEnabled) fdn.reset();
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (steam) steam->reset();
+#endif
+    lastReflectionSim = -1e9;
+    directSimCountdown = 0;
     std::fill(inFifo.begin(), inFifo.end(), 0.0f);
     std::fill(outFifo.begin(), outFifo.end(), 0.0f);
     fifoFill = 0;
@@ -690,7 +888,7 @@ std::unique_ptr<SceneUpdate> Renderer::prepareUpdate(const Scene& scene) const {
     auto u = std::make_unique<SceneUpdate>();
     u->scene = scene;
     u->poses = PoseEvaluator(scene, im.duration > 0 ? im.duration : 600.0);
-    if (estimateMaxDistance(scene, u->poses, im.duration) > im.maxDistance) return nullptr;
+    if (estimateMaxDistance(scene, u->poses, im.duration, im.listenerControls) > im.maxDistance) return nullptr;
     return u;
 }
 
@@ -705,12 +903,30 @@ void Renderer::applyUpdate(SceneUpdate& u) {
     for (size_t i = 0; i < im.voices.size(); ++i) im.voices[i].layer = &im.scene.layers[i];
 }
 
+bool Renderer::steamAudioAvailable() {
+#ifdef SP_HAVE_STEAM_AUDIO
+    return true;
+#else
+    return false;
+#endif
+}
+
 Renderer::Stats Renderer::stats() const {
     Stats s;
+    s.backend = impl_->backend;
     s.numImagesPerLayer = impl_->voices.empty() ? 0 : static_cast<int>(impl_->voices[0].taps.size()) - 1;
     s.reverbRt60Mid = impl_->fdnEnabled ? bandAverage(impl_->roomStats.rt60, 2, 3) : 0.0f;
     s.reverbGain = impl_->fdnEnabled ? std::sqrt(impl_->reverbTotalEnergy) : 0.0f;
     s.maxDistance = impl_->maxDistance;
+    s.irSeconds = impl_->steamIrSeconds;
+#ifdef SP_HAVE_STEAM_AUDIO
+    if (impl_->steam) {
+        s.numTriangles = impl_->steam->numTriangles();
+        s.bounces = impl_->steam->bounces();
+        s.reflectionLatency = impl_->steam->reflectionLatency();
+    }
+#endif
+    s.note = impl_->note;
     return s;
 }
 

@@ -76,6 +76,29 @@ export class SceneView {
       const label = makeLabel('front wall', 'wall-label');
       label.position.set(o.x, o.y + h + 0.3, o.z - d / 2);
       this.roomGroup.add(label);
+    } else if (room.type === 'mesh') {
+      // The mesh comes from the engine's analysis (it reads the OBJ).
+      const m = this.store.analysis?.room_mesh;
+      if (m) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(m.vertices.flat(), 3));
+        g.setIndex(m.triangles.flat());
+        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 20), new THREE.LineBasicMaterial({ color: 0x8090a8 }));
+        this.roomGroup.add(edges);
+        g.computeBoundingBox();
+        const b = g.boundingBox!;
+        const w = b.max.x - b.min.x, d = b.max.z - b.min.z;
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d),
+          new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 1, side: THREE.DoubleSide, transparent: true, opacity: 0.6 }));
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set((b.min.x + b.max.x) / 2, b.min.y - 0.002, (b.min.z + b.max.z) / 2);
+        floor.name = 'floor';
+        this.roomGroup.add(floor);
+        g.dispose();
+      }
+      const grid = new THREE.GridHelper(40, 40, 0x3a4250, 0x262b33);
+      (grid.material as THREE.Material).depthWrite = false;
+      this.roomGroup.add(grid);
     } else {
       const grid = new THREE.GridHelper(60, 60, 0x3a4250, 0x262b33);
       this.roomGroup.add(grid);
@@ -85,6 +108,21 @@ export class SceneView {
       ground.position.y = -0.002;
       ground.name = 'floor';
       this.roomGroup.add(ground);
+    }
+    for (const o of room.objects ?? []) {
+      const size = o.max.map((v, i) => Math.max(v - o.min[i], 0.01)) as V3;
+      const box = new THREE.BoxGeometry(...size);
+      const solid = new THREE.Mesh(box, new THREE.MeshStandardMaterial({ color: 0x6b7280, transparent: true, opacity: 0.35, roughness: 1 }));
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: 0xa0aab8 }));
+      const group = new THREE.Group();
+      group.add(solid, edges);
+      group.position.set((o.min[0] + o.max[0]) / 2, (o.min[1] + o.max[1]) / 2, (o.min[2] + o.max[2]) / 2);
+      if (o.name) {
+        const label = makeLabel(o.name, 'wall-label');
+        label.position.set(0, size[1] / 2 + 0.2, 0);
+        group.add(label);
+      }
+      this.roomGroup.add(group);
     }
     this.vp.invalidate();
   }

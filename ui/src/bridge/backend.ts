@@ -17,6 +17,7 @@ export interface EngineInfo {
   cpu: number;           // fraction of the audio callback budget
   output: OutputConfig;
   status: string;        // human-readable engine state ("Playing", "Loading audio...")
+  steamAudio?: boolean;  // the engine has the ray-traced room model (mesh rooms, objects)
 }
 
 // Pushed at ~30 Hz by the app while it runs.

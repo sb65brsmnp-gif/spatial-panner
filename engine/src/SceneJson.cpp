@@ -1,7 +1,9 @@
 #include "sp/SceneJson.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -26,7 +28,7 @@ struct EnumNames;
         }                                                                   \
     };
 
-SP_ENUM(RoomType, {RoomType::None, "none"}, {RoomType::Box, "box"}, {RoomType::Outdoor, "outdoor"})
+SP_ENUM(RoomType, {RoomType::None, "none"}, {RoomType::Box, "box"}, {RoomType::Outdoor, "outdoor"}, {RoomType::Mesh, "mesh"})
 SP_ENUM(SegmentType, {SegmentType::Line, "line"}, {SegmentType::CubicBezier, "bezier"},
         {SegmentType::CatmullRom, "catmull_rom"}, {SegmentType::Arc, "arc"})
 SP_ENUM(Easing, {Easing::Linear, "linear"}, {Easing::SmoothStep, "smooth"}, {Easing::EaseIn, "ease_in"},
@@ -76,6 +78,8 @@ json materialToJson(const Material& m) {
     json j;
     j["name"] = m.name;
     j["absorption"] = m.absorption;
+    j["scattering"] = m.scattering;
+    j["transmission"] = m.transmission;
     return j;
 }
 
@@ -89,7 +93,87 @@ Material materialFromJson(const json& j) {
         for (int i = 0; i < kNumBands; ++i) m.absorption[i] = a[i].get<float>();
         if (j.contains("name")) m.name = j.at("name").get<std::string>(); else m.name = "custom";
     }
+    m.scattering = j.value("scattering", m.scattering);
+    if (j.contains("transmission")) {
+        const auto& t = j.at("transmission");
+        if (!t.is_array() || t.size() != 3) throw std::runtime_error("Material transmission needs 3 values (low, mid, high)");
+        for (int i = 0; i < 3; ++i) m.transmission[i] = t[i].get<float>();
+    }
     return m;
+}
+
+// ---- geometry
+
+json meshToJson(const MeshGeometry& g) {
+    json j;
+    json verts = json::array();
+    for (const auto& v : g.vertices) verts.push_back(vecToJson(v));
+    j["vertices"] = verts;
+    j["triangles"] = g.triangles;
+    j["material_indices"] = g.materialIndices;
+    json mats = json::array();
+    for (const auto& m : g.materials) mats.push_back(materialToJson(m));
+    j["materials"] = mats;
+    return j;
+}
+
+MeshGeometry meshFromJson(const json& j) {
+    MeshGeometry g;
+    if (j.contains("materials"))
+        for (const auto& m : j.at("materials")) g.materials.push_back(materialFromJson(m));
+    if (g.materials.empty()) g.materials.push_back(materials::byName("plaster"));
+    if (j.contains("vertices"))
+        for (const auto& v : j.at("vertices")) g.vertices.push_back(vecFromJson(v, "vertices"));
+    if (j.contains("triangles")) {
+        for (const auto& t : j.at("triangles")) {
+            if (!t.is_array() || t.size() != 3) throw std::runtime_error("Mesh triangles need 3 vertex indices each");
+            std::array<int, 3> tri{t[0].get<int>(), t[1].get<int>(), t[2].get<int>()};
+            for (int k : tri)
+                if (k < 0 || k >= static_cast<int>(g.vertices.size())) throw std::runtime_error("Mesh triangle index out of range");
+            g.triangles.push_back(tri);
+        }
+    }
+    if (j.contains("material_indices"))
+        for (const auto& m : j.at("material_indices")) g.materialIndices.push_back(m.get<int>());
+    g.materialIndices.resize(g.triangles.size(), 0);
+    for (int& m : g.materialIndices)
+        if (m < 0 || m >= static_cast<int>(g.materials.size())) m = 0;
+    return g;
+}
+
+json objectToJson(const SceneObject& o) {
+    json j;
+    j["name"] = o.name;
+    j["min"] = vecToJson(o.minCorner);
+    j["max"] = vecToJson(o.maxCorner);
+    j["material"] = materialToJson(o.material);
+    return j;
+}
+
+SceneObject objectFromJson(const json& j) {
+    SceneObject o;
+    o.name = j.value("name", "");
+    if (j.contains("box")) {
+        // {"box": {"min": [..], "max": [..]}} or {"box": {"center": [..], "size": [..]}}
+        const auto& b = j.at("box");
+        if (b.contains("center")) {
+            const Vec3 c = vecFromJson(b.at("center"), "center"), sz = vecFromJson(b.at("size"), "size");
+            o.minCorner = c - sz * 0.5f;
+            o.maxCorner = c + sz * 0.5f;
+        } else {
+            o.minCorner = getVec(b, "min", o.minCorner);
+            o.maxCorner = getVec(b, "max", o.maxCorner);
+        }
+    } else if (j.contains("center")) {
+        const Vec3 c = vecFromJson(j.at("center"), "center"), sz = vecFromJson(j.at("size"), "size");
+        o.minCorner = c - sz * 0.5f;
+        o.maxCorner = c + sz * 0.5f;
+    } else {
+        o.minCorner = getVec(j, "min", o.minCorner);
+        o.maxCorner = getVec(j, "max", o.maxCorner);
+    }
+    if (j.contains("material")) o.material = materialFromJson(j.at("material"));
+    return o;
 }
 
 // ---- layers
@@ -110,6 +194,8 @@ json layerToJson(const Layer& l) {
     j["rolloff"] = l.rolloff;
     j["reverb_send_db"] = l.reverbSendDb;
     j["reflection_order"] = l.reflectionOrder;
+    j["occlusion"] = l.occlusion;
+    j["occlusion_radius"] = l.occlusionRadius;
     j["start_time"] = l.startTime;
     j["loop"] = l.loop;
     return j;
@@ -131,6 +217,8 @@ Layer layerFromJson(const json& j) {
     l.rolloff = j.value("rolloff", l.rolloff);
     l.reverbSendDb = j.value("reverb_send_db", l.reverbSendDb);
     l.reflectionOrder = j.value("reflection_order", l.reflectionOrder);
+    l.occlusion = j.value("occlusion", l.occlusion);
+    l.occlusionRadius = j.value("occlusion_radius", l.occlusionRadius);
     l.startTime = j.value("start_time", l.startTime);
     l.loop = j.value("loop", l.loop);
     return l;
@@ -157,10 +245,19 @@ json roomToJson(const Room& r) {
     j["reverb_time_scale"] = r.reverbTimeScale;
     j["reflections"] = r.reflectionsEnabled;
     j["reverb"] = r.reverbEnabled;
+    if (r.type == RoomType::Mesh) {
+        if (!r.meshFile.empty()) j["mesh"] = json{{"file", r.meshFile}};
+        else j["mesh"] = meshToJson(r.mesh);
+    }
+    if (!r.objects.empty()) {
+        json objs = json::array();
+        for (const auto& o : r.objects) objs.push_back(objectToJson(o));
+        j["objects"] = objs;
+    }
     return j;
 }
 
-Room roomFromJson(const json& j) {
+Room roomFromJson(const json& j, const std::string& baseDir) {
     Room r;
     r.type = getEnum(j, "type", r.type);
     r.size = getVec(j, "size", r.size);
@@ -171,12 +268,13 @@ Room roomFromJson(const json& j) {
             const Material all = materialFromJson(m);
             for (auto& w : r.materials) w = all;
         } else {
-            for (int w = 0; w < kNumWalls; ++w)
-                if (m.contains(wallKey(w))) r.materials[w] = materialFromJson(m.at(wallKey(w)));
+            // "walls" sets all four side walls; a named wall overrides it.
             if (m.contains("walls")) {
                 const Material walls = materialFromJson(m.at("walls"));
                 for (int w : {WallNegX, WallPosX, WallNegZ, WallPosZ}) r.materials[w] = walls;
             }
+            for (int w = 0; w < kNumWalls; ++w)
+                if (m.contains(wallKey(w))) r.materials[w] = materialFromJson(m.at(wallKey(w)));
         }
     }
     r.reflectionOrder = j.value("reflection_order", r.reflectionOrder);
@@ -185,6 +283,41 @@ Room roomFromJson(const json& j) {
     r.reverbTimeScale = j.value("reverb_time_scale", r.reverbTimeScale);
     r.reflectionsEnabled = j.value("reflections", r.reflectionsEnabled);
     r.reverbEnabled = j.value("reverb", r.reverbEnabled);
+    if (j.contains("mesh")) {
+        const auto& m = j.at("mesh");
+        // {"file": "room.obj", "materials": {"usemtl-name": material, ...}} or inline geometry.
+        if (m.is_string() || m.contains("file")) {
+            r.meshFile = m.is_string() ? m.get<std::string>() : m.at("file").get<std::string>();
+            std::map<std::string, Material> named;
+            if (m.is_object() && m.contains("materials"))
+                for (auto it = m.at("materials").begin(); it != m.at("materials").end(); ++it)
+                    named[it.key()] = materialFromJson(it.value());
+            const Material fallback = r.materials[WallNegX];
+            auto materialFor = [&](const std::string& name) -> Material {
+                auto it = named.find(name);
+                if (it != named.end()) return it->second;
+                if (name.empty()) return fallback;
+                // Known material names work directly; anything else gets the wall material.
+                const auto known = materials::names();
+                if (std::find(known.begin(), known.end(), name) != known.end()) return materials::byName(name);
+                return fallback;
+            };
+            std::string path = r.meshFile;
+            if (!baseDir.empty() && !std::filesystem::path(path).is_absolute()) path = (std::filesystem::path(baseDir) / path).string();
+            r.mesh = loadObjMesh(path, materialFor);
+        } else {
+            r.mesh = meshFromJson(m);
+        }
+        if (r.type != RoomType::Mesh && !j.contains("type")) r.type = RoomType::Mesh;
+    }
+    if (j.contains("objects"))
+        for (const auto& o : j.at("objects")) r.objects.push_back(objectFromJson(o));
+    if (r.type == RoomType::Mesh && !r.mesh.empty()) {
+        // Keep size/origin in step with the mesh for anything that reads the bounds.
+        const Vec3 mn = r.mesh.minCorner(), mx = r.mesh.maxCorner();
+        r.size = mx - mn;
+        r.origin = {(mn.x + mx.x) * 0.5f, mn.y, (mn.z + mx.z) * 0.5f};
+    }
     return r;
 }
 
@@ -341,7 +474,7 @@ Environment environmentFromJson(const json& j) {
 
 }  // namespace
 
-Scene sceneFromJson(const std::string& text) {
+Scene sceneFromJson(const std::string& text, const std::string& baseDir) {
     json j;
     try {
         j = json::parse(text);
@@ -354,7 +487,7 @@ Scene sceneFromJson(const std::string& text) {
         s.duration = j.value("duration", 0.0);
         if (j.contains("layers"))
             for (const auto& l : j.at("layers")) s.layers.push_back(layerFromJson(l));
-        if (j.contains("room")) s.room = roomFromJson(j.at("room"));
+        if (j.contains("room")) s.room = roomFromJson(j.at("room"), baseDir);
         if (j.contains("listener")) s.listener = listenerFromJson(j.at("listener"));
         if (j.contains("environment")) s.environment = environmentFromJson(j.at("environment"));
         return s;
@@ -381,7 +514,7 @@ Scene loadSceneFile(const std::string& path) {
     if (!in) throw std::runtime_error("Cannot open scene file '" + path + "'");
     std::stringstream ss;
     ss << in.rdbuf();
-    return sceneFromJson(ss.str());
+    return sceneFromJson(ss.str(), std::filesystem::absolute(std::filesystem::path(path)).parent_path().string());
 }
 
 void saveSceneFile(const Scene& scene, const std::string& path) {

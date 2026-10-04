@@ -78,8 +78,21 @@ export interface MaterialDoc { name: string; absorption?: number[] }
 export const WALLS = ['left', 'right', 'floor', 'ceiling', 'front', 'back'] as const;
 export type WallKey = typeof WALLS[number];
 
+// A box placed in the room (wall segment, pillar, furniture). The engine's
+// ray-traced back-end blocks and reflects sound with it. Placed in the scene
+// file for now; the editor shows them but does not edit them yet.
+export interface ObjectDoc {
+  name: string;
+  min: V3;
+  max: V3;
+  material: MaterialDoc;
+}
+
 export interface RoomDoc {
-  type: 'box' | 'outdoor' | 'none';
+  // 'mesh': the room is a triangle mesh (an OBJ file or inline), ray-traced.
+  type: 'box' | 'outdoor' | 'none' | 'mesh';
+  mesh?: unknown;
+  objects?: ObjectDoc[];
   size: V3;
   origin: V3;
   materials: Record<WallKey, MaterialDoc>;

@@ -14,6 +14,7 @@ SceneAnalysis analyzeScene(const Scene& scene, double duration, double dt, float
     pathStep = std::max(pathStep, 0.005f);
     a.duration = duration;
     a.dt = dt;
+    if (scene.room.type == RoomType::Mesh) a.roomMesh = scene.room.mesh;
 
     for (const auto& p : scene.listener.paths) {
         SampledPathView v;
@@ -75,6 +76,11 @@ std::string analysisToJson(const SceneAnalysis& a) {
         poses.push_back({r(s.position.x), r(s.position.y), r(s.position.z), r(s.yawDeg), r(s.pitchDeg), r(s.rollDeg),
                          r(s.distance), r(s.speed)});
     j["poses"] = poses;
+    if (!a.roomMesh.empty()) {
+        json verts = json::array();
+        for (const auto& v : a.roomMesh.vertices) verts.push_back({r(v.x), r(v.y), r(v.z)});
+        j["room_mesh"] = {{"vertices", verts}, {"triangles", a.roomMesh.triangles}};
+    }
     return j.dump();
 }
 

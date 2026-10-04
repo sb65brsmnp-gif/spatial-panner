@@ -62,6 +62,13 @@ TEST_CASE("Scene JSON accepts shorthand and reports bad enums") {
     REQUIRE(s.listener.speed.keys.size() == 1);
     CHECK(s.listener.speed.keys[0].speed == Approx(3));
 
+    // "walls" covers the side walls and a named wall overrides it, in any key order.
+    const Scene w = sceneFromJson(R"({"room": {"materials": {"back": "curtain", "walls": "brick", "floor": "carpet"}}})");
+    CHECK(w.room.materials[WallPosZ].name == "curtain");
+    CHECK(w.room.materials[WallNegX].name == "brick");
+    CHECK(w.room.materials[WallNegZ].name == "brick");
+    CHECK(w.room.materials[WallNegY].name == "carpet");
+
     CHECK_THROWS(sceneFromJson(R"({"room": {"type": "cathedral"}})"));
     CHECK_THROWS(sceneFromJson("not json"));
 }

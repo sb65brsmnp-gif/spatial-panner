@@ -21,6 +21,37 @@ namespace sp {
 
 enum class OutputMode { Binaural, Speakers, Ambisonics };
 
+// How reflections and reverb are produced.
+//   Builtin:    image sources + FDN. Exact for box rooms (and the ground
+//               plane outdoors), Doppler on every reflection, cheap.
+//   SteamAudio: ray tracing against the room geometry (any mesh, objects)
+//               with a convolution / hybrid / parametric reverb from the
+//               traced impulse response, plus occlusion and transmission
+//               of the direct path. Needs the engine built with
+//               SP_WITH_STEAM_AUDIO (see Renderer::steamAudioAvailable()).
+//   Auto:       SteamAudio when the room is a mesh or has objects and the
+//               back-end is available, Builtin otherwise.
+enum class ReflectionsBackend { Auto, Builtin, SteamAudio };
+
+struct SteamAudioSettings {
+    enum class Reverb { Convolution, Hybrid, Parametric };
+    int rays = 4096;                 // rays traced from the listener per simulation
+    int bounces = 0;                 // per ray; 0 = enough to cover irSeconds in this room
+    float irSeconds = 0;             // impulse response length; 0 = estimated from the room
+    // Block size of the reflection convolution (a multiple of subBlockSize).
+    // Cost falls with the block; the reflections arrive frameSize -
+    // subBlockSize samples late (256: 4.7 ms at 48 kHz).
+    int frameSize = 256;
+    int threads = 0;                 // ray-tracing threads; 0 = hardware threads - 1
+    Reverb reverb = Reverb::Convolution;
+    float hybridTransitionSeconds = 0.4f;  // Hybrid: convolution before, parametric after
+    float updateInterval = 0.1f;     // seconds between reflection simulations
+    bool asyncSimulation = false;    // true: simulate on a worker thread (real time);
+                                     // false: in-line in process() (offline rendering)
+    bool occlusion = true;           // direct-path occlusion / transmission by geometry
+    int occlusionSamples = 16;       // points per source sphere for partial occlusion
+};
+
 struct RenderConfig {
     double sampleRate = 48000.0;
     OutputMode mode = OutputMode::Binaural;
@@ -36,6 +67,9 @@ struct RenderConfig {
     // 128 samples, 2.7 ms at 48 kHz) and only when the direction moved by
     // more than ~0.15 degrees; each update costs 16 small FFTs per layer.
     int hrtfUpdateInterval = 4;
+
+    ReflectionsBackend reflections = ReflectionsBackend::Auto;
+    SteamAudioSettings steam;
 };
 
 // Live per-layer overrides (the plugin's automatable layer parameters).
@@ -102,12 +136,21 @@ public:
     std::unique_ptr<SceneUpdate> prepareUpdate(const Scene& scene) const;
     void applyUpdate(SceneUpdate& update);
 
+    // True when the engine was built with the Steam Audio back-end.
+    static bool steamAudioAvailable();
+
     // Diagnostics
     struct Stats {
-        int numImagesPerLayer = 0;
-        float reverbRt60Mid = 0;      // seconds
-        float reverbGain = 0;         // linear, before trims
+        ReflectionsBackend backend = ReflectionsBackend::Builtin;  // the one in use
+        int numImagesPerLayer = 0;    // Builtin
+        float reverbRt60Mid = 0;      // seconds (Builtin: Eyring; SteamAudio: IR length basis)
+        float reverbGain = 0;         // linear, before trims (Builtin)
         float maxDistance = 0;        // metres of delay line
+        float irSeconds = 0;          // SteamAudio: impulse response length
+        int numTriangles = 0;         // SteamAudio: geometry handed to the ray tracer
+        int bounces = 0;              // SteamAudio: bounces per ray in use
+        int reflectionLatency = 0;    // SteamAudio: samples the reflections lag the direct path
+        std::string note;             // e.g. why a requested back-end was not used
     };
     Stats stats() const;
 
