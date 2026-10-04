@@ -1,13 +1,18 @@
 // End-to-end test of the editor in a browser against the dev server (which
 // uses the engine's sp-scene tool for analysis). Run: npm run e2e
-// Needs the CMake build (build/tools/scene/sp-scene) and Playwright's Chromium.
+// Needs the CMake build (build/tools/scene/sp-scene), the demo signals
+// (build/tools/gensignals/sp-gensignals signals) and Playwright's Chromium.
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+if (!existsSync(resolve(root, '../signals/voice.wav'))) {
+  console.error('Missing demo signals: run build/tools/gensignals/sp-gensignals signals from the repository root.');
+  process.exit(1);
+}
 const outDir = process.env.E2E_OUT ?? resolve(root, 'test-results');
 mkdirSync(outDir, { recursive: true });
 

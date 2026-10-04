@@ -42,6 +42,9 @@ jobs:
       - name: Test (engine and app session)
         run: ctest --test-dir build --output-on-failure
 
+      - name: Generate the demo signals (used by the demos and the editor tests)
+        run: ./build/tools/gensignals/sp-gensignals signals --seconds 6
+
       - name: Editor unit tests
         working-directory: ui
         run: npm test
@@ -63,7 +66,6 @@ jobs:
 
       - name: Render a demo
         run: |
-          ./build/tools/gensignals/sp-gensignals signals --seconds 6
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
 
       - name: Upload the macOS app
