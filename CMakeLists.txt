@@ -21,8 +21,12 @@ option(SP_BUILD_TOOLS "Build the command-line tools (renderer, signal generator)
 option(SP_FETCH_HRTF  "Download the default HRTF (SADIE II KU100) at configure time" ON)
 option(SP_BUILD_APP   "Build the standalone app (JUCE + the editor UI; needs npm)" ON)
 option(SP_BUILD_PLUGIN "Build the plugin (AUv2 on macOS; needs SP_BUILD_APP for the editor UI)" ON)
+option(SP_WITH_STEAM_AUDIO "Build Steam Audio from source for ray-traced reflections and occlusion" ON)
 
 include(cmake/Dependencies.cmake)
+if(SP_WITH_STEAM_AUDIO)
+  include(cmake/SteamAudio.cmake)
+endif()
 
 if(SP_BUILD_TESTS)
   enable_testing()

@@ -1,0 +1,35 @@
+# L-shaped room for the spatial panner demos (metres, y up, -z forward).
+# Wide leg 10 x 6 m, narrow leg 5 x 6 m, 3.2 m high. Materials by usemtl name.
+o lshape
+v -5.000 0.000 -6.000
+v 5.000 0.000 -6.000
+v 5.000 0.000 6.000
+v 0.000 0.000 6.000
+v 0.000 0.000 0.000
+v -5.000 0.000 0.000
+v -5.000 3.200 -6.000
+v 5.000 3.200 -6.000
+v 5.000 3.200 6.000
+v 0.000 3.200 6.000
+v 0.000 3.200 0.000
+v -5.000 3.200 0.000
+v 5.000 0.000 0.000
+v 5.000 3.200 0.000
+usemtl plaster
+f 2 1 7 8
+usemtl plaster
+f 3 2 8 9
+usemtl curtain
+f 4 3 9 10
+usemtl plaster
+f 5 4 10 11
+usemtl wood_panel
+f 6 5 11 12
+usemtl plaster
+f 1 6 12 7
+usemtl wood_floor
+f 1 2 13 6
+f 13 3 4 5
+usemtl acoustic_tile
+f 7 12 14 8
+f 14 11 10 9

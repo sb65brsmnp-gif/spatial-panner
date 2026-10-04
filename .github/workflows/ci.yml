@@ -36,11 +36,19 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build (engine, tools, app)
+      - name: Build (engine, tools, app, plugin)
         run: cmake --build build
 
-      - name: Test (engine and app session)
+      - name: Test (engine, app session, plugin)
         run: ctest --test-dir build --output-on-failure
+
+      - name: Check the plugin is a universal binary
+        if: runner.os == 'macOS'
+        run: lipo -info "build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component/Contents/MacOS/Spatial Panner" | grep -q "x86_64 arm64\|arm64 x86_64"
+
+      - name: Validate the Audio Unit (auval)
+        if: runner.os == 'macOS'
+        run: scripts/install_au.sh build
 
       - name: Editor unit tests
         working-directory: ui
@@ -65,6 +73,7 @@ jobs:
         run: |
           ./build/tools/gensignals/sp-gensignals signals --seconds 6
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
+          ./build/tools/render/sp-render scenes/occluder.json -o occluder.wav --duration 4 --steam-threads 2 --bench --normalize
 
       - name: Upload the macOS app
         if: runner.os == 'macOS'
@@ -72,3 +81,10 @@ jobs:
         with:
           name: spatial-panner-macos
           path: build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app
+
+      - name: Upload the Audio Unit
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spatial-panner-au
+          path: build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component

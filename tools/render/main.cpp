@@ -38,7 +38,14 @@ void usage() {
                  "  --float                          write 32-bit float instead of 24-bit PCM\n"
                  "  --normalize                      scale the output so its peak is -1 dBFS\n"
                  "  --bench                          print CPU usage (realtime factor)\n"
-                 "  --no-reflections / --no-reverb   disable room parts\n");
+                 "  --no-reflections / --no-reverb   disable room parts\n"
+                 "  --reflections auto|builtin|steam reflections back-end (default auto: steam for mesh rooms/objects)\n"
+                 "  --steam-rays N / --steam-bounces N   ray tracing effort (default 4096 / enough for the IR, max 96)\n"
+                 "  --steam-block N                  reflection convolution block (default 256; smaller = costlier, less lag)\n"
+                 "  --steam-ir S                     impulse response length (default: from the room)\n"
+                 "  --steam-interval S               seconds between ray-tracing passes (default 0.1)\n"
+                 "  --steam-reverb convolution|hybrid|parametric   tail rendering (default convolution)\n"
+                 "  --steam-threads N                ray tracing threads (default: cores - 1)\n");
 }
 
 std::vector<float> resampleLinear(const std::vector<float>& in, int fromRate, int toRate) {
@@ -63,6 +70,9 @@ int main(int argc, char** argv) {
     int order = 3, rate = 48000, block = 512;
     double duration = 0;
     bool floatOut = false, bench = false, noRefl = false, noReverb = false, normalize = false;
+    std::string reflections = "auto", steamReverb = "convolution";
+    int steamRays = -1, steamBounces = -1, steamThreads = -1, steamBlock = -1;
+    double steamIr = -1, steamInterval = -1;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&](const char* what) -> std::string {
@@ -82,6 +92,14 @@ int main(int argc, char** argv) {
         else if (a == "--bench") bench = true;
         else if (a == "--no-reflections") noRefl = true;
         else if (a == "--no-reverb") noReverb = true;
+        else if (a == "--reflections") reflections = next("--reflections");
+        else if (a == "--steam-rays") steamRays = std::stoi(next("--steam-rays"));
+        else if (a == "--steam-bounces") steamBounces = std::stoi(next("--steam-bounces"));
+        else if (a == "--steam-threads") steamThreads = std::stoi(next("--steam-threads"));
+        else if (a == "--steam-block") steamBlock = std::stoi(next("--steam-block"));
+        else if (a == "--steam-ir") steamIr = std::stod(next("--steam-ir"));
+        else if (a == "--steam-interval") steamInterval = std::stod(next("--steam-interval"));
+        else if (a == "--steam-reverb") steamReverb = next("--steam-reverb");
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else if (!a.empty() && a[0] == '-') { std::fprintf(stderr, "unknown option %s\n", a.c_str()); usage(); return 2; }
         else scenePath = a;
@@ -105,6 +123,21 @@ int main(int argc, char** argv) {
             if (cfg.layout.numChannels() == 0) { std::fprintf(stderr, "unknown layout %s\n", layoutName.c_str()); return 2; }
             if (modeStr == "binaural") cfg.mode = OutputMode::Speakers;
         }
+        if (reflections == "auto") cfg.reflections = ReflectionsBackend::Auto;
+        else if (reflections == "builtin") cfg.reflections = ReflectionsBackend::Builtin;
+        else if (reflections == "steam") cfg.reflections = ReflectionsBackend::SteamAudio;
+        else { std::fprintf(stderr, "unknown reflections back-end %s\n", reflections.c_str()); return 2; }
+        if (steamRays > 0) cfg.steam.rays = steamRays;
+        if (steamBounces > 0) cfg.steam.bounces = steamBounces;
+        if (steamThreads > 0) cfg.steam.threads = steamThreads;
+        if (steamBlock > 0) cfg.steam.frameSize = steamBlock;
+        if (steamIr > 0) cfg.steam.irSeconds = static_cast<float>(steamIr);
+        if (steamInterval > 0) cfg.steam.updateInterval = static_cast<float>(steamInterval);
+        if (steamReverb == "convolution") cfg.steam.reverb = SteamAudioSettings::Reverb::Convolution;
+        else if (steamReverb == "hybrid") cfg.steam.reverb = SteamAudioSettings::Reverb::Hybrid;
+        else if (steamReverb == "parametric") cfg.steam.reverb = SteamAudioSettings::Reverb::Parametric;
+        else { std::fprintf(stderr, "unknown --steam-reverb %s\n", steamReverb.c_str()); return 2; }
+        cfg.steam.asyncSimulation = false;  // offline: simulate in line, every interval
         if (!hrtfPath.empty()) cfg.hrtfPath = hrtfPath;
 #ifdef SP_DEFAULT_HRTF
         else cfg.hrtfPath = SP_DEFAULT_HRTF;
@@ -136,9 +169,15 @@ int main(int argc, char** argv) {
 
         Renderer renderer(scene, cfg, duration);
         const auto st = renderer.stats();
-        std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; %d images/layer, RT60 mid %.2f s, delay line %.0f m\n",
-                     modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.reverbRt60Mid,
-                     st.maxDistance);
+        if (st.backend == ReflectionsBackend::SteamAudio)
+            std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; Steam Audio reflections (%d triangles, IR %.2f s, %d rays x %d bounces every %.0f ms, block %d), delay line %.0f m\n",
+                         modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numTriangles, st.irSeconds,
+                         cfg.steam.rays, st.bounces, cfg.steam.updateInterval * 1000, cfg.steam.frameSize, st.maxDistance);
+        else
+            std::fprintf(stderr, "render: %s, %d outputs, %.1f s at %d Hz; built-in reflections, %d images/layer, RT60 mid %.2f s, delay line %.0f m\n",
+                         modeStr.c_str(), renderer.numOutputs(), duration, rate, st.numImagesPerLayer, st.reverbRt60Mid,
+                         st.maxDistance);
+        if (!st.note.empty()) std::fprintf(stderr, "note: %s\n", st.note.c_str());
 
         const int latency = renderer.latencySamples();
         const size_t totalFrames = static_cast<size_t>(duration * rate);

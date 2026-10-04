@@ -24,9 +24,10 @@ ui/                the editor: TypeScript + Three.js, built into one HTML file
 tools/scene/       sp-scene: path/pose analysis and normalisation for the editor
 tools/render/      sp-render: scene.json + audio -> WAV (binaural, speakers, ambiX)
 tools/gensignals/  sp-gensignals: synthesises the demo sources (no third-party audio)
-scenes/            demo scenes
+scenes/            demo scenes (lshape.obj is a room mesh)
 scripts/           render_demos.sh renders every demo
-cmake/             dependency fetching (SAF, libmysofa, nlohmann/json, dr_libs, Catch2)
+cmake/             dependency fetching (SAF, libmysofa, nlohmann/json, dr_libs, Catch2,
+                   Steam Audio with FlatBuffers and pffft, built from source)
 ```
 
 ## Building
@@ -59,6 +60,14 @@ Apache 2.0) is downloaded at configure time into `build/data/hrtf/`. Pass
 `-DSP_DEFAULT_HRTF=/path/to/other.sofa` to use another SOFA file, or
 `--hrtf` on the renderer.
 
+Steam Audio (ray-traced reflections and occlusion against room meshes and
+objects) is cloned and built from source as a static library on the first
+configure: about 40 MB of download and 3 to 5 minutes of extra build. It
+needs nothing beyond the requirements above. `-DSP_WITH_STEAM_AUDIO=OFF`
+leaves it out; the engine then renders every scene with the built-in
+image-source model and ignores meshes and objects. Nothing has to be bundled
+with the plugin later: the library is linked in.
+
 ## Rendering the demos
 
 ```sh
@@ -74,19 +83,31 @@ scripts/render_demos.sh            # -> renders/*.wav
 | `05_head_turn_binaural.wav` | Standing still: head turns 90 degrees left, 90 right, looks up 45 and down 30. |
 | `06_room_walk_7.1.4.wav` | The room walk rendered for a 7.1.4 speaker layout (12 channels, L R C LFE Lss Rss Lrs Rrs Ltf Rtf Ltr Rtr). |
 | `07_room_walk_ambix_o3.wav` | The room walk as 3rd-order ambiX (16 channels, ACN/SN3D). |
+| `08_lshape_binaural.wav` | Ray traced: a walk round the corner of an L-shaped room loaded from `lshape.obj`. Layers in the other leg are heard through the opening and go indirect as the wall comes between. |
+| `09_occluder_binaural.wav` | Ray traced: a box room with a brick partition, a concrete pillar and a sofa. Layers dull and drop as they pass behind the partition; the room's own reflections are traced against the objects too. |
+| `10_room_walk_traced_binaural.wav` | The room walk of 03 with `--reflections steam`: the same box room, reflections and reverb from the ray tracer instead of the image-source model and FDN. A/B with 03. |
+| `11_occluder_no_objects_binaural.wav` | The occluder scene with `--reflections builtin`: the objects are ignored, so nothing is occluded. A/B with 09. |
 
 Renderer usage:
 
 ```
 sp-render scene.json -o out.wav [--mode binaural|speakers|ambix] [--layout 7.1.4]
           [--hrtf file.sofa] [--order 3] [--duration s] [--normalize] [--bench]
+          [--reflections auto|builtin|steam] [--steam-rays N] [--steam-bounces N]
+          [--steam-interval s] [--steam-block N] [--steam-reverb convolution|hybrid|parametric]
 ```
+
+`--reflections auto` (the default) uses the ray tracer whenever the scene has
+a mesh room or objects, and the image-source model for a plain box or
+outdoors.
 
 ## Scene files
 
 Scenes are JSON (see `scenes/`): layers (audio, position, level, Doppler
-amount, spread, directivity, distance model), a room (box with per-wall
-materials, outdoor with a ground material, or none), the listener (paths made
+amount, spread, directivity, distance model, occlusion radius), a room (box
+with per-wall materials, outdoor with a ground material, a mesh from an OBJ
+file or inline, or none, plus box-shaped objects such as walls, pillars and
+furniture), the listener (paths made
 of line / Bezier / Catmull-Rom / arc segments, a speed curve, head mode: along
 path, look-at, or keyframed yaw/pitch/roll, plus offsets) and the environment
 (temperature, humidity, speed of sound). `docs/engine.md` documents the format.
@@ -95,4 +116,5 @@ path, look-at, or keyframed yaw/pitch/roll, plus offsets) and the environment
 
 Spatial Audio Framework (ISC), libmysofa (BSD-3), nlohmann/json (MIT),
 dr_libs (MIT-0 / public domain), Catch2 (BSL-1.0), SADIE II HRTF data
-(Apache 2.0).
+(Apache 2.0), Steam Audio (Apache 2.0), FlatBuffers (Apache 2.0), pffft
+(BSD-like, FFTPACK licence).

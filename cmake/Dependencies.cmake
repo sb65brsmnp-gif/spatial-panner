@@ -22,6 +22,8 @@ FetchContent_Declare(libmysofa
   GIT_TAG        648eed03472e6720a1ea45d1a1f86c4efb569ff9
   GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(libmysofa)
+# libmysofa ties PIC to BUILD_SHARED_LIBS; the plugin links it into a shared module.
+set_target_properties(mysofa-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # libmysofa's targets do not export their include directories for consumers.
 add_library(sp::mysofa INTERFACE IMPORTED)
 target_link_libraries(sp::mysofa INTERFACE mysofa-static)
