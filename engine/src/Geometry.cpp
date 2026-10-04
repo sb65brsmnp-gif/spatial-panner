@@ -101,9 +101,17 @@ void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::St
     stereo.rotationDeg = radToDeg(std::atan2(-d.z, d.x));
 }
 
+int ambisonicOrder(int channels) {
+    return channels == 4 ? 1 : channels == 9 ? 2 : channels == 16 ? 3 : -1;
+}
+
+Quat ambisonicOrientation(const Layer::Ambisonic& a, float extraYawDeg) {
+    return Quat::fromYawPitchRoll(degToRad(a.yawDeg + extraYawDeg), degToRad(a.pitchDeg), degToRad(a.rollDeg));
+}
+
 int inputChannels(const Scene& scene) {
     int n = 0;
-    for (const auto& l : scene.layers) n += std::max(1, std::min(l.channels, 2));
+    for (const auto& l : scene.layers) n += layerInputs(l);
     return n;
 }
 

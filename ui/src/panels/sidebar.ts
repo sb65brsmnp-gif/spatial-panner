@@ -1,6 +1,7 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
-import { defaultLayer, defaultStereo, isStereo, LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
+import { defaultLayer, defaultStereo, defaultAmbisonic, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
+  LAYOUTS, MATERIALS, WALLS, type HeadMode, type LayerDoc, type SceneDoc } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
 import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
@@ -132,9 +133,13 @@ export class Sidebar {
       add.addEventListener('click', () => this.addAudioFiles());
       const addEmpty = el('button', { class: 'btn' }, 'Add empty layer');
       addEmpty.addEventListener('click', () => this.addLayers([{ path: '', name: '' }]));
-      this.body.append(el('div', { class: 'btn-row' }, add, addEmpty));
+      const addAmbi = el('button', { class: 'btn' }, 'Add Ambisonic from separate files…');
+      addAmbi.title = 'Choose the 4 (or 9, 16) mono files of one Ambisonic recording; they are taken in name order (W X Y Z for FuMa, 0 1 2 3… for ambiX).';
+      addAmbi.addEventListener('click', () => this.addAmbisonicFiles());
+      this.body.append(el('div', { class: 'btn-row' }, add, addEmpty), el('div', { class: 'btn-row' }, addAmbi));
       if (!s.layers.length) {
-        this.body.append(el('p', { class: 'hint' }, 'Add audio files to place them in the scene. Each file becomes a layer you can drag in the 3D view.'));
+        this.body.append(el('p', { class: 'hint' }, 'Add audio files to place them in the scene. Each file becomes a layer you can drag in the 3D view. '
+          + 'A 4-, 9- or 16-channel file is an Ambisonic recording: it becomes a sphere you can walk into.'));
         return;
       }
     }
@@ -183,21 +188,31 @@ export class Sidebar {
       for (const f of files) this.store.audioInfo.set(f.path, f);
       u((x) => {
         x.audio = files[0].path;
+        delete x.audio_files;
         if (!x.name) x.name = files[0].name;
-        // A stereo file plays as a pair, a mono file as one source.
-        x.channels = Math.min(2, Math.max(1, files[0].channels || 1));
-        if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
+        // A stereo file plays as a pair, a mono file as one source, a
+        // 4 / 9 / 16-channel file as an Ambisonic sphere.
+        x.channels = channelsForFile(files[0].channels || 1);
+        Object.assign(x, layerExtras(x.channels, x));
       });
     });
-    const info = this.store.audioInfo.get(l.audio);
-    const audioDesc = l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${info.channels === 1 ? 'mono' : info.channels === 2 ? 'stereo' : `${info.channels} ch`}` : ''}` : 'none';
+    const files = l.audio_files ?? [];
+    const info = files.length ? this.store.audioInfo.get(files[0]) : this.store.audioInfo.get(l.audio);
+    const chDesc = (n: number) => n === 1 ? 'mono' : n === 2 ? 'stereo' : AMBISONIC_CHANNELS.includes(n) ? `${n} ch, Ambisonic order ${ambisonicOrder(n)}` : `${n} ch`;
+    const audioDesc = files.length ? `${files.length} files: ${files[0].split(/[\\/]/).pop()} …${info && !info.error ? ` · ${fmtTime(info.duration, false)}` : ''}`
+      : l.audio ? `${l.audio.split(/[\\/]/).pop()}${info && !info.error ? ` · ${fmtTime(info.duration, false)} · ${chDesc(info.channels)}` : ''}` : 'none';
     const stereo = isStereo(l);
+    const ambi = isAmbisonic(l);
     const st = l.stereo ?? defaultStereo();
-    // How the file's channels are played: a left/right pair or summed to one source.
-    const playAs = select(['2', '1'], stereo ? '2' : '1', (v) => u((x) => {
-      x.channels = v === '2' ? 2 : 1;
-      if (x.channels === 2 && !x.stereo) x.stereo = defaultStereo();
-    }), { '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' });
+    const am = l.ambisonic ?? defaultAmbisonic();
+    // How the file's channels are played: an Ambisonic sphere (when the file
+    // has a full order's channels), a left/right pair, or summed to one source.
+    const fileCh = info && !info.error ? info.channels : 0;
+    const playOptions = [...(AMBISONIC_CHANNELS.includes(fileCh) ? [String(fileCh)] : []), ...(fileCh >= 2 ? ['2'] : []), '1'];
+    const playAs = select(playOptions, String(l.channels ?? 1), (v) => u((x) => {
+      x.channels = parseInt(v, 10);
+      Object.assign(x, layerExtras(x.channels, x));
+    }), { [String(fileCh)]: `Ambisonic sphere (order ${ambisonicOrder(fileCh)})`, '2': 'stereo pair (left and right)', '1': 'mono (channels summed)' });
     const facing = Math.round(Math.atan2(-l.directivity_forward[0], -l.directivity_forward[2]) * 180 / Math.PI);
     const remove = el('button', { class: 'btn danger' }, 'Remove layer');
     remove.addEventListener('click', () => { this.store.select({ kind: 'layer', index: i }); this.tools.deleteSelection(); });
@@ -217,20 +232,39 @@ export class Sidebar {
       }), labels);
       nameIn.disabled = bound;
       if (bound) nameIn.title = 'Follows the track name in Logic';
+      // An Ambisonic recording of a higher order than the track carries
+      // (Logic has no 9- or 16-channel track) plays from a file instead.
+      const fromFile = ambi && !!l.audio;
+      const pick = el('button', { class: 'btn small' }, l.audio ? 'Replace…' : 'Choose…');
+      pick.addEventListener('click', async () => {
+        const f = await this.backend.chooseFile('Choose an Ambisonic recording (4, 9 or 16 channels, ambiX or FuMa)', '*.wav;*.aif;*.aiff;*.flac;*.caf');
+        if (!f) return;
+        const [fi] = await this.backend.audioInfo([f.path]);
+        if (fi) this.store.audioInfo.set(fi.path, fi);
+        if (!fi || fi.error) { this.flash(`${f.name}: ${fi?.error ?? 'cannot read'}`, 'error'); return; }
+        if (!AMBISONIC_CHANNELS.includes(fi.channels)) { this.flash(`${f.name} has ${fi.channels} channels; an Ambisonic recording has 4, 9 or 16.`, 'error'); return; }
+        u((x) => { x.audio = fi.path; x.channels = fi.channels; Object.assign(x, layerExtras(fi.channels, x)); });
+      });
+      const clearFile = el('button', { class: 'btn small' }, 'Clear');
+      clearFile.addEventListener('click', () => u((x) => { x.audio = ''; }));
       this.body.append(section('Layer',
         row('Track', track),
         row('Name', nameIn),
-        row('Track is', el('span', { class: 'muted' }, stereo ? 'stereo: the layer is a left/right pair' : 'mono: the layer is one source')),
-        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Track is', el('span', { class: 'muted' }, fromFile ? `playing a ${l.channels}-channel recording from the file below (its own audio is not used)`
+          : ambi ? `${l.channels} channels: the layer is an Ambisonic sphere (order ${ambisonicOrder(l.channels ?? 4)})`
+          : stereo ? 'stereo: the layer is a left/right pair' : 'mono: the layer is one source')),
+        row('Recording', el('span', { class: 'file', title: l.audio }, l.audio ? audioDesc : 'none (the track plays this layer)'), pick, l.audio ? clearFile : ''),
+        el('p', { class: 'muted' }, 'A first-order recording plays from a quad track in Logic. For second or third order (9 or 16 channels), choose the file here: this track then plays it in sync with the song.'),
+        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         el('p', { class: 'muted' }, 'The track\'s Level and Position offset parameters adjust this live and can be automated in Logic.'),
       ));
     } else {
       this.body.append(section('Layer',
         row('Name', nameIn),
-        row('Audio', el('span', { class: 'file', title: l.audio }, audioDesc), replace),
-        info && !info.error && info.channels >= 2 ? row('Play as', playAs) : '',
-        row(stereo ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
+        row('Audio', el('span', { class: 'file', title: files.length ? files.join('\n') : l.audio }, audioDesc), replace),
+        playOptions.length > 1 && !files.length ? row('Play as', playAs) : '',
+        row(stereo || ambi ? 'Centre' : 'Position', vec3Inputs(l.position, (v) => u((x) => { x.position = v; }))),
         row('Level', numberInput(l.level_db, (v) => u((x) => { x.level_db = v; }), { step: 0.5, width: 64 }), 'dB'),
         row('Starts at', numberInput(l.start_time, (v) => u((x) => { x.start_time = Math.max(0, v); }), { step: 0.1, width: 64 }), 's',
           checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop')),
@@ -246,6 +280,33 @@ export class Sidebar {
         row('Mono', checkbox(st.mono, (v) => us((x) => { x.mono = v; }), 'sum left and right at the centre')),
         this.plugin ? el('p', { class: 'muted' }, 'The track\'s Stereo Width, Stereo Rotation and Mono parameters adjust this live and can be automated in Logic.') : '',
       ));
+    }
+    if (ambi) {
+      const ua = (fn: (a: typeof am) => void, key?: string) => u((x) => { x.ambisonic = x.ambisonic ?? defaultAmbisonic(); fn(x.ambisonic); }, key);
+      const order = ambisonicOrder(l.channels ?? 4);
+      this.body.append(section('Ambisonic sphere',
+        el('p', { class: 'muted' }, 'The recording plays as a sphere: its sounds sit on the surface, so walking inside brings the near side closer and the far side further off. '
+          + 'At the centre it is the recording as it was. Drag the ball to move the sphere and the small cube on its surface to resize it; the arrow is the recording\'s front.'),
+        files.length ? el('p', { class: 'muted' }, `Channels from ${files.length} files, in name order: ${files.map((f) => f.split(/[\\/]/).pop()).join(', ')}.`) : '',
+        row('Format', select(order === 1 ? ['ambix', 'fuma'] : ['ambix'], am.format, (v) => ua((a) => { a.format = v as typeof a.format; }),
+          { ambix: 'ambiX (ACN / SN3D)', fuma: 'FuMa (W X Y Z)' })),
+        row('Radius', slider(am.radius, 0.5, 30, 0.1, (v) => ua((a) => { a.radius = v; }, 'amradius'), (v) => `${v.toFixed(1)} m`, () => this.store.endGesture())),
+        row('Yaw', slider(am.yaw, -180, 180, 1, (v) => ua((a) => { a.yaw = v; }, 'amyaw'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Pitch', slider(am.pitch, -90, 90, 1, (v) => ua((a) => { a.pitch = v; }, 'ampitch'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Roll', slider(am.roll, -180, 180, 1, (v) => ua((a) => { a.roll = v; }, 'amroll'), (v) => `${v.toFixed(0)}°`, () => this.store.endGesture())),
+        row('Room', checkbox(am.room_send, (v) => ua((a) => { a.room_send = v; }), 'send the recording to the room\'s reverb (it carries its own room already)')),
+        this.plugin ? el('p', { class: 'muted' }, 'The track\'s Sphere Radius and Sphere Rotation parameters adjust this live and can be automated in Logic.') : '',
+      ));
+      this.body.append(section('Sound source',
+        row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
+        el('p', { class: 'muted' }, 'Outside the sphere the recording falls off with distance like a source; spread and directivity do not apply.'),
+      ));
+      this.body.append(section('Distance',
+        row('Closest', numberInput(l.min_distance, (v) => u((x) => { x.min_distance = Math.max(0.01, v); }), { step: 0.05, width: 64 }), 'm'),
+        row('Rolloff', numberInput(l.rolloff, (v) => u((x) => { x.rolloff = Math.max(0, v); }), { step: 0.1, width: 64 }), '(1 = −6 dB per doubling)'),
+        row('Room send', numberInput(l.reverb_send_db, (v) => u((x) => { x.reverb_send_db = v; }), { step: 0.5, width: 64 }), 'dB'),
+      ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
+      return;
     }
     this.body.append(section('Sound source',
       row('Doppler', slider(l.doppler * 100, 0, 100, 1, (v) => u((x) => { x.doppler = v / 100; }, 'doppler'), (v) => `${v.toFixed(0)} %`, () => this.store.endGesture())),
@@ -273,9 +334,31 @@ export class Sidebar {
     this.addLayers(files);
   }
 
+  // One Ambisonic layer from separate mono files (one per channel), taken in
+  // name order: W X Y Z sorts right for FuMa, 0 1 2 3 … for ambiX.
+  async addAmbisonicFiles(): Promise<void> {
+    const files = await this.backend.chooseAudioFiles('Choose the mono files of one Ambisonic recording (4, 9 or 16)');
+    if (!files.length) return;
+    for (const f of files) this.store.audioInfo.set(f.path, f);
+    if (!AMBISONIC_CHANNELS.includes(files.length)) {
+      this.flash(`An Ambisonic recording has 4, 9 or 16 channels; ${files.length} file${files.length === 1 ? ' was' : 's were'} chosen.`, 'error');
+      return;
+    }
+    const bad = files.find((f) => f.error || f.channels !== 1);
+    if (bad) {
+      this.flash(bad.error ? `${bad.name}: ${bad.error}` : `${bad.name} has ${bad.channels} channels; each file must be mono.`, 'error');
+      return;
+    }
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    let name = sorted[0].name;
+    for (const f of sorted) { let k = 0; while (k < name.length && k < f.name.length && name[k] === f.name[k]) k++; name = name.slice(0, k); }
+    name = name.replace(/[\s_\-.]+$/, '') || sorted[0].name;
+    this.addLayers([{ path: '', name, channels: files.length, files: sorted.map((f) => f.path) }]);
+  }
+
   // New layers go on a ring around the listener's start, facing it. Stereo
-  // files become left/right pairs.
-  private addLayers(files: { path: string; name: string; channels?: number }[]): void {
+  // files become left/right pairs; 4 / 9 / 16-channel files Ambisonic spheres.
+  private addLayers(files: { path: string; name: string; channels?: number; files?: string[] }[]): void {
     const L = this.store.scene.listener;
     const first = L.paths[L.active_path]?.segments[0]?.points[0] ?? L.static_position;
     this.upd((s) => {
@@ -286,9 +369,9 @@ export class Sidebar {
         const r = 3 + 0.4 * Math.floor(i / 6);
         const pos: [number, number, number] = [
           Math.round((first[0] - r * Math.sin(a)) * 100) / 100, 1.6, Math.round((first[2] - r * Math.cos(a)) * 100) / 100];
-        const channels = Math.min(2, Math.max(1, f.channels || 1));
+        const channels = channelsForFile(f.channels || 1);
         s.layers.push(defaultLayer(i, { name: f.name || `Layer ${i + 1}`, audio: f.path, position: pos, channels,
-          ...(channels === 2 ? { stereo: defaultStereo() } : {}) }));
+          ...(f.files ? { audio_files: f.files } : {}), ...layerExtras(channels) }));
       });
     });
     this.store.select({ kind: 'layer', index: this.store.scene.layers.length - 1 });

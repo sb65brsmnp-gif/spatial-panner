@@ -27,6 +27,14 @@ layer audio ─► delay line (one write, many fractional reads)
                                         ▸ mono: 8 decorrelated plane waves; stereo: head-left and
                                           head-right; 4-ch ambiX: world-fixed first order
 
+   An Ambisonic layer (channels 4 / 9 / 16, "Ambisonic layers" below) instead goes:
+     recording (ambiX or FuMa) ─► one delay line per channel (distance from the sphere, Doppler)
+                                  ▸ air absorption beyond the sphere ▸ sound-field matrix
+                                  (rotation into the head frame + walking inside/outside the
+                                  sphere, 16 x N, re-derived every HRTF update and crossfaded)
+                                  ▸ the 3rd-order Ambisonics bus (binaural: MagLS; speakers: AllRAD;
+                                  ambiX: straight out) ▸ optional W send to the late reverb
+
    or, with the ray-traced back-end (mesh rooms, objects, or --reflections steam):
                  ├─ direct path: as above, plus Steam Audio occlusion / transmission
                  │               (volumetric, per layer radius, 3-band) before the HRTF / VBAP / SH
@@ -213,11 +221,13 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
 
 * Inputs are one mono buffer per layer channel, layer by layer: layer i takes
   `inputs[inputIndex(i)]` and, for a stereo layer, the next one (left, then
-  right); `numInputs()` = `inputChannels(scene)`. A stereo layer is two
-  voices (two delay lines, two image sets, two HRTF pairs), so it costs twice
-  a mono layer. `LayerControls::stereoWidthScale`, `stereoRotationOffsetDeg`
-  and `mono` are the automatable stereo controls; the ends glide to their new
-  places like a moved layer does.
+  right); an Ambisonic layer takes `layerInputs(l)` = 4, 9 or 16 buffers in
+  the file's channel order; `numInputs()` = `inputChannels(scene)`. A stereo
+  layer is two voices (two delay lines, two image sets, two HRTF pairs), so
+  it costs twice a mono layer. `LayerControls::stereoWidthScale`,
+  `stereoRotationOffsetDeg` and `mono` are the automatable stereo controls,
+  `ambisonicRadiusScale` and `ambisonicYawOffsetDeg` the Ambisonic ones; the
+  ends and the sphere glide to their new places like a moved layer does.
 * Any `numFrames` is accepted; output lags by `latencySamples()` (= the
   sub-block, 32 samples). Report that to the host. Traced reflections lag a
   further `stats().reflectionLatency` samples behind the direct sound; that
@@ -228,6 +238,46 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
 * `reset()` clears tails for transport jumps.
 * The engine renders "whatever audio you hand it now"; file playback, layer
   start times and looping are the caller's job (see `tools/render/main.cpp`).
+
+## Ambisonic layers
+
+A layer with 4, 9 or 16 channels is an Ambisonic recording (first, second or
+third order) rather than a point source. `ambisonic.format` says how the
+channels are laid out: `ambix` (ACN order, SN3D weights, any order) or
+`fuma` (W X Y Z in that order, W at −3 dB; first order only). Separate mono
+files, one per channel, are the caller's job to line up (`audio_files` in
+the JSON lists them in channel order; the render tool and the app read it).
+
+A recording holds the field at one point, so the engine makes a model of
+where its sounds were: a **sphere** of `ambisonic.radius` metres around the
+layer's position, with every recorded direction a source on its surface. For
+the listener at the centre the output is the recording turned into the head
+frame (plus the recording's own yaw / pitch / roll), decoded like the rest
+of the Ambisonics bus. Away from the centre each surface source is heard
+from where it now is: nearer sources get louder and wider, farther ones
+quieter and narrower, following the layer's rolloff (`(radius / r) ^
+rolloff`, clamped by `min_distance`). Outside the sphere everything
+converges on the sphere's direction and falls off with distance, the delay
+line adds the way from the sphere (Doppler on the way in and out), and air
+absorption applies to the distance beyond the surface. The transform is one
+`numOut x numIn` matrix (`engine/src/dsp/SoundField.{h,cpp}`): the integral
+over a 240-point spherical t-design of `y_out(direction seen) * gain *
+y_in(direction recorded)^T`, which at the centre equals SAF's SH rotation
+matrix (tested) and elsewhere is the sources-on-a-sphere warp in the
+spherical-harmonic domain. It is re-derived at the HRTF update rate (every
+4 sub-blocks) when the pose, radius or orientation changed, in about 25 µs
+for third order, and crossfaded over the sub-block.
+
+The output order is always the bus's third order, so a first-order
+recording gains sharpness as the listener approaches its sounds (the warp
+puts energy into the higher orders). A first-order recording still cannot
+separate two sounds that were close together: they move as one. Room
+reflections and the ray tracer do not see an Ambisonic layer; the recording
+carries its own room, and `ambisonic.room_send` adds its W to the late
+reverb for scenes where that is wanted. CPU: one first-order layer costs
+3.6 % of a core binaural (1.0 % to ambiX output), mostly the HRTF
+convolution of the bus it shares with the reflections; a third-order one
+about a third more for its 16 delay lines.
 
 ## For the standalone app and the plugin
 
@@ -269,7 +319,13 @@ r.process(inputs /* one mono float* per layer */, outputs /* numOutputs() channe
     // by "rotation" (positive turns the right end towards -Z) and tilted by
     // "elevation" (positive raises the right end). "mono" sums both channels
     // at half level and plays them from the centre. Default: 1 channel.
-    "channels": 2, "stereo": {"width": 2.0, "rotation": 0, "elevation": 0, "mono": false}
+    "channels": 2, "stereo": {"width": 2.0, "rotation": 0, "elevation": 0, "mono": false},
+    // Ambisonic layers (channels 4, 9 or 16: first to third order; see "Ambisonic layers"):
+    // the recording as a sphere of "radius" metres around "position", turned by yaw / pitch /
+    // roll (degrees, head convention). "format" ambix (ACN/SN3D) or fuma (W X Y Z, first order).
+    // "audio_files" lists one mono file per channel instead of "audio".
+    "channels": 4, "ambisonic": {"format": "ambix", "radius": 3.0, "yaw": 0, "pitch": 0, "roll": 0, "room_send": false},
+    "audio_files": ["w.wav", "y.wav", "z.wav", "x.wav"]
   }],
   "room": {
     "type": "box" | "outdoor" | "mesh" | "none", "size": [w, h, d], "origin": [x, y, z],
@@ -343,6 +399,7 @@ under 50 % of one core.
 | 64 layers, box room, 2nd-order images (24 per layer) | 290 % |
 | Demo room walk, 5 layers, 2nd order | 27 % (26 % with the old 16-line FDN) |
 | Built-in late reverb alone (32-line FDN) | 1.9 % (16-line: 0.6 %) |
+| One first-order Ambisonic layer, no room, binaural / ambiX out | 3.6 % / 1.0 % |
 | Impulse-response reverb, 3 s stereo IR, 256-sample block | 2.7 % (4-ch ambiX 5.8 %; 0.05 % when silent) |
 | Demo room walk with the 2.5 s stereo test IR | 31 % |
 | Ray traced, per layer: reflection convolution, 0.8 s IR, 256-sample block | 6 % (4 % at 1024) |

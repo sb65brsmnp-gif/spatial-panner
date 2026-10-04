@@ -76,6 +76,7 @@ jobs:
         run: |
           ./build/tools/render/sp-render scenes/room_walk.json -o room_walk.wav --duration 4 --bench --normalize
           ./build/tools/render/sp-render scenes/occluder.json -o occluder.wav --duration 4 --steam-threads 2 --bench --normalize
+          ./build/tools/render/sp-render scenes/ambisonic_walk.json -o ambisonic_walk.wav --duration 4 --bench --normalize
 
       - name: Package the macOS app with the demo scenes
         if: runner.os == 'macOS'

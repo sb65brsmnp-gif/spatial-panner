@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
-import { stereoEnds, stereoFromEnds, defaultStereo, isStereo } from '../model/scene';
+import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint } from '../model/scene';
 import {
   appendSegments, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
   round3, samplePath, snap, spiral, getPoint, dist, type PointRef,
@@ -34,9 +34,10 @@ interface PenAnchor { p: V3; hin: V3; hout: V3 }
 
 type Drag =
   // `end`: which part of the layer is held: the centre (a mono layer's ball,
-  // or a stereo layer's bar) or the left/right end of a stereo pair. `mirror`
-  // (Alt held) keeps the centre fixed and moves the other end the opposite way.
-  | { kind: 'layer'; index: number; end: 'centre' | 'L' | 'R'; mirror: boolean; plane: THREE.Plane; offset: THREE.Vector3 }
+  // or a stereo layer's bar), the left/right end of a stereo pair, or the
+  // handle on an Ambisonic sphere's surface (sets its radius). `mirror` (Alt
+  // held) keeps the centre fixed and moves the other end the opposite way.
+  | { kind: 'layer'; index: number; end: 'centre' | 'L' | 'R' | 'radius'; mirror: boolean; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'point'; path: number; ref: PointRef; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
@@ -157,10 +158,10 @@ export class Interaction {
     if (hits.length) {
       const index = hits[0].object.userData.index as number;
       const l = this.store.scene.layers[index];
-      let end = (hits[0].object.userData.end as 'centre' | 'L' | 'R' | undefined) ?? 'centre';
-      if (!isStereo(l) || l.stereo?.mono) end = 'centre';
+      let end = (hits[0].object.userData.end as 'centre' | 'L' | 'R' | 'radius' | undefined) ?? 'centre';
+      if (end === 'radius' ? !isAmbisonic(l) : !isStereo(l) || l.stereo?.mono) end = 'centre';
       const [left, right] = stereoEnds(l);
-      const pos = new THREE.Vector3(...(end === 'L' ? left : end === 'R' ? right : l.position));
+      const pos = new THREE.Vector3(...(end === 'L' ? left : end === 'R' ? right : end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : l.position));
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
       this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit) };
@@ -223,6 +224,13 @@ export class Interaction {
           const l = s.layers[d.index];
           if (d.end === 'centre') {
             l.position = this.keepAxes(l.position, p, d.plane);
+            return;
+          }
+          if (d.end === 'radius') {
+            // The handle's distance from the centre is the sphere's radius.
+            const c = l.position;
+            const r = Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]);
+            l.ambisonic = { ...(l.ambisonic ?? defaultAmbisonic()), radius: Math.max(0.25, Math.round(r * 20) / 20) };
             return;
           }
           // Moving one end of a stereo pair: the other end stays (or mirrors

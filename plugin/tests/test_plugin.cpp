@@ -8,6 +8,7 @@
 #include <juce_events/juce_events.h>
 
 #include <cmath>
+#include <functional>
 #include <random>
 
 #include "PluginProcessor.h"
@@ -626,3 +627,138 @@ int main(int argc, char* argv[]) {
     return Catch::Session().run(argc, argv);
 }
 
+
+// Helpers for the Ambisonic tests: a first-order ambiX plane wave from the
+// recording's left (W and Y carry the signal, in phase), and left/right ear
+// energies from a layer instance over `total` frames.
+namespace {
+
+std::pair<double, double> earEnergies(SpatialPannerProcessor& layer, PlayHead& ph, int inCh, int total,
+                                      const std::function<void(juce::AudioBuffer<float>&, int)>& fill) {
+    juce::AudioBuffer<float> buf(std::max(2, inCh), kBlock);
+    juce::MidiBuffer midi;
+    double l = 0, r = 0;
+    for (int pos = 0; pos < total; pos += kBlock) {
+        ph.pos = pos;
+        buf.clear();
+        fill(buf, pos);
+        layer.processBlock(buf, midi);
+        if (pos < static_cast<int>(kRate) / 2) continue;
+        for (int k = 0; k < kBlock; ++k) { l += std::pow(buf.getSample(0, k), 2); r += std::pow(buf.getSample(1, k), 2); }
+    }
+    return {l, r};
+}
+
+}  // namespace
+
+TEST_CASE("A quad track is a first-order Ambisonic sphere: the field turns with the Sphere Rotation parameter") {
+    FreshSession fs;
+    PlayHead ph;
+    auto scene = makeInstance(ph);
+    scene->setRole(SpatialPannerProcessor::Role::Scene, false);
+    auto layer = makeInstance(ph, juce::AudioChannelSet::stereo(), juce::AudioChannelSet::quadraphonic());
+    layer->setRole(SpatialPannerProcessor::Role::Layer);
+    std::vector<SpatialPannerProcessor*> all{scene.get(), layer.get()};
+    tickAll(all, 3);
+    pump(50);
+    tickAll(all, 2);
+
+    // The track's four channels reach the scene document as an Ambisonic layer with its sphere.
+    json d = scene->sceneDoc();
+    REQUIRE(d["layers"].size() == 1);
+    CHECK(d["layers"][0].value("channels", 1) == 4);
+    REQUIRE(d["layers"][0].contains("ambisonic"));
+    CHECK(d["layers"][0]["ambisonic"].value("radius", 0.0) == 3.0);
+    d["room"]["type"] = "none";
+    d["listener"]["paths"] = json::array();
+    d["listener"]["static_position"] = {0, 1.6, 0};
+    d["layers"][0]["position"] = {0, 1.6, 0};   // the listener sits at the sphere's centre
+    std::string error;
+    REQUIRE(scene->setSceneDoc(d, error));
+    tickAll(all, 2);
+    waitEngines(all);
+
+    // A sound on the recording's left (ambiX: W and Y = ACN 1 in phase).
+    const int total = static_cast<int>(kRate) * 2;
+    const auto in = noise(1, total);
+    const auto fill = [&](juce::AudioBuffer<float>& buf, int pos) {
+        buf.copyFrom(0, 0, in[0].data() + pos, kBlock);
+        buf.copyFrom(1, 0, in[0].data() + pos, kBlock);
+    };
+    auto* rot = layer->parametersForTesting().getParameter("amrot");
+    REQUIRE(rot != nullptr);
+    const auto left = earEnergies(*layer, ph, 4, total, fill);
+    REQUIRE(left.first > 1e-6);
+    CHECK(10 * std::log10(left.first / left.second) > 6);
+    // Turning the sphere half way round brings it to the right ear.
+    rot->setValueNotifyingHost(rot->convertTo0to1(180.0f));
+    const auto turned = earEnergies(*layer, ph, 4, total, fill);
+    CHECK(10 * std::log10(turned.second / turned.first) > 6);
+}
+
+TEST_CASE("A higher-order recording plays from its file on any track, at the host's position") {
+    FreshSession fs;
+    PlayHead ph;
+    // A 9-channel ambiX file: noise from the recording's left on W and Y (ACN 1), 1.5 s long.
+    juce::TemporaryFile tmp(".wav");
+    const int frames = static_cast<int>(kRate * 1.5);
+    {
+        const auto n = noise(1, frames, 3);
+        juce::AudioBuffer<float> buf(9, frames);
+        buf.clear();
+        buf.copyFrom(0, 0, n[0].data(), frames);
+        buf.copyFrom(1, 0, n[0].data(), frames);
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(tmp.getFile());
+        auto w = wav.createWriterFor(os, juce::AudioFormatWriterOptions{}.withSampleRate(kRate).withNumChannels(9).withBitsPerSample(24));
+        REQUIRE(w != nullptr);
+        REQUIRE(w->writeFromAudioSampleBuffer(buf, 0, frames));
+    }
+    auto scene = makeInstance(ph);
+    scene->setRole(SpatialPannerProcessor::Role::Scene, false);
+    auto layer = makeInstance(ph);   // a mono track: its own audio is not used
+    layer->setRole(SpatialPannerProcessor::Role::Layer);
+    std::vector<SpatialPannerProcessor*> all{scene.get(), layer.get()};
+    tickAll(all, 3);
+    pump(50);
+    tickAll(all, 2);
+    json d = scene->sceneDoc();
+    REQUIRE(d["layers"].size() == 1);
+    d["room"]["type"] = "none";
+    d["listener"]["paths"] = json::array();
+    d["listener"]["static_position"] = {0, 1.6, 0};
+    d["layers"][0]["position"] = {0, 1.6, 0};
+    d["layers"][0]["channels"] = 9;
+    d["layers"][0]["audio"] = tmp.getFile().getFullPathName().toStdString();
+    d["layers"][0]["loop"] = false;
+    std::string error;
+    REQUIRE(scene->setSceneDoc(d, error));
+    tickAll(all, 2);
+    waitEngines(all);
+    // The track's channel count no longer overrides the file-fed layer.
+    CHECK(scene->sceneDoc()["layers"][0].value("channels", 1) == 9);
+    // Wait for the file to decode.
+    for (int i = 0; i < 200 && layer->fileForTesting().loading(); ++i) pump(50);
+    REQUIRE_FALSE(layer->fileForTesting().loading());
+    CHECK(layer->fileForTesting().error().isEmpty());
+
+    // Silence on the track, the recording from the file: heard on the left
+    // while the file lasts, then nothing (the file does not loop).
+    const int total = static_cast<int>(kRate) * 3;
+    juce::AudioBuffer<float> buf(2, kBlock);
+    juce::MidiBuffer midi;
+    double l = 0, r = 0, late = 0;
+    for (int pos = 0; pos < total; pos += kBlock) {
+        ph.pos = pos;
+        buf.clear();
+        layer->processBlock(buf, midi);
+        for (int k = 0; k < kBlock; ++k) {
+            const double a = std::pow(buf.getSample(0, k), 2), b = std::pow(buf.getSample(1, k), 2);
+            if (pos + k < static_cast<int>(kRate) / 2) continue;
+            if (pos + k < frames) { l += a; r += b; } else if (pos + k > frames + static_cast<int>(kRate) / 2) late += a + b;
+        }
+    }
+    REQUIRE(l > 1e-6);
+    CHECK(10 * std::log10(l / r) > 6);
+    CHECK(late < 1e-6 * l);
+}

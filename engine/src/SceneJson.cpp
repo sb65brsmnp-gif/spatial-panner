@@ -202,6 +202,13 @@ json layerToJson(const Layer& l) {
     if (l.channels == 2)
         j["stereo"] = json{{"width", l.stereo.width}, {"rotation", l.stereo.rotationDeg},
                            {"elevation", l.stereo.elevationDeg}, {"mono", l.stereo.mono}};
+    if (isAmbisonic(l)) {
+        const auto& a = l.ambisonic;
+        j["ambisonic"] = json{{"format", a.format == Layer::Ambisonic::Format::FuMa ? "fuma" : "ambix"},
+                              {"radius", a.radius}, {"yaw", a.yawDeg}, {"pitch", a.pitchDeg}, {"roll", a.rollDeg},
+                              {"room_send", a.roomSend}};
+    }
+    if (!l.audioFiles.empty()) j["audio_files"] = l.audioFiles;
     return j;
 }
 
@@ -226,7 +233,8 @@ Layer layerFromJson(const json& j) {
     l.startTime = j.value("start_time", l.startTime);
     l.loop = j.value("loop", l.loop);
     l.channels = j.value("channels", l.channels);
-    if (l.channels != 1 && l.channels != 2) throw std::runtime_error("layer \"" + l.name + "\": channels must be 1 or 2");
+    if (l.channels != 1 && l.channels != 2 && !isAmbisonic(l))
+        throw std::runtime_error("layer \"" + l.name + "\": channels must be 1, 2, or 4, 9 or 16 (Ambisonic)");
     if (j.contains("stereo") && j["stereo"].is_object()) {
         const json& st = j["stereo"];
         l.stereo.width = st.value("width", l.stereo.width);
@@ -234,6 +242,24 @@ Layer layerFromJson(const json& j) {
         l.stereo.elevationDeg = st.value("elevation", l.stereo.elevationDeg);
         l.stereo.mono = st.value("mono", l.stereo.mono);
     }
+    if (j.contains("ambisonic") && j["ambisonic"].is_object()) {
+        const json& a = j["ambisonic"];
+        auto& A = l.ambisonic;
+        const std::string fmt = a.value("format", "ambix");
+        if (fmt == "ambix") A.format = Layer::Ambisonic::Format::AmbiX;
+        else if (fmt == "fuma") A.format = Layer::Ambisonic::Format::FuMa;
+        else throw std::runtime_error("layer \"" + l.name + "\": ambisonic.format must be \"ambix\" or \"fuma\"");
+        A.radius = a.value("radius", A.radius);
+        A.yawDeg = a.value("yaw", A.yawDeg);
+        A.pitchDeg = a.value("pitch", A.pitchDeg);
+        A.rollDeg = a.value("roll", A.rollDeg);
+        A.roomSend = a.value("room_send", A.roomSend);
+        if (A.radius <= 0) throw std::runtime_error("layer \"" + l.name + "\": ambisonic.radius must be positive");
+        if (A.format == Layer::Ambisonic::Format::FuMa && l.channels != 4)
+            throw std::runtime_error("layer \"" + l.name + "\": FuMa is first order only (4 channels)");
+    }
+    if (j.contains("audio_files") && j["audio_files"].is_array())
+        for (const auto& f : j["audio_files"]) l.audioFiles.push_back(f.get<std::string>());
     return l;
 }
 

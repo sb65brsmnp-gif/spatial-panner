@@ -137,6 +137,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpatialPannerProcessor::crea
     layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"strot", 1}, "Layer Stereo Rotation",
                                                           NormalisableRange<float>(-180.0f, 180.0f, 0.1f), 0.0f, deg));
     layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"mono", 1}, "Layer Mono", false));
+    // Ambisonic layers (a quad track, or a recording played from a file): the
+    // sphere's radius as a factor of the scene's and a turn added to its yaw.
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"amradius", 1}, "Layer Sphere Radius",
+                                                          NormalisableRange<float>(10.0f, 400.0f, 0.1f), 100.0f,
+                                                          AudioParameterFloatAttributes().withLabel("%")));
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"amrot", 1}, "Layer Sphere Rotation",
+                                                          NormalisableRange<float>(-180.0f, 180.0f, 0.1f), 0.0f, deg));
     const char* axes[] = {"x", "y", "z"};
     for (const char* a : axes)
         layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{std::string("off") + a, 1},
@@ -170,6 +177,8 @@ SpatialPannerProcessor::SpatialPannerProcessor()
     pWidth_ = params_.getRawParameterValue("width");
     pStereoWidth_ = params_.getRawParameterValue("stwidth");
     pStereoRotation_ = params_.getRawParameterValue("strot");
+    pSphereRadius_ = params_.getRawParameterValue("amradius");
+    pSphereRotation_ = params_.getRawParameterValue("amrot");
     pMono_ = params_.getRawParameterValue("mono");
     pX_ = params_.getRawParameterValue("offx");
     pY_ = params_.getRawParameterValue("offy");
@@ -191,7 +200,12 @@ SpatialPannerProcessor::~SpatialPannerProcessor() {
 bool SpatialPannerProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
     const auto in = layouts.getMainInputChannelSet();
     const auto out = layouts.getMainOutputChannelSet();
-    if (in != juce::AudioChannelSet::mono() && in != juce::AudioChannelSet::stereo()) return false;
+    // Mono and stereo tracks, a quad track (a first-order Ambisonic recording
+    // as Logic carries it) and Ambisonic buses in hosts that have them.
+    const int order = in.getAmbisonicOrder();
+    if (in != juce::AudioChannelSet::mono() && in != juce::AudioChannelSet::stereo() && in != juce::AudioChannelSet::quadraphonic() &&
+        (order < 1 || order > 3))
+        return false;
     for (const auto& s : outputSets())
         if (out == s) return true;
     return false;
@@ -214,7 +228,7 @@ void SpatialPannerProcessor::setNonRealtime(bool nonRealtime) noexcept {
 EngineConfig SpatialPannerProcessor::engineConfig() const {
     EngineConfig c;
     c.sampleRate = sampleRate_;
-    c.maxBlock = std::max(64, static_cast<int>(mono_.size()));
+    c.maxBlock = std::max(64, in_.empty() ? 64 : static_cast<int>(in_[0].size()));
     const auto out = getBus(false, 0) ? getBus(false, 0)->getCurrentLayout() : juce::AudioChannelSet::stereo();
     if (out == juce::AudioChannelSet::stereo()) {
         c.mode = stereoAsSpeakers_ ? sp::OutputMode::Speakers : sp::OutputMode::Binaural;
@@ -238,8 +252,7 @@ void SpatialPannerProcessor::reconfigureEngine() {
 
 void SpatialPannerProcessor::prepareToPlay(double sampleRate, int maxBlock) {
     sampleRate_ = sampleRate;
-    mono_.assign(static_cast<size_t>(std::max(maxBlock, 64)), 0.0f);
-    right_.assign(mono_.size(), 0.0f);
+    in_.assign(static_cast<size_t>(LayerEngine::kMaxInputs), std::vector<float>(static_cast<size_t>(std::max(maxBlock, 64)), 0.0f));
     expected_ = -1;
     reconfigureEngine();
     {
@@ -267,6 +280,14 @@ void SpatialPannerProcessor::applyDocToEngine(const json& d) {
         docDoppler_ = L.dopplerAmount;
         docSpread_ = L.spreadDeg;
         docChannels_ = L.channels;
+        docStart_ = L.startTime;
+        docLoop_ = L.loop;
+        // An Ambisonic layer with a file plays the file (the track's own
+        // audio is not used); without one it plays the track's channels.
+        const bool fromFile = sp::isAmbisonic(L) && (!L.audioFile.empty() || !L.audioFiles.empty());
+        if (fromFile) file_.load(L.audioFiles.empty() ? std::vector<std::string>{L.audioFile} : L.audioFiles, sampleRate_, L.channels);
+        else file_.clear();
+        fileFed_ = fromFile;
         engine_.setScene(s);
         docText_ = std::move(text);
     } catch (const std::exception& e) {
@@ -406,9 +427,10 @@ void SpatialPannerProcessor::manageSlot() {
         if (slot_ >= 0) session_->setSlotName(slot_, token_, trackName_);
     }
     session_->heartbeatSlot(slot_, token_);
-    // The track's channel count decides whether its layer is a stereo pair.
+    // The track's channel count decides whether its layer is a stereo pair
+    // (2) or a first-order Ambisonic sphere (4, a quad track).
     const auto* inBus = getBus(true, 0);
-    const int ch = inBus ? std::max(1, std::min(2, inBus->getNumberOfChannels())) : 1;
+    const int ch = inBus ? std::max(1, std::min(LayerEngine::kMaxInputs, inBus->getNumberOfChannels())) : 1;
     if (ch != slotChannels_ || slot_ != slotForAudio_) {
         session_->setSlotChannels(slot_, token_, ch);
         slotChannels_ = ch;
@@ -624,24 +646,52 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     lc.spreadDeg = std::min(180.0f, docSpread_.load() + pWidth_->load());
     lc.stereoWidthScale = pStereoWidth_->load() / 100.0f;
     lc.stereoRotationOffsetDeg = pStereoRotation_->load();
+    lc.ambisonicRadiusScale = pSphereRadius_->load() / 100.0f;
+    lc.ambisonicYawOffsetDeg = pSphereRotation_->load();
     if (pMono_->load() > 0.5f) lc.mono = true;   // off: the scene's setting stands
     const float meterGain = lc.mute ? 0.0f : docLevelGain_.load() * sp::dbToGain(levelDb);
     const int slot = slotForAudio_.load(std::memory_order_relaxed);
-    const bool stereoLayer = docChannels_.load(std::memory_order_relaxed) == 2;
+    const int layerCh = std::max(1, std::min(LayerEngine::kMaxInputs, docChannels_.load(std::memory_order_relaxed)));
+    const bool stereoLayer = layerCh == 2;
+    const bool ambisonic = sp::ambisonicOrder(layerCh) >= 1;
+    const bool fromFile = ambisonic && fileFed_.load(std::memory_order_relaxed);
+    const auto fileStart = static_cast<juce::int64>(std::llround(docStart_.load(std::memory_order_relaxed) * sampleRate_));
+    const bool fileLoop = docLoop_.load(std::memory_order_relaxed);
+    const auto blockPos = static_cast<juce::int64>(std::llround(t * sampleRate_));
 
-    const int chunk = static_cast<int>(mono_.size());
+    const int chunk = static_cast<int>(in_[0].size());
+    const float* ins[LayerEngine::kMaxInputs];
+    float* inWrite[LayerEngine::kMaxInputs];
+    for (int c = 0; c < LayerEngine::kMaxInputs; ++c) { ins[c] = in_[static_cast<size_t>(c)].data(); inWrite[c] = in_[static_cast<size_t>(c)].data(); }
     float* outs[LayerEngine::kMaxOutputs];
     const int no = std::min(nOut, LayerEngine::kMaxOutputs);
     for (int off = 0; off < n; off += chunk) {
         const int k = std::min(chunk, n - off);
         float peak = 0;
-        if (nIn > 0 && stereoLayer) {
+        if (fromFile) {
+            // The recording comes from the file at the host's timeline position.
+            file_.read(inWrite, layerCh, k, blockPos + off, fileStart, fileLoop);
+            for (int c = 0; c < layerCh; ++c)
+                for (int i = 0; i < k; ++i) peak = std::max(peak, std::abs(in_[static_cast<size_t>(c)][static_cast<size_t>(i)]));
+        } else if (ambisonic) {
+            // The track's channels are the recording's (ACN order, as the file
+            // was laid on the quad track); channels the track lacks are silent.
+            for (int c = 0; c < layerCh; ++c) {
+                auto& dst = in_[static_cast<size_t>(c)];
+                if (c < nIn) {
+                    const float* src = buffer.getReadPointer(c) + off;
+                    for (int i = 0; i < k; ++i) { dst[static_cast<size_t>(i)] = src[i]; peak = std::max(peak, std::abs(src[i])); }
+                } else {
+                    std::fill(dst.begin(), dst.begin() + k, 0.0f);
+                }
+            }
+        } else if (nIn > 0 && stereoLayer) {
             // Left and right feed the pair's two ends (a mono track feeds both).
             const float* l = buffer.getReadPointer(0) + off;
             const float* r = buffer.getReadPointer(std::min(1, nIn - 1)) + off;
             for (int i = 0; i < k; ++i) {
-                mono_[static_cast<size_t>(i)] = l[i];
-                right_[static_cast<size_t>(i)] = r[i];
+                in_[0][static_cast<size_t>(i)] = l[i];
+                in_[1][static_cast<size_t>(i)] = r[i];
                 peak = std::max(peak, std::max(std::abs(l[i]), std::abs(r[i])));
             }
         } else if (nIn > 0) {
@@ -650,19 +700,18 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
                 float s = 0;
                 for (int c = 0; c < nIn; ++c) s += buffer.getReadPointer(c)[off + i];
                 s *= g;
-                mono_[static_cast<size_t>(i)] = s;
+                in_[0][static_cast<size_t>(i)] = s;
                 peak = std::max(peak, std::abs(s));
             }
         } else {
-            std::fill(mono_.begin(), mono_.begin() + k, 0.0f);
-            std::fill(right_.begin(), right_.begin() + k, 0.0f);
+            std::fill(in_[0].begin(), in_[0].begin() + k, 0.0f);
+            std::fill(in_[1].begin(), in_[1].begin() + k, 0.0f);
         }
         if (slot >= 0) session_->addMeter(slot, peak * meterGain);
         for (int c = 0; c < no; ++c) outs[c] = buffer.getWritePointer(c) + off;
         LayerEngine::Block b;
-        b.inputs[0] = mono_.data();
-        b.inputs[1] = stereoLayer ? right_.data() : nullptr;
-        b.numInputs = stereoLayer ? 2 : 1;
+        for (int c = 0; c < layerCh; ++c) b.inputs[c] = ins[c];
+        b.numInputs = layerCh;
         b.outputs = outs;
         b.numOutputs = no;
         b.numFrames = k;

@@ -35,7 +35,7 @@ private:
     using Completion = juce::WebBrowserComponent::NativeFunctionCompletion;
 
     void emit(const juce::Identifier& id, const std::string& json);
-    void chooseAudioFiles(std::function<void(std::string)> done);
+    void chooseAudioFiles(const nlohmann::json& a, std::function<void(std::string)> done);
     void chooseFile(const nlohmann::json& args, std::function<void(std::string)> done);
     void openScene(std::function<void(std::string)> done);
     std::string readScene(const juce::File& f);

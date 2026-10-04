@@ -4,7 +4,9 @@
 //   sp-gensignals OUT_DIR [--rate 48000] [--seconds 30]
 //
 // Writes mono 24-bit WAVs: engine, clicks, pluck, voice, bell, drone, noise_bursts, stream,
-// and two synthetic room impulse responses: hall_ir (stereo, 2.5 s), plate_ir (mono, 1.4 s).
+// two synthetic room impulse responses: hall_ir (stereo, 2.5 s), plate_ir (mono, 1.4 s),
+// and field (4-channel first-order ambiX): the sources above as one Ambisonic
+// recording, each from its own direction.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -295,6 +297,34 @@ std::vector<std::vector<float>> plateIr(float fs) {
     return {v};
 }
 
+// A first-order ambiX (ACN/SN3D) "recording": each source encoded from a fixed
+// direction around the microphone. Directions are engine axes (x right, y up,
+// -z forward); ambiX takes x forward, y left, z up.
+std::vector<std::vector<float>> field(int n, float fs) {
+    struct Src { std::vector<float> (*fn)(int, float); float dir[3]; float db; };
+    const Src srcs[] = {
+        {voice, {-0.5f, -0.1f, -0.85f}, -6},    // ahead left, a little below (seated)
+        {clicks, {0.9f, 0.1f, 0.4f}, -12},      // right, slightly behind
+        {bell, {0.3f, 0.7f, 0.65f}, -10},       // behind, high up
+        {stream, {-0.95f, -0.3f, 0.1f}, -14},   // left, low
+        {drone, {0.0f, 0.95f, -0.3f}, -16},     // overhead
+    };
+    std::vector<std::vector<float>> ch(4, std::vector<float>(static_cast<size_t>(n), 0.0f));
+    for (const Src& s : srcs) {
+        const Vec3 d = Vec3{s.dir[0], s.dir[1], s.dir[2]}.normalized();
+        const float ax = -d.z, ay = -d.x, az = d.y;   // ambiX frame
+        const float g[4] = {1.0f, ay, az, ax};         // W, Y, Z, X (SN3D: W = 1, first order = direction cosines)
+        const std::vector<float> v = s.fn(n, fs);
+        const float lvl = dbToGain(s.db);
+        for (int c = 0; c < 4; ++c)
+            for (int i = 0; i < n; ++i) ch[static_cast<size_t>(c)][static_cast<size_t>(i)] += v[static_cast<size_t>(i)] * lvl * g[c];
+    }
+    float peak = 0;
+    for (const auto& c : ch) for (float x : c) peak = std::max(peak, std::fabs(x));
+    for (auto& c : ch) for (float& x : c) x *= dbToGain(-1.0f) / peak;
+    return ch;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -328,6 +358,11 @@ int main(int argc, char** argv) {
         const std::string path = (std::filesystem::path(outDir) / (std::string(g.name) + ".wav")).string();
         tools::writeWav(path, g.fn(fs), rate);
         std::fprintf(stderr, "wrote %s\n", path.c_str());
+    }
+    {
+        const std::string path = (std::filesystem::path(outDir) / "field.wav").string();
+        tools::writeWav(path, field(n, fs), rate);
+        std::fprintf(stderr, "wrote %s (ambiX, 4 channels)\n", path.c_str());
     }
     return 0;
 }

@@ -90,6 +90,10 @@ struct LayerControls {
     float stereoWidthScale = 1.0f;
     float stereoRotationOffsetDeg = 0;
     std::optional<bool> mono;
+    // Ambisonic layers: the sphere's radius is multiplied, the recording's
+    // yaw added.
+    float ambisonicRadiusScale = 1.0f;
+    float ambisonicYawOffsetDeg = 0;
 };
 
 // A scene edit prepared off the audio thread by Renderer::prepareUpdate and
@@ -110,7 +114,8 @@ public:
 
     // Inputs are one mono buffer per layer channel, layer by layer: layer i
     // takes inputs[inputIndex(i)] .. inputs[inputIndex(i) + channels - 1]
-    // (left then right for a stereo layer). numInputs() = inputChannels(scene).
+    // (left then right for a stereo layer; the recording's channels in file
+    // order for an Ambisonic one). numInputs() = inputChannels(scene).
     int numInputs() const;
     int numLayers() const;    // = scene.layers.size()
     int inputIndex(int layer) const;

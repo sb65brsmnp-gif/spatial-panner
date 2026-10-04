@@ -35,6 +35,7 @@ set(SP_PLUGIN_SOURCES
   Source/ListenerTimeline.cpp
   Source/LayerEngine.cpp
   Source/SceneDoc.cpp
+  Source/LayerFile.cpp
   Source/PluginProcessor.cpp)
 
 target_sources(SpatialPannerPlugin PRIVATE ${SP_PLUGIN_SOURCES} Source/PluginEditor.cpp)

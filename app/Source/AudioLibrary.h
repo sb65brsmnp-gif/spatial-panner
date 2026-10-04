@@ -1,8 +1,10 @@
 // Decoded layer audio, shared by every renderer program that uses it.
 //
-// Files are read on a background thread, kept as mono or as a left/right
-// pair (further channels are dropped) and resampled to the device rate.
-// Everything is held in memory; a 3-minute stereo stem at 48 kHz is ~70 MB.
+// Files are read on a background thread, kept with up to 16 channels (mono,
+// a left/right pair, or an Ambisonic recording's channels; further channels
+// are dropped) and resampled to the device rate. Everything is held in
+// memory; a 3-minute stereo stem at 48 kHz is ~70 MB, a first-order
+// Ambisonic one ~140 MB.
 #pragma once
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -17,13 +19,16 @@
 namespace spapp {
 
 struct LayerAudio {
-    std::vector<std::vector<float>> channels;  // 1 or 2 channels, at `sampleRate`
+    std::vector<std::vector<float>> channels;  // 1 to 16 channels, at `sampleRate`
     double sampleRate = 0;
     int numChannels() const { return static_cast<int>(channels.size()); }
     size_t numSamples() const { return channels.empty() ? 0 : channels[0].size(); }
     // Channel `c`, or the last one a mono file has (a stereo layer playing a
     // mono file plays it from both ends).
     const std::vector<float>& channel(int c) const { return channels[static_cast<size_t>(std::min(c, numChannels() - 1))]; }
+    // Channel `c` exactly, or null when the file has no such channel (an
+    // Ambisonic layer fed a file with too few channels leaves those silent).
+    const std::vector<float>* exactChannel(int c) const { return c < numChannels() ? &channels[static_cast<size_t>(c)] : nullptr; }
 };
 
 struct AudioFileInfo {

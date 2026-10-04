@@ -15,11 +15,23 @@ export const EASINGS: Easing[] = ['linear', 'smooth', 'ease_in', 'ease_out', 'ho
 // centre. Same conventions as the engine (sp::stereoOffset).
 export interface StereoDoc { width: number; rotation: number; elevation: number; mono: boolean }
 
+// An Ambisonic layer (channels = 4, 9 or 16: first to third order) is a
+// recording shown as a sphere of `radius` metres around `position`: the
+// recorded sounds are taken to lie on its surface, so the listener can walk
+// inside it (docs/engine.md, "Ambisonic layers"). `format`: 'ambix'
+// (ACN/SN3D, any order) or 'fuma' (W X Y Z, first order only). yaw / pitch /
+// roll turn the recording (degrees, same convention as the head). `room_send`
+// feeds the recording's W into the room's reverb.
+export type AmbisonicFormat = 'ambix' | 'fuma';
+export interface AmbisonicDoc { format: AmbisonicFormat; radius: number; yaw: number; pitch: number; roll: number; room_send: boolean }
+
 export interface LayerDoc {
   name: string;
   audio: string;
-  channels?: number;   // 1 (default) or 2
+  audio_files?: string[];   // Ambisonic: one mono file per channel instead of `audio`
+  channels?: number;   // 1 (default), 2, or 4 / 9 / 16 (Ambisonic)
   stereo?: StereoDoc;
+  ambisonic?: AmbisonicDoc;
   position: V3;
   level_db: number;
   mute: boolean;
@@ -169,6 +181,44 @@ export function defaultStereo(): StereoDoc {
 }
 
 export function isStereo(l: LayerDoc): boolean { return l.channels === 2; }
+
+export const AMBISONIC_CHANNELS = [4, 9, 16];
+export function isAmbisonic(l: LayerDoc): boolean { return AMBISONIC_CHANNELS.includes(l.channels ?? 1); }
+export function ambisonicOrder(channels: number): number { return channels === 4 ? 1 : channels === 9 ? 2 : channels === 16 ? 3 : 0; }
+export function defaultAmbisonic(): AmbisonicDoc {
+  return { format: 'ambix', radius: 3, yaw: 0, pitch: 0, roll: 0, room_send: false };
+}
+
+// How a file with `fileChannels` channels plays by default: mono, a stereo
+// pair, or an Ambisonic sphere when the count is a full order's worth.
+export function channelsForFile(fileChannels: number): number {
+  if (AMBISONIC_CHANNELS.includes(fileChannels)) return fileChannels;
+  return Math.min(2, Math.max(1, fileChannels || 1));
+}
+
+// The extra fields a layer with `channels` channels carries.
+export function layerExtras(channels: number, prev: Partial<LayerDoc> = {}): Partial<LayerDoc> {
+  if (channels === 2) return { stereo: prev.stereo ?? defaultStereo() };
+  if (AMBISONIC_CHANNELS.includes(channels)) return { ambisonic: prev.ambisonic ?? defaultAmbisonic() };
+  return {};
+}
+
+// A point on the sphere's surface, from the recording's own direction `d`
+// (engine axes; -Z is the recording's front), turned by its yaw / pitch /
+// roll like the head (sceneView.headQuaternion) and offset from the centre.
+export function ambisonicSurfacePoint(l: LayerDoc, d: V3): V3 {
+  const a = l.ambisonic ?? defaultAmbisonic();
+  const r = Math.PI / 180, yaw = a.yaw * r, pitch = a.pitch * r, roll = a.roll * r;
+  // roll about -Z, then pitch about +X, then yaw about +Y (engine order).
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  let x = d[0] * cr + d[1] * sr, y = -d[0] * sr + d[1] * cr, z = d[2];
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  [y, z] = [y * cp - z * sp, y * sp + z * cp];
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  [x, z] = [x * cy + z * sy, -x * sy + z * cy];
+  const p = l.position;
+  return [p[0] + x * a.radius, p[1] + y * a.radius, p[2] + z * a.radius];
+}
 
 // Half-vector from the centre to the right end.
 export function stereoOffset(st: StereoDoc): V3 {

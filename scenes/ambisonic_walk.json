@@ -1,0 +1,25 @@
+{
+  "name": "Walk into, through and out of a first-order Ambisonic recording (a 4 m sphere), past a bell outside it",
+  "duration": 30,
+  "layers": [
+    {"name": "field", "audio": "../signals/field.wav", "channels": 4, "position": [0.0, 1.6, -2.0], "level_db": -3, "loop": true,
+     "ambisonic": {"format": "ambix", "radius": 4.0, "yaw": 0, "pitch": 0, "roll": 0, "room_send": false}},
+    {"name": "bell", "audio": "../signals/bell.wav", "position": [6.0, 1.8, -9.0], "level_db": -8, "loop": true}
+  ],
+  "room": {"type": "none"},
+  "listener": {
+    "path": {"type": "catmull_rom",
+             "points": [[0.0, 1.7, 9.0], [0.0, 1.7, 3.0], [0.0, 1.7, -2.0], [1.0, 1.7, -5.5], [4.0, 1.7, -9.0], [7.0, 1.7, -12.0]]},
+    "speed": [
+      {"time": 0,  "speed": 0.0, "easing": "smooth"},
+      {"time": 1,  "speed": 1.2, "easing": "linear"},
+      {"time": 8,  "speed": 1.2, "easing": "smooth"},
+      {"time": 10, "speed": 0.25, "easing": "linear"},
+      {"time": 15, "speed": 0.25, "easing": "smooth"},
+      {"time": 17, "speed": 1.2, "easing": "linear"},
+      {"time": 27, "speed": 1.2, "easing": "smooth"},
+      {"time": 29, "speed": 0.0, "easing": "hold"}
+    ],
+    "head": {"mode": "along_path"}
+  }
+}

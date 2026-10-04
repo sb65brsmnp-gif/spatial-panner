@@ -8,7 +8,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
 
@@ -23,9 +23,12 @@ export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number
 }
 
 // A layer is a ball on a stem; a stereo layer is two balls (left, right) on
-// stems joined by a bar, with the label at the centre.
+// stems joined by a bar, with the label at the centre; an Ambisonic layer is
+// the ball inside a translucent sphere, with an arrow for the recording's
+// front and a handle on its surface that sets the radius.
 interface LayerEnd { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; tag: CSS2DObject }
-interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; right: LayerEnd; bar: THREE.Mesh; arrow: THREE.ArrowHelper; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+interface Sphere { group: THREE.Group; shell: THREE.Mesh; wire: THREE.LineSegments; equator: THREE.Line; front: THREE.ArrowHelper; handle: THREE.Mesh }
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; right: LayerEnd; bar: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
@@ -155,8 +158,27 @@ export class SceneView {
     return { ball, stem, ring, tag };
   }
 
+  private makeSphere(group: THREE.Group, index: number): Sphere {
+    const sg = new THREE.Group();
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24),
+      new THREE.MeshStandardMaterial({ roughness: 0.9, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide }));
+    shell.renderOrder = 1;
+    const wire = new THREE.LineSegments(new THREE.WireframeGeometry(new THREE.SphereGeometry(1, 16, 8)),
+      new THREE.LineBasicMaterial({ transparent: true, opacity: 0.18, depthWrite: false }));
+    const ring = new THREE.EllipseCurve(0, 0, 1, 1, 0, Math.PI * 2, false, 0).getPoints(96).map((p) => new THREE.Vector3(p.x, 0, p.y));
+    const equator = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring), new THREE.LineBasicMaterial({ transparent: true, opacity: 0.6 }));
+    // The recording's front (-Z of the recording) and a handle on its right.
+    const front = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(), 1, 0xffffff, 0.25, 0.12);
+    const handle = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    handle.userData = { kind: 'layer', index, end: 'radius' };
+    sg.add(shell, wire, equator, front, handle);
+    group.add(sg);
+    return { group: sg, shell, wire, equator, front, handle };
+  }
+
   private makeLayer(_l: LayerDoc, index: number): LayerObj {
     const group = new THREE.Group();
+    const sphere = this.makeSphere(group, index);
     const left = this.makeEnd(group, index, 'centre');
     const { ball, stem, ring } = left;
     group.userData.leftTag = left.tag;
@@ -179,7 +201,7 @@ export class SceneView {
     label.position.set(0, LAYER_RADIUS + 0.25, 0);
     group.add(label);
     this.layerGroup.add(group);
-    return { group, ball, stem, ring, right, bar, arrow, label, meter, name };
+    return { group, ball, stem, ring, right, bar, arrow, sphere, label, meter, name };
   }
 
   // Places a ball and its stem and floor ring at `p` (group-local).
@@ -236,7 +258,27 @@ export class SceneView {
       } else {
         o.bar.visible = false;
       }
-      o.arrow.visible = l.directivity > 0.01;
+      // Ambisonic: the sphere around the centre, turned like the recording.
+      const ambi = isAmbisonic(l);
+      o.sphere.group.visible = ambi;
+      if (ambi) {
+        const a = l.ambisonic ?? defaultAmbisonic();
+        const r = Math.max(0.05, a.radius);
+        o.sphere.group.quaternion.copy(headQuaternion(a.yaw, a.pitch, a.roll));
+        o.sphere.shell.scale.setScalar(r);
+        o.sphere.wire.scale.setScalar(r);
+        o.sphere.equator.scale.setScalar(r);
+        o.sphere.front.setLength(r, Math.min(0.4, r * 0.25), Math.min(0.2, r * 0.12));
+        o.sphere.front.setColor(color);
+        o.sphere.handle.position.set(r, 0, 0);
+        (o.sphere.handle.material as THREE.MeshBasicMaterial).color.copy(selected ? new THREE.Color(0xffffff) : color);
+        const tint = silent ? color.clone().multiplyScalar(0.5) : color;
+        (o.sphere.shell.material as THREE.MeshStandardMaterial).color.copy(tint);
+        (o.sphere.shell.material as THREE.MeshStandardMaterial).opacity = selected ? 0.2 : 0.12;
+        (o.sphere.wire.material as THREE.LineBasicMaterial).color.copy(tint);
+        (o.sphere.equator.material as THREE.LineBasicMaterial).color.copy(tint);
+      }
+      o.arrow.visible = !ambi && l.directivity > 0.01;
       const f = v3(l.directivity_forward);
       if (f.lengthSq() > 1e-9) o.arrow.setDirection(f.normalize());
       o.arrow.setColor(color);
@@ -419,6 +461,7 @@ export class SceneView {
     for (const l of this.layers) {
       out.push(l.ball);
       if (l.right.ball.visible) out.push(l.right.ball, l.bar);
+      if (l.sphere.group.visible) out.push(l.sphere.handle);
     }
     return out;
   }

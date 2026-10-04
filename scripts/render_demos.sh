@@ -28,4 +28,7 @@ mkdir -p "$OUT" "$ROOT/signals"
 "$RENDER" "$ROOT/scenes/occluder.json"        -o "$OUT/09_occluder_binaural.wav" --bench --normalize
 "$RENDER" "$ROOT/scenes/room_walk.json"       -o "$OUT/10_room_walk_traced_binaural.wav" --reflections steam --bench --normalize
 "$RENDER" "$ROOT/scenes/occluder.json"        -o "$OUT/11_occluder_no_objects_binaural.wav" --reflections builtin --normalize
+# An Ambisonic recording as a sphere: walk in through the centre and out again.
+"$RENDER" "$ROOT/scenes/ambisonic_walk.json"  -o "$OUT/12_ambisonic_walk_binaural.wav" --bench --normalize
+"$RENDER" "$ROOT/scenes/ambisonic_walk.json"  -o "$OUT/13_ambisonic_walk_ambix_o3.wav" --mode ambix --order 3 --normalize
 echo "renders in $OUT"

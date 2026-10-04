@@ -45,12 +45,26 @@ listener can walk between or through them. Drag the bar to move the pair,
 drag an end to widen, narrow or turn it (Option-drag an end keeps the centre
 fixed), or use the *Stereo field* sliders: width (metres), rotation,
 elevation and *Mono*, which sums both channels at the centre. *Play as* turns
-a stereo file into a single summed source instead. Each layer also has mute
+a stereo file into a single summed source instead. A 4-, 9- or 16-channel
+file is an **Ambisonic recording** (first to third order) and becomes a
+translucent **sphere**: the recording's sounds sit on its surface, the ball
+at its centre is where the recording was made, and the listener can walk
+into it, through it and out again (inside, the near side comes closer and
+the far side recedes; at the centre it is the recording as it was; outside it
+narrows into the sphere's direction and falls off with distance). Drag the
+ball to move the sphere and the small cube on its surface to resize it; the
+arrow is the recording's front. The *Ambisonic sphere* section sets the
+format (ambiX, the ACN/SN3D layout most tools write, or FuMa for first-order
+W X Y Z files), the radius, the recording's yaw / pitch / roll, and whether
+its W channel feeds the room's reverb (off by default: a recording carries
+its own room). *Add Ambisonic from separate files…* builds one such layer
+from 4, 9 or 16 mono files, taken in name order (W X Y Z sorts right for
+FuMa; 0 1 2 3 … for ambiX). Each layer also has mute
 and solo, level, start time and loop, Doppler amount, spread, directivity and
 facing, distance rolloff, room send and reflections. Drag a layer in the view
 to move it; Shift+drag changes its height. Any number of layers can be added;
 CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
-layers).
+layers, an Ambisonic sphere about four).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
 the path; drawing again appends to the current path's end.

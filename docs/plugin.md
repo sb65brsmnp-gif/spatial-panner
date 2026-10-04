@@ -78,6 +78,24 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    editor's Stereo field section (or dragging the ends) places, widens and
    turns; *Mono* sums the two at the centre. The Spread parameter widens any
    source.
+
+   **Ambisonic recordings.** A first-order recording (4 channels, ambiX or
+   FuMa) goes on a **Quadraphonic** track: set the project's surround format
+   to Quadraphonic (File > Project Settings > Audio > Surround Format), set
+   the track's format to Surround with the format button on its channel
+   strip, and put the 4-channel file on it. Insert Spatial Panner on that
+   track (**Quadraphonic → Stereo** for headphones); the layer appears
+   as a **sphere** in the editor, the recording's sounds on its surface and
+   the listener free to walk through it (docs/editor.md). The file's channels
+   must be in the recording's own order (ambiX: W Y Z X; FuMa: W X Y Z) and
+   the Ambisonic sphere section says which format it is. Logic has no 9- or
+   16-channel track, so for a second- or third-order recording insert the
+   plug-in on any mono or stereo track (an empty one is fine), select its
+   layer and choose the recording under *Recording*: the plug-in then plays
+   the file itself, in sync with the song (the track's own audio is not
+   used). Separate one-file-per-channel recordings are combined in the
+   standalone app (*Add Ambisonic from separate files…*), or in Logic by
+   laying the four files on the quad track's channels.
 2. **Roles.** The first instance becomes the **scene** track. Every later
    instance becomes a **layer**, and appears in the scene at a free spot
    around the listener. The header at the top of the plug-in window shows
@@ -148,6 +166,8 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Layer Stereo Width | 0 to 400 %, default 100 | Stereo tracks: multiplies the pair's width in the scene. 0 brings both ends to the centre. |
 | Layer Stereo Rotation | ±180° | Stereo tracks: added to the pair's rotation. |
 | Layer Mono | on, off | Stereo tracks: on sums left and right at the centre. Off leaves the scene's Mono setting. |
+| Layer Sphere Radius | 10 to 400 %, default 100 | Ambisonic layers: multiplies the sphere's radius in the scene. |
+| Layer Sphere Rotation | ±180° | Ambisonic layers: added to the recording's yaw (turns the whole field). |
 
 Automation is evaluated every 32 samples (0.7 ms at 48 kHz), and the
 plug-in reports a latency of 32 samples, which Logic compensates.
@@ -227,6 +247,11 @@ built-in model don't have this cost.
   Edit them in the Room tab.
 * **Output mode** is chosen by the track's format, not by an automatable
   parameter.
+* **Ambisonic recordings above first order** are played from the file by the
+  plug-in, not by the track, because Logic's track formats stop at 7.1.4.
+  The file is decoded into memory per instance (a 3-minute third-order
+  recording at 48 kHz is about 550 MB) and read at the song position, so
+  Logic's region edits do not apply to it; cut the file first if needed.
 * **Tempo:** paths follow time in seconds, not bars and beats. If you change
   the project tempo, the listener keeps its timing in seconds.
 * **Memory:** each binaural track loads its own copy of the HRTF, about 18 MB
