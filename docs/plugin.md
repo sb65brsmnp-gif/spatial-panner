@@ -122,8 +122,8 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      Duplicating a track in Logic puts the copy at the same position.
    * There is no transport. The editor's playhead follows Logic's, and you
      play, stop, scrub and cycle in Logic.
-   * **Import…** and **Export…** read and write the same `.json` scene files
-     as the app. On import, layers whose names match track names are bound
+   * **Import…** and **Export…** read and write the same scene files as
+     the app (`.spscene`, and `.json` from before). On import, layers whose names match track names are bound
      to those tracks.
    * The scene is saved inside the Logic project, with the scene track's
      state.
