@@ -37,10 +37,12 @@ async function check(name, fn) {
 }
 const assert = (c, msg) => { if (!c) throw new Error(msg); };
 const ed = (fn, arg) => page.evaluate(fn, arg);
+// The analysis runs in the dev server's sp-scene tool; a loaded CI runner
+// can take well over 5 s for it.
 const waitAnalysis = () => page.waitForFunction(() => {
   const s = window.spEditor.store;
   return s.analysis && s.analysis.revision === s.revision;
-}, null, { timeout: 5000 });
+}, null, { timeout: 20000 });
 const screen = (p) => ed((p) => window.spEditor.project(p), p);
 
 await page.goto('http://localhost:5199/');
