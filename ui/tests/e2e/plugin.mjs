@@ -74,7 +74,16 @@ await page.addInitScript(() => {
     audioInfo() { return []; },
     chooseAudioFiles() { return []; },
     confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
+    hostKey(k) { host.keys.push(k); return { ok: true }; },
   };
+  host.keys = [];
+  // "Reopening the window": a saved document from the last session.
+  try {
+    const saved = localStorage.getItem('e2e-doc');
+    if (saved) { host.doc = JSON.parse(saved); localStorage.removeItem('e2e-doc'); }
+    const tracks = localStorage.getItem('e2e-tracks');
+    if (tracks) { host.tracks = JSON.parse(tracks); localStorage.removeItem('e2e-tracks'); }
+  } catch { /* no storage */ }
   // Like WKWebView in JUCE on macOS: window.confirm answers Cancel without
   // showing anything, so the editor must ask through the native side.
   window.confirm = () => false;
@@ -162,19 +171,23 @@ await check('scrubbing asks for Logic instead of moving the playhead', async () 
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'time moved');
 });
 
-await check('Space, Return, comma and Cmd+S are left to Logic; the editor marks its own keys handled', async () => {
+await check('Space, Return, comma and period are pressed in Logic\'s window; Cmd+S is left to the menu', async () => {
   const sent = async (init) => ed((init) => {
     const e = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
     window.dispatchEvent(e);
     return e.defaultPrevented;
   }, init);
-  await ed(() => { window.__toasts = []; });
-  assert(!(await sent({ key: ' ', code: 'Space' })), 'Space taken from Logic');
-  assert(!(await sent({ key: 'Enter', code: 'Enter' })), 'Return taken from Logic');
-  assert(!(await sent({ key: ',', code: 'Comma' })), 'comma taken from Logic');
-  assert(!(await sent({ key: 's', code: 'KeyS', metaKey: true })), 'Cmd+S taken from Logic');
+  await ed(() => { window.__toasts = []; window.__host.keys = []; });
+  assert(await sent({ key: ' ', code: 'Space' }), 'Space not taken for Logic');
+  assert(await sent({ key: 'Enter', code: 'Enter' }), 'Return not taken for Logic');
+  assert(await sent({ key: ',', code: 'Comma' }), 'comma not taken for Logic');
+  assert(await sent({ key: '.', code: 'Period', shiftKey: true }), 'period not taken for Logic');
+  assert(!(await sent({ key: 's', code: 'KeyS', metaKey: true })), 'Cmd+S taken from the menu');
   assert(await sent({ key: 'c', code: 'KeyC' }), 'tool key not marked handled');
   assert(await ed(() => window.spEditor.tools.opts.tool) === 'curve', 'tool key ignored');
+  await page.waitForFunction(() => window.__host.keys.length === 4);
+  const codes = await ed(() => window.__host.keys.map((k) => k.code + (k.shift ? '+shift' : '')));
+  assert(JSON.stringify(codes) === '["Space","Enter","Comma","Period+shift"]', JSON.stringify(codes));
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'Enter moved the playhead');
   assert(await ed(() => window.__toasts.length) === 0, 'a hint was shown');
   await ed(() => window.spEditor.tools.setTool('select'));
@@ -199,6 +212,41 @@ await check('Clear asks through the plugin and only clears on OK', async () => {
   await page.locator('#toolbar >> text=Clear').click();
   await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 3 && window.spEditor.store.scene.layers[0].position[2] === -3,
     null, { timeout: 5000 });
+});
+
+await check('reopened with an outdoor room and one layer, the 3D view can still orbit and zoom', async () => {
+  await ed(() => {
+    const doc = JSON.parse(JSON.stringify(window.__host.doc));
+    doc.room = { type: 'outdoor' };
+    doc.layers = doc.layers.slice(0, 1);
+    doc.listener.paths = [];
+    localStorage.setItem('e2e-doc', JSON.stringify(doc));
+    localStorage.setItem('e2e-tracks', JSON.stringify(window.__host.tracks.slice(0, 1)));
+  });
+  await page.reload();
+  await page.waitForFunction(() => !!window.spEditor && window.spEditor.store.scene.layers.length === 1 && window.spEditor.store.scene.room.type === 'outdoor');
+  await page.waitForTimeout(300);
+  const dist = () => ed(() => window.spEditor.vp.persp.position.distanceTo(window.spEditor.vp.controls.target));
+  const d0 = await dist();
+  assert(d0 > 5 && Number.isFinite(d0), `camera ${d0} m from its target`);
+  const before = await ed(() => window.spEditor.vp.persp.position.toArray());
+  const box = await page.locator('#viewport canvas').boundingBox();
+  // Drag on empty sky (top left), away from the layer and the listener.
+  await page.mouse.move(box.x + 60, box.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 180, box.y + 100, { steps: 8 });
+  await page.mouse.up();
+  const after = await ed(() => window.spEditor.vp.persp.position.toArray());
+  assert(before.some((v, i) => Math.abs(v - after[i]) > 0.1), 'dragging did not orbit');
+  await page.mouse.wheel(0, -300);
+  const d1 = await dist();
+  assert(d1 < d0 - 0.5, `wheel did not zoom: ${d0} -> ${d1}`);
+  await page.locator('#toolbar >> text=Home').click();
+  const d2 = await dist();
+  const home = await ed(() => { const vp = window.spEditor.vp; return vp.persp.position.clone().sub(vp.controls.target).normalize().toArray(); });
+  const want = [14, 13, 18].map((v) => v / Math.hypot(14, 13, 18));
+  assert(home.every((v, i) => Math.abs(v - want[i]) < 1e-3), `Home direction ${home}`);
+  assert(d2 > 5, `Home distance ${d2}`);
 });
 
 await page.screenshot({ path: resolve(outDir, 'plugin-mode.png') });

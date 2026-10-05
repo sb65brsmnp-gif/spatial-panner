@@ -14,6 +14,7 @@ export interface ToolbarActions {
   redo(): void;
   setView(v: ViewName): void;
   frame(): void;
+  home(): void;
   toggleFollow(): void;
 }
 
@@ -83,7 +84,8 @@ export class Toolbar {
       viewGroup.append(x);
     }
     this.followBtn = b('Follow', 'Keep the listener in view while playing', () => actions.toggleFollow());
-    viewGroup.append(b('Frame', 'Fit the scene in view', () => actions.frame()), this.followBtn);
+    viewGroup.append(b('Home', 'Back to the default 3D view, scene in frame (H)', () => actions.home()),
+      b('Frame', 'Fit the scene in view', () => actions.frame()), this.followBtn);
     this.title = el('div', { class: 'doc-title' });
     this.root.append(file, hist, toolGroup, viewGroup, this.title);
   }

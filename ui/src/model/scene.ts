@@ -290,7 +290,7 @@ export function defaultHead(): HeadDoc {
 export function defaultRoom(): RoomDoc {
   const m = (name: string): MaterialDoc => ({ name });
   return {
-    type: 'box', size: [12, 3.5, 16], origin: [0, 0, 0],
+    type: 'outdoor', size: [12, 3.5, 16], origin: [0, 0, 0],  // outdoors (ground only); the box is ready for "room (box)"
     materials: { left: m('plaster'), right: m('plaster'), floor: m('wood_floor'), ceiling: m('plaster'),
       front: m('plaster'), back: m('plaster') },
     reflection_order: 2, reflections_level_db: 0, reverb_level_db: 0, reverb_time_scale: 1,

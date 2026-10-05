@@ -6,6 +6,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include "BinaryData.h"
+#include "HostKeys.h"
 #include "SceneDoc.h"
 #include "sp/Pose.h"
 #include "sp/SceneAnalysis.h"
@@ -112,7 +113,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "hostKey"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -205,6 +206,25 @@ private:
         if (name == "startupScene") {
             const json d = proc_.sceneDoc();
             done(json{{"path", nullptr}, {"scene", d}, {"raw", d}}.dump());
+            return;
+        }
+        if (name == "hostKey") {
+            // Space, Return, comma, period: Logic's transport keys, pressed in
+            // Logic's window (HostKeys.mm).
+#if JUCE_MAC
+            HostKey k;
+            k.key = a.value("key", std::string());
+            k.code = a.value("code", std::string());
+            k.shift = a.value("shift", false);
+            k.alt = a.value("alt", false);
+            k.ctrl = a.value("ctrl", false);
+            k.meta = a.value("meta", false);
+            std::string e;
+            const bool ok = sendKeyToHost(*this, k, e);
+            done(json{{"ok", ok}, {"error", e}}.dump());
+#else
+            done(json{{"ok", false}, {"error", "Keys reach the host on macOS only."}}.dump());
+#endif
             return;
         }
         if (name == "confirm") {

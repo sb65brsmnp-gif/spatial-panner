@@ -108,7 +108,9 @@ value. Option-*drag* on an end of a stereo pair still mirrors it about the
 centre: a reset only happens when the pointer does not move.
 
 **Views**: 3D orbit (1), Top (2), Front (3), Side (4), and Ears (5), the
-listener's own view while playing. *Follow* keeps the listener in view.
+listener's own view while playing. *Home* (H) returns to the default 3D
+angle with the scene in frame, *Frame* fits the scene from the current
+angle, *Follow* keeps the listener in view.
 
 **Timeline** (bottom): transport buttons for beginning of path (Enter), back
 and forward (a click jumps 5 s, hold to scrub at 4x), stop, play/pause
@@ -123,8 +125,10 @@ starts); head keys are at scene time. Mouse wheel zooms. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
-**Room**: box size and centre, wall materials (absorption per band), air
-temperature and humidity; or no room (free field). *Early reflections* has
+**Room**: a new scene is outdoors (ground only: one reflection off the
+ground, no walls, no reverb tail). *Type* on the Room tab switches to a box
+room with size and centre, wall materials (absorption per band), air
+temperature and humidity; or to no room at all (free field). *Early reflections* has
 the on/off, the reflection order and a level slider; *Late reverb* has the
 on/off, a level slider, and the choice between the built-in reverb (with its
 decay multiplier) and an impulse response. Both levels are trims on a

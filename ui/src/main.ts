@@ -46,6 +46,7 @@ const toolbar = new Toolbar(tools, plugin, {
   redo: () => store.redo(),
   setView: (v) => setView(v),
   frame: () => frame(),
+  home: () => homeView(),
   toggleFollow: () => { follow = !follow; refreshToolbar(); },
 });
 const sidebar = new Sidebar(store, backend, tools);
@@ -67,9 +68,18 @@ function sceneBounds(): THREE.Box3 {
   }
   for (const l of s.layers) b.expandByPoint(new THREE.Vector3(...l.position));
   for (const p of store.analysis?.paths ?? []) for (const q of p.points) b.expandByPoint(new THREE.Vector3(...q));
-  if (b.isEmpty()) b.setFromCenterAndSize(new THREE.Vector3(0, 1, 0), new THREE.Vector3(12, 3, 12));
+  b.expandByPoint(new THREE.Vector3(...s.listener.static_position));
+  // Without a box room (outdoor, open, mesh) the ground around the origin is
+  // part of the picture, and a scene of one layer is not a point: framing a
+  // point would put the camera on it, where orbiting and zooming do nothing.
+  if (s.room.type !== 'box' || b.isEmpty()) b.union(new THREE.Box3(new THREE.Vector3(-6, 0, -6), new THREE.Vector3(6, 3, 6)));
+  const size = b.getSize(new THREE.Vector3());
+  if (Math.min(size.x, size.z) < 4) b.expandByVector(new THREE.Vector3(Math.max(0, 4 - size.x) / 2, 0, Math.max(0, 4 - size.z) / 2));
   return b;
 }
+
+// The default 3D camera direction: from the front right, above.
+const HOME_DIR = new THREE.Vector3(14, 13, 18).normalize();
 
 function setView(v: ViewName): void {
   const b = sceneBounds();
@@ -86,11 +96,21 @@ function frame(): void {
   if (vp.view !== 'persp') return setView(vp.view);
   const b = sceneBounds();
   const c = b.getCenter(new THREE.Vector3());
-  const r = b.getSize(new THREE.Vector3()).length() / 2;
-  const dir = vp.persp.position.clone().sub(vp.controls.target).normalize();
+  const r = Math.max(2, b.getSize(new THREE.Vector3()).length() / 2);
+  let dir = vp.persp.position.clone().sub(vp.controls.target);
+  // A camera sitting on its target has no direction: take the default one.
+  dir = dir.lengthSq() < 1e-6 || !Number.isFinite(dir.lengthSq()) ? HOME_DIR.clone() : dir.normalize();
   vp.controls.target.copy(c);
   vp.persp.position.copy(c.clone().add(dir.multiplyScalar(r / Math.sin((vp.persp.fov * Math.PI) / 360) * 0.7)));
   vp.controls.update();
+}
+
+// Home: the 3D view from its default angle with the scene in frame.
+function homeView(): void {
+  vp.controls.target.set(0, 1, 0);
+  vp.persp.position.copy(HOME_DIR.clone().multiplyScalar(26).add(vp.controls.target));
+  setView('persp');
+  frame();
 }
 
 function refreshToolbar(): void {
@@ -352,10 +372,18 @@ window.addEventListener('keydown', (e) => {
   // Transport: Enter returns to the beginning of the path, , and . step the
   // playhead (Space, play/pause, is the timeline's). While a line is being
   // drawn, Enter finishes it instead (the drawing tools run first and mark
-  // the event handled). In the plugin these are Logic's keys.
+  // the event handled). In the plugin these are Logic's keys: the plugin
+  // presses them in Logic's window (keys left to the web view die in the
+  // plug-in window, Logic does not take them from there).
   const transport = transportKeyAction(e);
+  if (plugin && (transport || e.code === 'Space')) {
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    sendKeyToHost(e);
+    return;
+  }
   if (transport) {
-    if (plugin || e.defaultPrevented) return;
+    if (e.defaultPrevented) return;
     if (transport.kind === 'start') { if (tools.drawing) return; timeline.goToPathStart(); }
     else timeline.nudge(transport.seconds);
     e.preventDefault();
@@ -366,7 +394,18 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (toolKeys[k]) { tools.setTool(toolKeys[k]); e.preventDefault(); }
   else if (viewKeys[k]) { setView(viewKeys[k]); e.preventDefault(); }
+  else if (k === 'h') { homeView(); e.preventDefault(); }
 });
+
+let hostKeyWarned = 0;
+function sendKeyToHost(e: KeyboardEvent): void {
+  backend.hostKey({ key: e.key, code: e.code, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey }).then((r) => {
+    if (r && !r.ok && performance.now() - hostKeyWarned > 5000) {
+      hostKeyWarned = performance.now();
+      toast(r.error || 'Could not pass the key to Logic.', 'warning');
+    }
+  }).catch(() => { /* no native side */ });
+}
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });
 

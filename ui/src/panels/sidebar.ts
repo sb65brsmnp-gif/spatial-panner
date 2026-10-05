@@ -78,9 +78,15 @@ export class Sidebar {
     this.render(true);
   }
 
+  // A field being typed in, or a control under the pointer, must not be
+  // rebuilt. A menu or tick box keeps focus after its change, and that change
+  // may need the panel rebuilt (room type: box walls or ground), so they do
+  // not count.
   private busy(): boolean {
-    const a = document.activeElement;
-    return this.pointerInside || (!!a && this.root.contains(a) && a !== document.body);
+    const a = document.activeElement as HTMLElement | null;
+    const typing = !!a && this.root.contains(a)
+      && ((a.tagName === 'INPUT' && !['checkbox', 'range'].includes((a as HTMLInputElement).type)) || a.tagName === 'TEXTAREA');
+    return this.pointerInside || typing;
   }
 
   render(force = false): void {

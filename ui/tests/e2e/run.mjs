@@ -362,8 +362,22 @@ await check('a path drawn at the playhead starts there; speed keys count from th
   await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
 });
 
-await check('room tab edits the room', async () => {
+await check('Home (H) returns to the default 3D view with the scene in frame', async () => {
+  await ed(() => { const vp = window.spEditor.vp; vp.persp.position.set(0.5, 0.5, 0.5); vp.controls.target.set(0, 0.5, 0); vp.controls.update(); });
+  await page.keyboard.press('h');
+  const r = await ed(() => { const vp = window.spEditor.vp; const d = vp.persp.position.clone().sub(vp.controls.target);
+    return { dist: d.length(), dir: d.normalize().toArray(), view: vp.view }; });
+  const want = [14, 13, 18].map((v) => v / Math.hypot(14, 13, 18));
+  assert(r.view === 'persp', r.view);
+  assert(r.dir.every((v, i) => Math.abs(v - want[i]) < 1e-3), `direction ${r.dir}`);
+  assert(r.dist > 10, `distance ${r.dist}`);
+});
+
+await check('room tab edits the room (a new scene is outdoors; pick the box room first)', async () => {
   await page.click('.tab[data-tab=room]');
+  assert(await ed(() => window.spEditor.store.scene.room.type) === 'outdoor', 'default room not outdoors');
+  await page.locator('.row:has-text("Type") select').selectOption('box');
+  await page.waitForFunction(() => window.spEditor.store.scene.room.type === 'box');
   const sizeX = page.locator('.vec3').first().locator('input').first();
   await sizeX.fill('20');
   await sizeX.press('Enter');
