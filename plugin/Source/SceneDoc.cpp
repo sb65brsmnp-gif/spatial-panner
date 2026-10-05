@@ -21,7 +21,7 @@ json defaultScene() {
         {"duration", 0},
         {"layers", json::array()},
         {"room",
-         {{"type", "box"},
+         {{"type", "outdoor"},  // outdoors (ground only); the box is ready for "room (box)"
           {"size", {12, 3.5, 16}},
           {"origin", {0, 0, 0}},
           {"materials",

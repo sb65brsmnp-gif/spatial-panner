@@ -84,8 +84,15 @@ public:
     const std::string& layerId() const { return layerId_; }
     LayerFile& fileForTesting() { return file_; }
 
-    struct Transport { double time = 0; bool playing = false; };
-    Transport transport() const { return {lastTime_.load(), lastPlaying_.load()}; }
+    // `active`: the host ran processBlock within the last third of a second
+    // (Logic does not while stopped, unless the track is record-enabled or
+    // input-monitored); time and pose are then stale.
+    struct Transport { double time = 0; bool playing = false; bool active = false; };
+    Transport transport() const {
+        const auto last = lastBlockTicks_.load();
+        const bool active = last != 0 && juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - last) < 0.35;
+        return {lastTime_.load(), lastPlaying_.load(), active};
+    }
     std::array<float, 6> listenerPose() const { return engine_.pose(); }
     float cpuLoad() const { return cpu_.load(); }
 
@@ -157,6 +164,7 @@ private:
     int slotChannels_ = 0;
     std::atomic<double> lastTime_{0};
     std::atomic<bool> lastPlaying_{false};
+    std::atomic<juce::int64> lastBlockTicks_{0};
     std::atomic<float> cpu_{0};
 
     std::atomic<float>* pSpeed_;

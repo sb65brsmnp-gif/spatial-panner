@@ -50,6 +50,7 @@ export interface LayerDoc {
   color?: string;
   solo?: boolean;
   host_id?: string;   // plugin: the track (layer instance) that plays this layer
+  home?: V3;          // where the layer was first placed (Option-click returns it there)
 }
 
 export type SegmentType = 'line' | 'bezier' | 'catmull_rom' | 'arc';
@@ -65,6 +66,7 @@ export interface PathDoc {
   name: string;
   closed: boolean;
   segments: SegmentDoc[];
+  home?: V3;   // editor-only: where the path started when drawn (Option-click on the start returns it there)
 }
 
 export interface SpeedKey { time: number; speed: number; easing: Easing }
@@ -273,6 +275,11 @@ export function defaultLayer(index: number, partial: Partial<LayerDoc> = {}): La
   };
 }
 
+// Where Option-click puts a layer back: where it was first placed.
+export function layerHome(l: LayerDoc): V3 {
+  return l.home ?? [...l.position] as V3;
+}
+
 export function defaultHead(): HeadDoc {
   return {
     mode: 'along_path', banking: false, look_at_point: [0, 1.6, 0], look_at_layer: -1, keys: [],
@@ -283,7 +290,7 @@ export function defaultHead(): HeadDoc {
 export function defaultRoom(): RoomDoc {
   const m = (name: string): MaterialDoc => ({ name });
   return {
-    type: 'box', size: [12, 3.5, 16], origin: [0, 0, 0],
+    type: 'outdoor', size: [12, 3.5, 16], origin: [0, 0, 0],  // outdoors (ground only); the box is ready for "room (box)"
     materials: { left: m('plaster'), right: m('plaster'), floor: m('wood_floor'), ceiling: m('plaster'),
       front: m('plaster'), back: m('plaster') },
     reflection_order: 2, reflections_level_db: 0, reverb_level_db: 0, reverb_time_scale: 1,
@@ -318,6 +325,9 @@ export function completeScene(raw: Partial<SceneDoc>): SceneDoc {
   s.listener.head = { ...d.listener.head, ...(raw.listener?.head ?? {}) };
   s.environment = { ...d.environment, ...(raw.environment ?? {}) };
   s.layers = (raw.layers ?? []).map((l, i) => defaultLayer(i, l));
+  // A file from before "home" was kept: where things are now is home.
+  for (const l of s.layers) if (!l.home) l.home = [...l.position] as V3;
+  for (const p of s.listener.paths) { const f = firstPoint(p); if (!p.home && f) p.home = f; }
   s.editor = { ...d.editor, ...(raw.editor ?? {}) };
   return s;
 }
@@ -334,9 +344,23 @@ export function mergeEditorKeys(canonical: SceneDoc, raw: any): SceneDoc {
         if (r?.color) l.color = r.color;
         if (r?.solo) l.solo = true;
         if (typeof r?.host_id === 'string') l.host_id = r.host_id;
+        if (isV3(r?.home)) l.home = r.home;
       });
+    if (Array.isArray(raw.listener?.paths))
+      s.listener.paths.forEach((p, i) => { const h = raw.listener.paths[i]?.home; if (isV3(h)) p.home = h; });
   }
   return s;
+}
+
+// Where a path begins (an arc's first point is its centre).
+export function firstPoint(p: PathDoc): V3 | null {
+  const seg = p.segments[0];
+  const q = seg ? (seg.type === 'arc' ? seg.points[1] : seg.points[0]) : undefined;
+  return q ? [...q] as V3 : null;
+}
+
+function isV3(v: unknown): v is V3 {
+  return Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number' && Number.isFinite(x));
 }
 
 // What the engine plays: solo turns into mute for the others.

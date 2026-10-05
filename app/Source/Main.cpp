@@ -35,14 +35,18 @@ public:
         openFromCommandLine(commandLine);
     }
 
-    // A scene file given on the command line, or opened from the Finder while running.
+    // A scene file given on the command line, or opened from the Finder
+    // (double-click or Open With; at launch too, macOS sends it after initialise).
     void anotherInstanceStarted(const juce::String& commandLine) override { openFromCommandLine(commandLine); }
 
     void openFromCommandLine(const juce::String& commandLine) {
         for (const auto& arg : juce::StringArray::fromTokens(commandLine, true)) {
             const juce::File f(juce::File::getCurrentWorkingDirectory().getChildFile(arg.unquoted()));
-            if (f.hasFileExtension("json") && f.existsAsFile() && window_ && window_->content_) {
+            if (Bridge::isSceneFile(f) && f.existsAsFile() && window_ && window_->content_) {
                 window_->content_->openFile(f);
+                // Opened from the Finder while running: bring the window forward.
+                if (window_->isMinimised()) window_->setMinimised(false);
+                window_->toFront(true);
                 break;
             }
         }

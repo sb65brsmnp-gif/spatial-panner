@@ -32,6 +32,10 @@ export interface Tick {
   meters?: number[];     // per-layer dBFS (post level, pre spatialisation)
   cpu?: number;
   host?: boolean;        // the host's playhead: follow it even while stopped
+  // Plugin: the host is running the plug-in (false while Logic stands still,
+  // unless the track is record-enabled or input-monitored); time and pose
+  // are then the last ones seen.
+  active?: boolean;
 }
 
 export interface BounceRequest { mode: OutputMode; layout: string; start: number; end: number; sampleRate: number }
@@ -45,6 +49,9 @@ export interface Backend {
   // (the plugin stores it in the host's project).
   setScene(scene: SceneDoc, duration: number, doc?: SceneDoc): Promise<{ ok: boolean; error?: string }>;
   transport(cmd: { action: 'play' | 'pause' | 'stop' | 'seek' | 'loop'; time?: number; loop?: boolean }): Promise<void>;
+  // Plugin: a text field has focus (or lost it); while it has, Logic's
+  // transport keys are typed into it instead of going to Logic.
+  editing(on: boolean): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
   // The native open dialog for audio files (several); `title` names the ask.
@@ -69,6 +76,16 @@ export interface Backend {
   // The native side changed the document (plugin: a track was added, renamed
   // or duplicated, or the host restored the project).
   onSceneReplaced(fn: (doc: SceneDoc) => void): void;
+  // Recently opened or saved scene files, newest first.
+  recentScenes(): Promise<string[]>;
+  clearRecentScenes(): Promise<void>;
+  // A scene file by path (Open Recent), read like openScene.
+  openScenePath(path: string): Promise<{ path: string; scene: SceneDoc; raw: unknown } | null>;
+  // Audio files dropped on the window (paths, where in the page).
+  onDropFiles(fn: (d: { paths: string[]; x: number; y: number }) => void): void;
+  onDropHover(fn: (over: boolean) => void): void;
+  // The app's menu bar: new, open, save, saveAs, openRecent (with path).
+  onMenu(fn: (m: { action: string; path?: string }) => void): void;
 }
 
 // ------------------------------------------------------------------ app
@@ -118,6 +135,7 @@ class AppBackend implements Backend {
     return this.call<{ ok: boolean; error?: string }>('setScene', doc ? { scene, duration, doc } : { scene, duration });
   }
   async transport(cmd: Parameters<Backend['transport']>[0]) { await this.call('transport', cmd); }
+  async editing(on: boolean) { await this.call('editing', { on }); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
@@ -145,6 +163,15 @@ class AppBackend implements Backend {
   onSceneReplaced(fn: (doc: SceneDoc) => void) {
     window.__JUCE__!.backend.addEventListener('sceneReplaced', (raw: unknown) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw as SceneDoc));
   }
+  async recentScenes() { return (await this.call<string[]>('recentScenes')) ?? []; }
+  async clearRecentScenes() { await this.call('clearRecentScenes'); }
+  openScenePath(path: string) { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('openScenePath', { path }); }
+  private on<T>(id: string, fn: (v: T) => void) {
+    window.__JUCE__!.backend.addEventListener(id, (raw: unknown) => fn(typeof raw === 'string' ? JSON.parse(raw) : raw as T));
+  }
+  onDropFiles(fn: (d: { paths: string[]; x: number; y: number }) => void) { this.on('dropFiles', fn); }
+  onDropHover(fn: (over: boolean) => void) { this.on<{ over: boolean }>('dropHover', (v) => fn(!!v.over)); }
+  onMenu(fn: (m: { action: string; path?: string }) => void) { this.on('menu', fn); }
 }
 
 // ------------------------------------------------------------------ dev
@@ -193,6 +220,9 @@ class DevBackend implements Backend {
       default: break;
     }
   }
+  async editing(on: boolean) {
+    (window as unknown as { __editing?: boolean }).__editing = on;
+  }
   async setOutput(out: OutputConfig) { this.output = out; return { ok: true }; }
   async info(): Promise<EngineInfo> {
     return { device: 'Browser preview (no audio)', sampleRate: 48000, outputChannels: 2, cpu: 0, output: this.output, status: 'Preview' };
@@ -212,6 +242,7 @@ class DevBackend implements Backend {
     const list: string[] = await (await fetch('/api/scenes')).json();
     const choice = window.prompt(`Open which demo scene?\n${list.join('\n')}`, list[0]);
     if (!choice) return null;
+    this.noteRecent(choice);
     return this.post<{ path: string; scene: SceneDoc; raw: unknown }>('/api/open', { name: choice });
   }
   async saveScene(scene: SceneDoc, path: string | null) {
@@ -240,6 +271,21 @@ class DevBackend implements Backend {
   onTick(fn: (t: Tick) => void) { this.tickFns.push(fn); }
   onMessage(fn: (m: { text: string; level: 'info' | 'warning' | 'error' }) => void) { this.msgFns.push(fn); }
   onSceneReplaced() {}
+  // The browser preview keeps a recent list of the demo scenes it opened.
+  private recent: string[] = [];
+  async recentScenes() { return this.recent.slice(); }
+  async clearRecentScenes() { this.recent = []; }
+  async openScenePath(path: string) {
+    const r = await this.post<{ path: string; scene: SceneDoc; raw: unknown }>('/api/open', { name: path.split('/').pop() });
+    this.noteRecent(path);
+    return r;
+  }
+  noteRecent(path: string) { this.recent = [path, ...this.recent.filter((p) => p !== path)].slice(0, 10); }
+  // A browser cannot see a dropped file's path: the editor's own drop
+  // handler passes names (main.ts), which the preview treats as paths.
+  onDropFiles() {}
+  onDropHover() {}
+  onMenu() {}
 }
 
 export function createBackend(): Backend {

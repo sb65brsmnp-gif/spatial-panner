@@ -74,7 +74,16 @@ await page.addInitScript(() => {
     audioInfo() { return []; },
     chooseAudioFiles() { return []; },
     confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
+    editing(a) { host.editing.push(a.on); },
   };
+  host.editing = [];
+  // "Reopening the window": a saved document from the last session.
+  try {
+    const saved = localStorage.getItem('e2e-doc');
+    if (saved) { host.doc = JSON.parse(saved); localStorage.removeItem('e2e-doc'); }
+    const tracks = localStorage.getItem('e2e-tracks');
+    if (tracks) { host.tracks = JSON.parse(tracks); localStorage.removeItem('e2e-tracks'); }
+  } catch { /* no storage */ }
   // Like WKWebView in JUCE on macOS: window.confirm answers Cancel without
   // showing anything, so the editor must ask through the native side.
   window.confirm = () => false;
@@ -93,7 +102,7 @@ await page.addInitScript(() => {
   };
   setInterval(() => {
     if (host.playing) host.time += 1 / 30;
-    fire('tick', { time: host.time, playing: host.playing, pose: [0, 1.7, 0, host.yaw, 0, 0, 0, 0], meters: [-12, -20], host: true });
+    fire('tick', { time: host.time, playing: host.playing, active: host.active !== false, pose: [0, 1.7, 0, host.yaw, 0, 0, 0, 0], meters: [-12, -20], host: true });
   }, 33);
 });
 
@@ -162,6 +171,65 @@ await check('scrubbing asks for Logic instead of moving the playhead', async () 
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'time moved');
 });
 
+await check('Logic\'s transport keys are left alone (the plug-in passes them to Logic before the page); Cmd+S too', async () => {
+  const sent = async (init) => ed((init) => {
+    const e = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  }, init);
+  await ed(() => { window.__toasts = []; });
+  assert(!(await sent({ key: ' ', code: 'Space' })), 'Space taken from Logic');
+  assert(!(await sent({ key: 'Enter', code: 'Enter' })), 'Return taken from Logic');
+  assert(!(await sent({ key: ',', code: 'Comma' })), 'comma taken from Logic');
+  assert(!(await sent({ key: '.', code: 'Period', shiftKey: true })), 'period taken from Logic');
+  assert(!(await sent({ key: 's', code: 'KeyS', metaKey: true })), 'Cmd+S taken from the menu');
+  assert(await sent({ key: 'c', code: 'KeyC' }), 'tool key not marked handled');
+  assert(await ed(() => window.spEditor.tools.opts.tool) === 'curve', 'tool key ignored');
+  assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'Enter moved the playhead');
+  assert(await ed(() => window.__toasts.length) === 0, 'a hint was shown');
+  await ed(() => window.spEditor.tools.setTool('select'));
+});
+
+await check('a focused text field tells the plug-in, so typed keys stay in the page', async () => {
+  await ed(() => { window.__host.editing = []; });
+  await page.locator('.tl-bar input[type=number]').first().focus();
+  await page.waitForFunction(() => window.__host.editing.length === 1 && window.__host.editing[0] === true);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__host.editing.length === 2 && window.__host.editing[1] === false);
+  assert(await ed(() => document.activeElement === document.body), 'Escape left the field focused');
+});
+
+await check('a path drawn while Logic stands at 12.5 s starts there', async () => {
+  await page.keyboard.press('l');
+  for (const p of [[-4, 1.7, -4], [4, 1.7, -4], [4, 1.7, 4]]) await page.mouse.click(...(await ed((p) => window.spEditor.project(p), p)));
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.spEditor.store.scene.listener.paths.length === 1);
+  const start = await ed(() => window.spEditor.store.scene.listener.path_start_time);
+  assert(start === 12.5, `start ${start}`);
+  await page.waitForFunction(() => window.__host.doc.listener.path_start_time === 12.5);
+});
+
+await check('while Logic is idle the figure follows the start disc (the engine\'s pose is stale then)', async () => {
+  // Playing: the figure is where the engine says (0, 1.7, 0), whatever the path.
+  await ed(() => { window.__host.active = true; window.__host.time = 12.5; });
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.listener.position.x) < 1e-3);
+  // Idle: the editor evaluates the pose itself, so the figure sits on the path.
+  await ed(() => { window.__host.active = false; });
+  await page.waitForFunction(() => window.spEditor.view.listener.position.x < -3.9, null, { timeout: 5000 });
+  assert((await page.locator('.tl-idle').textContent()).includes('idle'), 'no idle hint');
+  await ed(() => window.spEditor.tools.setTool('select'));
+  const s0 = await ed(() => window.spEditor.store.scene.listener.paths[0].segments[0].points[0]);
+  const grab = [s0[0] + 0.3, 0, s0[2]];
+  await page.mouse.move(...(await ed((p) => window.spEditor.project(p), grab)));
+  await page.mouse.down();
+  await page.mouse.move(...(await ed((p) => window.spEditor.project(p), [grab[0] + 2, 0, grab[2]])), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForFunction((x0) => window.spEditor.store.scene.listener.paths[0].segments[0].points[0][0] > x0 + 1, s0[0]);
+  const s1 = await ed(() => window.spEditor.store.scene.listener.paths[0].segments[0].points[0]);
+  await page.waitForFunction((x) => Math.abs(window.spEditor.view.listener.position.x - x) < 0.1, s1[0], { timeout: 5000 });
+  await ed(() => { window.__host.active = true; window.__host.time = 12.5; });
+});
+
 await check('Clear asks through the plugin and only clears on OK', async () => {
   await page.locator('#toolbar >> text=Clear').click();
   await page.waitForFunction(() => window.__host.confirms.length === 1);
@@ -171,6 +239,41 @@ await check('Clear asks through the plugin and only clears on OK', async () => {
   await page.locator('#toolbar >> text=Clear').click();
   await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 3 && window.spEditor.store.scene.layers[0].position[2] === -3,
     null, { timeout: 5000 });
+});
+
+await check('reopened with an outdoor room and one layer, the 3D view can still orbit and zoom', async () => {
+  await ed(() => {
+    const doc = JSON.parse(JSON.stringify(window.__host.doc));
+    doc.room = { type: 'outdoor' };
+    doc.layers = doc.layers.slice(0, 1);
+    doc.listener.paths = [];
+    localStorage.setItem('e2e-doc', JSON.stringify(doc));
+    localStorage.setItem('e2e-tracks', JSON.stringify(window.__host.tracks.slice(0, 1)));
+  });
+  await page.reload();
+  await page.waitForFunction(() => !!window.spEditor && window.spEditor.store.scene.layers.length === 1 && window.spEditor.store.scene.room.type === 'outdoor');
+  await page.waitForTimeout(300);
+  const dist = () => ed(() => window.spEditor.vp.persp.position.distanceTo(window.spEditor.vp.controls.target));
+  const d0 = await dist();
+  assert(d0 > 5 && Number.isFinite(d0), `camera ${d0} m from its target`);
+  const before = await ed(() => window.spEditor.vp.persp.position.toArray());
+  const box = await page.locator('#viewport canvas').boundingBox();
+  // Drag on empty sky (top left), away from the layer and the listener.
+  await page.mouse.move(box.x + 60, box.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 180, box.y + 100, { steps: 8 });
+  await page.mouse.up();
+  const after = await ed(() => window.spEditor.vp.persp.position.toArray());
+  assert(before.some((v, i) => Math.abs(v - after[i]) > 0.1), 'dragging did not orbit');
+  await page.mouse.wheel(0, -300);
+  const d1 = await dist();
+  assert(d1 < d0 - 0.5, `wheel did not zoom: ${d0} -> ${d1}`);
+  await page.locator('#toolbar >> text=Home').click();
+  const d2 = await dist();
+  const home = await ed(() => { const vp = window.spEditor.vp; return vp.persp.position.clone().sub(vp.controls.target).normalize().toArray(); });
+  const want = [14, 13, 18].map((v) => v / Math.hypot(14, 13, 18));
+  assert(home.every((v, i) => Math.abs(v - want[i]) < 1e-3), `Home direction ${home}`);
+  assert(d2 > 5, `Home distance ${d2}`);
 });
 
 await page.screenshot({ path: resolve(outDir, 'plugin-mode.png') });

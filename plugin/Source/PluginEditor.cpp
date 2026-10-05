@@ -6,6 +6,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include "BinaryData.h"
+#include "WebViewKeys.h"
 #include "SceneDoc.h"
 #include "sp/Pose.h"
 #include "sp/SceneAnalysis.h"
@@ -112,7 +113,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -147,6 +148,11 @@ private:
     }
 
     void timerCallback() override {
+#if JUCE_MAC
+        // Logic's transport keys go up to Logic (WebViewKeys.mm); the web
+        // view may be created late or again, so this is repeated every second.
+        if (ticks_++ % 30 == 0) passTransportKeysToHost(*this);
+#endif
         const auto tr = proc_.transport();
         const auto p = proc_.listenerPose();
         const auto tracks = proc_.hostTracks();
@@ -160,7 +166,10 @@ private:
                     if (t.id == id) db = t.meterDb;
                 meters.push_back(db);
             }
-        json j{{"time", tr.time}, {"playing", tr.playing}, {"pose", {p[0], p[1], p[2], p[3], p[4], p[5], 0, 0}},
+        // `active`: Logic is running the plug-in (it does not while stopped,
+        // unless the track is record-enabled or input-monitored); the time
+        // and pose are stale otherwise.
+        json j{{"time", tr.time}, {"playing", tr.playing}, {"active", tr.active}, {"pose", {p[0], p[1], p[2], p[3], p[4], p[5], 0, 0}},
                {"meters", meters}, {"cpu", proc_.cpuLoad()}, {"host", true}};
         emit("tick", j.dump());
     }
@@ -207,6 +216,16 @@ private:
             done(json{{"path", nullptr}, {"scene", d}, {"raw", d}}.dump());
             return;
         }
+        if (name == "editing") {
+            // The page has a text field focused (or not): while it has,
+            // Logic's transport keys are typed into it instead of going to
+            // Logic (WebViewKeys.mm).
+#if JUCE_MAC
+            setTextEditing(a.value("on", false));
+#endif
+            done(json{{"ok", true}}.dump());
+            return;
+        }
         if (name == "confirm") {
             // WKWebView answers window.confirm with Cancel unless the host
             // implements it (JUCE does not), so the editor asks here.
@@ -251,7 +270,7 @@ private:
     }
 
     void openScene(std::function<void(std::string)> done) {
-        chooser_ = std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.json");
+        chooser_ = std::make_unique<juce::FileChooser>("Open a scene", lastDir_, "*.spscene;*.json");
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this, done](const juce::FileChooser& fc) {
                                   const auto f = fc.getResult();
@@ -292,12 +311,12 @@ private:
             return;
         }
         const std::string nm = a.contains("scene") ? a["scene"].value("name", "scene") : "scene";
-        chooser_ = std::make_unique<juce::FileChooser>("Export the scene", lastDir_.getChildFile(juce::File::createLegalFileName(nm) + ".json"), "*.json");
+        chooser_ = std::make_unique<juce::FileChooser>("Export the scene", lastDir_.getChildFile(juce::File::createLegalFileName(nm) + ".spscene"), "*.spscene");
         chooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
                               [write, done](const juce::FileChooser& fc) {
                                   auto f = fc.getResult();
                                   if (f == juce::File()) { done("null"); return; }
-                                  if (!f.hasFileExtension("json")) f = f.withFileExtension("json");
+                                  if (!f.hasFileExtension("spscene;json")) f = f.withFileExtension("spscene");
                                   write(f);
                               });
     }
@@ -306,6 +325,7 @@ private:
     std::unique_ptr<juce::WebBrowserComponent> browser_;
     std::unique_ptr<juce::FileChooser> chooser_;
     juce::File lastDir_;
+    unsigned ticks_ = 0;
 };
 
 // ================================================================ map (layer)

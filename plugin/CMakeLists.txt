@@ -39,6 +39,9 @@ set(SP_PLUGIN_SOURCES
   Source/PluginProcessor.cpp)
 
 target_sources(SpatialPannerPlugin PRIVATE ${SP_PLUGIN_SOURCES} Source/PluginEditor.cpp)
+if(APPLE)
+  target_sources(SpatialPannerPlugin PRIVATE Source/WebViewKeys.mm)
+endif()
 
 target_compile_definitions(SpatialPannerPlugin PUBLIC
   JUCE_WEB_BROWSER=1

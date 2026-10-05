@@ -2,16 +2,18 @@
 // points, and the path drawing tools.
 //
 // Tools: select (move layers and path points; Alt+click on the path inserts a
-// point, Delete removes), freehand, point-to-point (straight lines), curve
+// point, Delete removes; Option-click on a layer or the start puts it back
+// where it was first placed), freehand, point-to-point (straight lines), curve
 // (smooth through clicked points), pen (Bezier: click for a corner, drag for
 // a smooth point with handles), and shapes (line, circle, ellipse, figure-8,
 // spiral, helix: drag out from the centre).
 import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
-import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint } from '../model/scene';
+import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint, layerHome, firstPoint,
+  defaultScene } from '../model/scene';
 import {
-  appendSegments, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
+  appendSegments, translatePath, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
   round3, samplePath, snap, spiral, getPoint, dist, type PointRef,
 } from '../model/geometry';
 import type { Viewport } from './viewport';
@@ -34,16 +36,21 @@ interface PenAnchor { p: V3; hin: V3; hout: V3 }
 
 type Drag =
   // `end`: which part of the layer is held: the centre (a mono layer's ball,
-  // or a stereo layer's bar), the left/right end of a stereo pair, or the
-  // handle on an Ambisonic sphere's surface (sets its radius). `mirror` (Alt
-  // held) keeps the centre fixed and moves the other end the opposite way.
-  | { kind: 'layer'; index: number; end: 'centre' | 'L' | 'R' | 'radius'; mirror: boolean; plane: THREE.Plane; offset: THREE.Vector3 }
+  // or a stereo layer's bar or centre handle), the left/right end of a stereo
+  // pair, or the handle on an Ambisonic sphere's surface (sets its radius).
+  // `mirror` (Alt held) keeps the centre fixed and moves the other end the
+  // opposite way. Alt released without moving is Option-click: reset.
+  | { kind: 'layer'; index: number; end: 'centre' | 'L' | 'R' | 'radius'; mirror: boolean; plane: THREE.Plane; offset: THREE.Vector3; moved: boolean; x: number; y: number }
+  // The listener's start (the floor disc, or the figure): moves the standing
+  // position, or the active path with its start. `from` is where it started.
+  | { kind: 'start'; from: V3; plane: THREE.Plane; offset: THREE.Vector3; alt: boolean; moved: boolean; x: number; y: number }
   | { kind: 'point'; path: number; ref: PointRef; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
   | { kind: 'pen'; anchor: PenAnchor };
 
 const vec = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
+type PathDocHost = { paths: PathDoc[]; active_path: number; static_position: V3 };
 
 export class Interaction {
   opts: ToolOptions = { tool: 'select', shape: 'circle', grid: 0, append: false, spiralTurns: 3, helixTurns: 3, helixRise: 2 };
@@ -136,6 +143,35 @@ export class Interaction {
     return 12 / Math.max(1e-3, this.vp.pixelsPerMetre(new THREE.Vector3(...p)));
   }
 
+  // The start disc and the listener figure (select tool, playing or not;
+  // the drawing tools draw from there instead); returns true if one was hit.
+  private startDown(e: PointerEvent): boolean {
+    if (this.drawing) return false;
+    const rc = this.vp.ray(e);
+    if (!rc.intersectObjects([...this.view.startHandles, ...this.view.pickableListener()], false).length) return false;
+    const from = this.startPosition();
+    const pos = new THREE.Vector3(...from);
+    const plane = this.vp.editPlane(pos, e.shiftKey);
+    const hit = this.vp.intersect(e, plane) ?? pos.clone();
+    this.drag = { kind: 'start', from, plane, offset: pos.clone().sub(hit), alt: e.altKey, moved: false, x: e.clientX, y: e.clientY };
+    this.store.select({ kind: 'none' });
+    this.vp.controls.enabled = false;
+    return true;
+  }
+
+  private isStartPoint(h: PointHandle): boolean {
+    const L = this.store.scene.listener;
+    const seg = L.paths[L.active_path]?.segments[0];
+    return h.path === L.active_path && h.ref.seg === 0 && h.ref.pt === (seg?.type === 'arc' ? 1 : 0);
+  }
+
+  // Where the listener starts: the active path's first point, or where it stands.
+  private startPosition(): V3 {
+    const L = this.store.scene.listener;
+    const p = L.paths[L.active_path];
+    return (p && firstPoint(p)) || [...L.static_position] as V3;
+  }
+
   private selectDown(e: PointerEvent): void {
     // Path points first (they sit on top), then layers, then the path line.
     let best: { h: PointHandle; d: number } | null = null;
@@ -143,6 +179,9 @@ export class Interaction {
       const d = this.vp.screenDistance(e, h.mesh.position);
       if (d < 10 && (!best || d < best.d)) best = { h, d };
     }
+    // The path's first point sits over the start disc (in the top view the
+    // disc is only a little wider): a click away from its centre is the disc.
+    if (best && best.d > 5 && this.isStartPoint(best.h) && this.startDown(e)) return;
     if (best) {
       const { path, ref } = best.h;
       const pos = best.h.mesh.position.clone();
@@ -155,6 +194,8 @@ export class Interaction {
     }
     const rc = this.vp.ray(e);
     const hits = rc.intersectObjects(this.view.pickableLayers(), false);
+    const startHits = rc.intersectObjects([...this.view.startHandles, ...this.view.pickableListener()], false);
+    if (startHits.length && (!hits.length || startHits[0].distance < hits[0].distance) && this.startDown(e)) return;
     if (hits.length) {
       const index = hits[0].object.userData.index as number;
       const l = this.store.scene.layers[index];
@@ -164,7 +205,7 @@ export class Interaction {
       const pos = new THREE.Vector3(...(end === 'L' ? left : end === 'R' ? right : end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : l.position));
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
-      this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit) };
+      this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit), moved: false, x: e.clientX, y: e.clientY };
       this.store.select({ kind: 'layer', index });
       this.vp.controls.enabled = false;
       return;
@@ -214,7 +255,19 @@ export class Interaction {
       }
       return;
     }
+    // A press that has not moved a few pixels is a click, not a drag.
+    if ((d.kind === 'layer' || d.kind === 'start') && !d.moved) {
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 4) return;
+      d.moved = true;
+    }
     switch (d.kind) {
+      case 'start': {
+        const hit = this.vp.intersect(e, d.plane);
+        if (!hit) return;
+        const p = this.keepAxes(d.from, this.snapEdit(vec(hit.add(d.offset)), d.plane), d.plane);
+        this.store.update((s) => this.moveStart(s.listener, p), 'start-move');
+        break;
+      }
       case 'layer': {
         const hit = this.vp.intersect(e, d.plane);
         if (!hit) return;
@@ -291,6 +344,13 @@ export class Interaction {
     if (!d) return;
     switch (d.kind) {
       case 'layer':
+        if (d.mirror && !d.moved) this.resetLayer(d.index, d.end);
+        this.store.endGesture();
+        break;
+      case 'start':
+        if (d.alt && !d.moved) this.resetStart();
+        this.store.endGesture();
+        break;
       case 'point':
         this.store.endGesture();
         break;
@@ -338,6 +398,38 @@ export class Interaction {
       this.deleteSelection();
       e.preventDefault();
     }
+  }
+
+  // Moves the start to `p`: the active path moves with it (keeping its
+  // shape), or, without a path, the standing position.
+  private moveStart(L: PathDocHost, p: V3): void {
+    const path = L.paths[L.active_path];
+    const f = path && firstPoint(path);
+    if (path && f) translatePath(path, [p[0] - f[0], p[1] - f[1], p[2] - f[2]]);
+    else L.static_position = round3(p);
+  }
+
+  // Option-click on the start: back to where the path was drawn, or to the
+  // default standing position.
+  resetStart(): void {
+    const L = this.store.scene.listener;
+    const path = L.paths[L.active_path];
+    const to = path ? path.home : defaultScene().listener.static_position;
+    if (!to) return;
+    this.store.update((s) => this.moveStart(s.listener, to));
+  }
+
+  // Option-click on a layer: the ball or centre goes back to where the layer
+  // was first placed, an end of a stereo pair resets the width and angle
+  // (the centre stays), the sphere's handle resets the radius.
+  resetLayer(index: number, end: 'centre' | 'L' | 'R' | 'radius'): void {
+    this.store.update((s) => {
+      const l = s.layers[index];
+      if (!l) return;
+      if (end === 'radius') l.ambisonic = { ...(l.ambisonic ?? defaultAmbisonic()), radius: defaultAmbisonic().radius };
+      else if (end === 'L' || end === 'R') l.stereo = { ...defaultStereo(), mono: l.stereo?.mono ?? false };
+      else l.position = layerHome(l);
+    });
   }
 
   deleteSelection(): void {
@@ -433,7 +525,9 @@ export class Interaction {
     }
   }
 
-  // Adds drawn segments as a new path (or onto the active one) and makes it active.
+  // Adds drawn segments as a new path (or onto the active one) and makes it
+  // active. A new path starts at the playhead: the listener waits at its
+  // first point until then (in the plugin, the playhead is Logic's).
   private commit(segs: SegmentDoc[], closed: boolean): void {
     this.store.update((s) => {
       const L = s.listener;
@@ -443,8 +537,12 @@ export class Interaction {
         active.closed = closed;
       } else {
         const name = `Path ${L.paths.length + 1}`;
-        L.paths.push({ name, closed, segments: segs });
+        const path: PathDoc = { name, closed, segments: segs };
+        const f = firstPoint(path);
+        if (f) path.home = f;
+        L.paths.push(path);
         L.active_path = L.paths.length - 1;
+        L.path_start_time = Math.max(0, Math.round(this.store.time * 100) / 100);
       }
     });
   }

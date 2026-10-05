@@ -208,6 +208,12 @@ export function pathStart(path: PathDoc): V3 | null {
   return path.segments.length ? evaluateSegment(path.segments[0], 0) : null;
 }
 
+// Moves the whole path by `d` (every point, including arc centres and
+// Bezier handles), keeping its shape.
+export function translatePath(path: PathDoc, d: V3): void {
+  for (const seg of path.segments) seg.points = seg.points.map((q) => round3([q[0] + d[0], q[1] + d[1], q[2] + d[2]]));
+}
+
 export function pathEnd(path: PathDoc): V3 | null {
   return path.segments.length ? evaluateSegment(path.segments[path.segments.length - 1], 1) : null;
 }

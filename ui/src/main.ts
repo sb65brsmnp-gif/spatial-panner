@@ -27,20 +27,26 @@ const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
 let follow = false;
 
+async function newScene(): Promise<void> {
+  if (plugin) {
+    if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
+    return;
+  }
+  if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
+}
+
 const toolbar = new Toolbar(tools, plugin, {
-  newScene: async () => {
-    if (plugin) {
-      if (await backend.confirm('Start over with an empty scene? The tracks stay as layers.', 'Clear')) store.replace({ ...defaultScene(), name: store.scene.name });
-      return;
-    }
-    if (!store.dirty || await backend.confirm('Discard unsaved changes?', 'Discard')) { store.load(defaultScene(), null); frame(); }
-  },
+  newScene: () => newScene(),
   open: () => openScene(),
+  recent: () => backend.recentScenes(),
+  openRecent: (path) => openRecent(path),
+  clearRecent: () => backend.clearRecentScenes(),
   save: (saveAs) => saveScene(saveAs),
   undo: () => store.undo(),
   redo: () => store.redo(),
   setView: (v) => setView(v),
   frame: () => frame(),
+  home: () => homeView(),
   toggleFollow: () => { follow = !follow; refreshToolbar(); },
 });
 const sidebar = new Sidebar(store, backend, tools);
@@ -62,9 +68,18 @@ function sceneBounds(): THREE.Box3 {
   }
   for (const l of s.layers) b.expandByPoint(new THREE.Vector3(...l.position));
   for (const p of store.analysis?.paths ?? []) for (const q of p.points) b.expandByPoint(new THREE.Vector3(...q));
-  if (b.isEmpty()) b.setFromCenterAndSize(new THREE.Vector3(0, 1, 0), new THREE.Vector3(12, 3, 12));
+  b.expandByPoint(new THREE.Vector3(...s.listener.static_position));
+  // Without a box room (outdoor, open, mesh) the ground around the origin is
+  // part of the picture, and a scene of one layer is not a point: framing a
+  // point would put the camera on it, where orbiting and zooming do nothing.
+  if (s.room.type !== 'box' || b.isEmpty()) b.union(new THREE.Box3(new THREE.Vector3(-6, 0, -6), new THREE.Vector3(6, 3, 6)));
+  const size = b.getSize(new THREE.Vector3());
+  if (Math.min(size.x, size.z) < 4) b.expandByVector(new THREE.Vector3(Math.max(0, 4 - size.x) / 2, 0, Math.max(0, 4 - size.z) / 2));
   return b;
 }
+
+// The default 3D camera direction: from the front right, above.
+const HOME_DIR = new THREE.Vector3(14, 13, 18).normalize();
 
 function setView(v: ViewName): void {
   const b = sceneBounds();
@@ -81,11 +96,21 @@ function frame(): void {
   if (vp.view !== 'persp') return setView(vp.view);
   const b = sceneBounds();
   const c = b.getCenter(new THREE.Vector3());
-  const r = b.getSize(new THREE.Vector3()).length() / 2;
-  const dir = vp.persp.position.clone().sub(vp.controls.target).normalize();
+  const r = Math.max(2, b.getSize(new THREE.Vector3()).length() / 2);
+  let dir = vp.persp.position.clone().sub(vp.controls.target);
+  // A camera sitting on its target has no direction: take the default one.
+  dir = dir.lengthSq() < 1e-6 || !Number.isFinite(dir.lengthSq()) ? HOME_DIR.clone() : dir.normalize();
   vp.controls.target.copy(c);
   vp.persp.position.copy(c.clone().add(dir.multiplyScalar(r / Math.sin((vp.persp.fov * Math.PI) / 360) * 0.7)));
   vp.controls.update();
+}
+
+// Home: the 3D view from its default angle with the scene in frame.
+function homeView(): void {
+  vp.controls.target.set(0, 1, 0);
+  vp.persp.position.copy(HOME_DIR.clone().multiplyScalar(26).add(vp.controls.target));
+  setView('persp');
+  frame();
 }
 
 function refreshToolbar(): void {
@@ -171,6 +196,7 @@ backend.onTick((t) => {
   const host = !!t.host;
   const moved = host && Math.abs(t.time - store.time) > 1e-6;
   store.hostDriven = host;
+  store.hostActive = t.active !== false;
   store.playing = t.playing;
   if (t.playing || wasPlaying || host) store.time = t.time;
   store.livePose = t.pose ?? null;
@@ -220,6 +246,18 @@ async function openScene(): Promise<void> {
   }
 }
 
+// Open Recent (toolbar list or the app's File menu).
+async function openRecent(path: string): Promise<void> {
+  if (plugin ? !await backend.confirm('Replace this session\'s scene with a scene file?', 'Import')
+    : store.dirty && !await backend.confirm(`Discard unsaved changes and open ${path.split(/[\\/]/).pop()}?`, 'Discard')) return;
+  try {
+    const r = await backend.openScenePath(path);
+    if (r) loadOpened(r);
+  } catch (e) {
+    toast(`Could not open: ${e instanceof Error ? e.message : e}`, 'error');
+  }
+}
+
 function loadOpened(r: { path: string | null; scene: SceneDoc; raw: unknown }): void {
   store.audioInfo.clear();
   const doc = mergeEditorKeys(r.scene, r.raw);
@@ -254,6 +292,60 @@ async function saveScene(saveAs: boolean): Promise<void> {
   }
 }
 
+// ------------------------------------------------------- drag and drop
+
+// Where a drop at (x, y) in the page lands in the scene: on the drawing
+// plane under the pointer, or null outside the 3D view.
+function dropPoint(x: number, y: number): [number, number, number] | null {
+  const r = vp.renderer.domElement.getBoundingClientRect();
+  if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+  const h = store.scene.editor?.draw_height ?? 1.7;
+  const hit = vp.intersect({ clientX: x, clientY: y } as MouseEvent, vp.editPlane(new THREE.Vector3(0, h, 0)));
+  if (!hit || hit.length() > 500) return null;
+  return [hit.x, hit.y, hit.z];
+}
+
+// Mono and stereo audio files dropped on the window become layers where they
+// were dropped (on the ring around the start when dropped on the panels).
+async function dropAudio(paths: string[], x: number, y: number): Promise<void> {
+  if (plugin) { toast('In Logic each track is a layer: insert Spatial Panner on a track to add it.', 'info'); return; }
+  if (!paths.length) return;
+  const infos = await backend.audioInfo(paths);
+  const ok = [];
+  for (const i of infos) {
+    store.audioInfo.set(i.path, i);
+    if (i.error) toast(`${i.name}: ${i.error}`, 'error');
+    else if (i.channels > 2) toast(`${i.name} has ${i.channels} channels; drop takes mono and stereo files. Use Add audio files… in the Layers tab for it.`, 'warning');
+    else ok.push(i);
+  }
+  if (!ok.length) return;
+  sidebar.addLayers(ok, dropPoint(x, y) ?? undefined);
+  sidebar.setTab('layers');
+}
+
+backend.onDropFiles((d) => { viewportEl.classList.remove('file-drop'); void dropAudio(d.paths, d.x, d.y); });
+backend.onDropHover((over) => viewportEl.classList.toggle('file-drop', over));
+// The browser preview (npm run dev) gets the drop itself, with names only.
+if (backend.kind === 'dev') {
+  window.addEventListener('dragover', (e) => { e.preventDefault(); viewportEl.classList.add('file-drop'); });
+  window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) viewportEl.classList.remove('file-drop'); });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    viewportEl.classList.remove('file-drop');
+    const names = [...(e.dataTransfer?.files ?? [])].map((f) => f.name);
+    void dropAudio(names, e.clientX, e.clientY);
+  });
+}
+
+// The app's File menu (macOS menu bar).
+backend.onMenu((m) => {
+  if (m.action === 'new') void newScene();
+  else if (m.action === 'open') void openScene();
+  else if (m.action === 'save') void saveScene(false);
+  else if (m.action === 'saveAs') void saveScene(true);
+  else if (m.action === 'openRecent' && m.path) void openRecent(m.path);
+});
+
 // ------------------------------------------------------------ messages
 
 function toast(text: string, level: 'info' | 'warning' | 'error'): void {
@@ -264,22 +356,31 @@ function toast(text: string, level: 'info' | 'warning' | 'error'): void {
 
 // ------------------------------------------------------------ keyboard
 
+// Plugin: a key the editor leaves alone (no preventDefault) goes on to
+// Logic, which runs its own key command for it (the web view hands unhandled
+// keys back to the window). So the transport keys, Save and Open are Logic's
+// there, and a key the editor does use is marked handled so Logic's command
+// on the same key stays quiet.
 window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement;
   const typing = t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA');
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) store.redo(); else store.undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); store.redo(); return; }
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveScene(e.shiftKey); return; }
-  if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openScene(); return; }
+  if (mod && e.key.toLowerCase() === 's') { if (plugin) return; e.preventDefault(); saveScene(e.shiftKey); return; }
+  if (mod && e.key.toLowerCase() === 'o') { if (plugin) return; e.preventDefault(); openScene(); return; }
   if (typing || mod) return;
   // Transport: Enter returns to the beginning of the path, , and . step the
   // playhead (Space, play/pause, is the timeline's). While a line is being
   // drawn, Enter finishes it instead (the drawing tools run first and mark
-  // the event handled).
+  // the event handled). In the plugin these are Logic's keys: the plug-in
+  // hands them to Logic before the page sees them (WebViewKeys.mm); should
+  // one arrive here anyway, it is left alone.
   const transport = transportKeyAction(e);
+  if (plugin && (transport || e.code === 'Space')) return;
   if (transport) {
-    if (transport.kind === 'start') { if (e.defaultPrevented || tools.drawing) return; timeline.goToPathStart(); }
+    if (e.defaultPrevented) return;
+    if (transport.kind === 'start') { if (tools.drawing) return; timeline.goToPathStart(); }
     else timeline.nudge(transport.seconds);
     e.preventDefault();
     return;
@@ -287,9 +388,23 @@ window.addEventListener('keydown', (e) => {
   const toolKeys: Record<string, ToolName> = { v: 'select', f: 'freehand', l: 'polyline', c: 'curve', p: 'pen', s: 'shape' };
   const viewKeys: Record<string, ViewName> = { '1': 'persp', '2': 'top', '3': 'front', '4': 'side', '5': 'listener' };
   const k = e.key.toLowerCase();
-  if (toolKeys[k]) tools.setTool(toolKeys[k]);
-  else if (viewKeys[k]) setView(viewKeys[k]);
+  if (toolKeys[k]) { tools.setTool(toolKeys[k]); e.preventDefault(); }
+  else if (viewKeys[k]) { setView(viewKeys[k]); e.preventDefault(); }
+  else if (k === 'h') { homeView(); e.preventDefault(); }
 });
+
+// Plugin: while a text field has focus, Logic's transport keys are typed
+// into it; otherwise the plug-in hands them to Logic (WebViewKeys.mm).
+if (plugin) {
+  const editable = (t: EventTarget | null): boolean => {
+    const h = t as HTMLElement | null;
+    if (!h || !h.tagName) return false;
+    if (h.tagName === 'TEXTAREA' || h.isContentEditable) return true;
+    return h.tagName === 'INPUT' && !['checkbox', 'range', 'button', 'radio', 'file', 'color'].includes((h as HTMLInputElement).type);
+  };
+  document.addEventListener('focusin', (e) => { if (editable(e.target)) backend.editing(true).catch(() => { /* no native side */ }); });
+  document.addEventListener('focusout', (e) => { if (editable(e.target)) backend.editing(false).catch(() => { /* no native side */ }); });
+}
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });
 
@@ -311,4 +426,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project, dropAudio, openRecent };

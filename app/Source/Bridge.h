@@ -28,6 +28,25 @@ public:
     // editor picks it up when it starts (startupScene) or right away.
     void openFile(const juce::File& f);
 
+    // Audio files dropped on the window at (x, y) in the editor's pixels;
+    // the editor adds the mono and stereo ones as layers there.
+    void dropFiles(const juce::StringArray& paths, int x, int y);
+    // A file drag is over the window (true) or has left it (false).
+    void dropHover(bool over);
+    // A command from the app's menu bar: "new", "open", "save", "saveAs",
+    // or "openRecent" with the path.
+    void menuCommand(const juce::String& action, const juce::String& path = {});
+
+    // Recently opened and saved scenes, newest first. `settings` keeps them
+    // between launches (null in tests); `onRecentChanged` runs after a change.
+    void setSettings(juce::PropertiesFile* settings);
+    juce::StringArray recentScenes() const;
+    void clearRecentScenes();
+    std::function<void()> onRecentChanged;
+
+    // Scene files the app opens: its own .spscene, and .json from before.
+    static bool isSceneFile(const juce::File& f) { return f.hasFileExtension("spscene;json"); }
+
     // Exposed for tests: the functions without the WebView around them.
     std::string call(const std::string& name, const std::string& argJson, std::function<void(std::string)> async = {});
 
@@ -39,6 +58,7 @@ private:
     void chooseFile(const nlohmann::json& args, std::function<void(std::string)> done);
     void openScene(std::function<void(std::string)> done);
     std::string readScene(const juce::File& f);
+    void noteRecent(const juce::File& f);
     void saveScene(const std::string& arg, std::function<void(std::string)> done);
     void bounce(const std::string& arg, std::function<void(std::string)> done);
     void confirm(const nlohmann::json& args, std::function<void(std::string)> done);
@@ -54,6 +74,8 @@ private:
     juce::File lastDir_;
     juce::File pendingOpen_;
     bool pageReady_ = false;
+    juce::RecentlyOpenedFilesList recent_;
+    juce::PropertiesFile* settings_ = nullptr;
 };
 
 }  // namespace spapp

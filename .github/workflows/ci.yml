@@ -45,6 +45,14 @@ jobs:
       - name: Generate the demo signals (used by the demos and the editor tests)
         run: ./build/tools/gensignals/sp-gensignals signals --seconds 6
 
+      - name: Check the app claims .spscene files (Finder double-click)
+        if: runner.os == 'macOS'
+        run: |
+          plist="build/app/SpatialPannerApp_artefacts/Release/Spatial Panner.app/Contents/Info.plist"
+          plutil -lint "$plist"
+          plutil -p "$plist" | grep -q '"spscene"'
+          plutil -p "$plist" | grep -q 'com.spatialpanner.scene'
+
       - name: Check the plugin is a universal binary
         if: runner.os == 'macOS'
         run: lipo -info "build/plugin/SpatialPannerPlugin_artefacts/Release/AU/Spatial Panner.component/Contents/MacOS/Spatial Panner" | grep -q "x86_64 arm64\|arm64 x86_64"

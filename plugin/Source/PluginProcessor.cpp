@@ -579,6 +579,7 @@ void SpatialPannerProcessor::setStateInformation(const void* data, int size) {
 void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) {
     juce::ScopedNoDenormals noDenormals;
     const auto ticks0 = juce::Time::getHighResolutionTicks();
+    lastBlockTicks_ = ticks0;
     const int n = buffer.getNumSamples();
     const int nIn = getTotalNumInputChannels(), nOut = getTotalNumOutputChannels();
     if (n <= 0) return;
