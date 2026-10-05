@@ -44,6 +44,16 @@ export function pathStartTime(scene: SceneDoc): number {
   return Number.isFinite(t) && t > 0 ? t : 0;
 }
 
+// Speed keys count from the start of the path (the engine: Pose.cpp,
+// distanceAlongPath), so a key at 0 is the speed the listener sets off at,
+// whenever that is. The timeline shows absolute time; these convert.
+export function speedKeyTime(scene: SceneDoc, absolute: number): number {
+  return Math.max(0, Math.round((absolute - pathStartTime(scene)) * 20) / 20);
+}
+export function speedKeyAbsolute(scene: SceneDoc, keyTime: number): number {
+  return pathStartTime(scene) + keyTime;
+}
+
 // When the listener reaches the end of the path, as analysed by the engine;
 // the end of the scene until the analysis says.
 export function pathEndTime(analysis: Analysis | null, duration: number): number {
@@ -155,7 +165,7 @@ export class Timeline {
 
   private keysFor(lane: LaneId): { t: number; v: number }[] {
     const L = this.store.scene.listener;
-    if (lane === 'speed') return L.speed.map((k) => ({ t: k.time, v: k.speed }));
+    if (lane === 'speed') return L.speed.map((k) => ({ t: speedKeyAbsolute(this.store.scene, k.time), v: k.speed }));
     return L.head.keys.map((k) => ({ t: k.time, v: lane === 'yaw' ? k.yaw : k.pitch }));
   }
 
@@ -225,6 +235,21 @@ export class Timeline {
       ctx.fillText('Position is set by "Position along path" (Path tab), not by speed.', GUTTER + 10, lane.y + lane.h / 2);
     }
 
+    // The listener waits at the start of the path until path_start_time.
+    const start = pathStartTime(this.store.scene);
+    if (start > 0 && L.position_mode === 'speed') {
+      const lane = this.lanes()[0];
+      const sx = Math.min(w, this.x(start));
+      if (sx > GUTTER) {
+        ctx.fillStyle = 'rgba(24,27,33,0.6)';
+        ctx.fillRect(GUTTER, lane.y + 1, sx - GUTTER, lane.h - 1);
+      }
+      ctx.strokeStyle = '#5fd38d';
+      ctx.beginPath(); ctx.moveTo(sx + 0.5, RULER); ctx.lineTo(sx + 0.5, h); ctx.stroke();
+      ctx.fillStyle = '#5fd38d';
+      ctx.fillText('path start', sx + 3, RULER + 12);
+    }
+
     // Arrival at the end of the path.
     const a = this.store.analysis;
     if (a && a.arrival_time > 0) {
@@ -274,7 +299,7 @@ export class Timeline {
     for (let x = GUTTER; x <= w; x += 2) {
       const t = this.t(x);
       let v: number;
-      if (lane.id === 'speed') v = speedAt(L.speed, t);
+      if (lane.id === 'speed') v = speedAt(L.speed, t - pathStartTime(this.store.scene));
       else {
         if (!L.head.keys.length) { v = 0; }
         else { const h = headKeyAt(L.head.keys, t); v = lane.id === 'yaw' ? h.yaw : h.pitch; }
@@ -318,8 +343,10 @@ export class Timeline {
       return;
     }
     const upd = (fn: () => void) => this.store.update(() => { fn(); this.resortSelected(); }, `key-edit-${s.lane}-${s.index}`);
+    const fromStart = s.lane === 'speed' && pathStartTime(this.store.scene) > 0;
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'Key at'),
-      numberInput(key.time, (v) => upd(() => { key.time = Math.max(0, v); }), { step: 0.1, width: 56 }), el('span', { class: 'tl-unit' }, 's'));
+      numberInput(key.time, (v) => upd(() => { key.time = Math.max(0, v); }), { step: 0.1, width: 56 }),
+      el('span', { class: 'tl-unit' }, fromStart ? 's after the path starts' : 's'));
     if (s.lane === 'speed') {
       const k = key as SpeedKey;
       this.keyBar.append(numberInput(k.speed, (v) => upd(() => { k.speed = Math.max(0, v); }), { step: 0.1, width: 52, def: 1.4 }),
@@ -512,7 +539,7 @@ export class Timeline {
     this.store.update(() => {
       if (lane.id === 'speed') {
         const k = L.speed[d.sel.index];
-        k.time = t;
+        k.time = speedKeyTime(this.store.scene, t);
         k.speed = Math.round(v * 20) / 20;
       } else {
         const k = L.head.keys[d.sel.index];
@@ -540,7 +567,7 @@ export class Timeline {
     this.store.update(() => {
       if (lane.id === 'speed') {
         const easing: Easing = L.speed.length ? L.speed[0].easing : 'linear';
-        const k: SpeedKey = { time: t, speed: Math.max(0, Math.round(v * 20) / 20), easing };
+        const k: SpeedKey = { time: speedKeyTime(this.store.scene, t), speed: Math.max(0, Math.round(v * 20) / 20), easing };
         L.speed.push(k);
         sortKeys(L.speed);
         this.selKey = { lane: 'speed', index: L.speed.indexOf(k) };
@@ -568,7 +595,8 @@ export class Timeline {
   private key(e: KeyboardEvent): void {
     const t = e.target as HTMLElement;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
-    if (e.code === 'Space') { this.togglePlay(); e.preventDefault(); return; }
+    // Plugin: Space is Logic's play/stop; left alone, it reaches Logic.
+    if (e.code === 'Space') { if (this.backend.kind === 'plugin') return; this.togglePlay(); e.preventDefault(); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && this.focused && this.selKey) {
       this.deleteKey();
       e.preventDefault();

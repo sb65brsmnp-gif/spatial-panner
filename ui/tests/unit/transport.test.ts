@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FINE_STEP, STEP, pathEndTime, pathStartTime, steppedTime, transportKeyAction } from '../../src/panels/timeline';
+import { FINE_STEP, STEP, pathEndTime, pathStartTime, speedKeyAbsolute, speedKeyTime, steppedTime, transportKeyAction } from '../../src/panels/timeline';
 import { defaultScene } from '../../src/model/scene';
 import type { Analysis } from '../../src/model/store';
 
@@ -45,6 +45,23 @@ describe('transport targets', () => {
 
   it('the end of the path never lies past the end of the scene', () => {
     expect(pathEndTime(analysis(22), 10)).toBe(10);
+  });
+});
+
+describe('speed keys count from the start of the path', () => {
+  it('converts between the timeline and key times', () => {
+    const s = defaultScene();
+    s.listener.path_start_time = 6;
+    expect(speedKeyTime(s, 8)).toBe(2);
+    expect(speedKeyAbsolute(s, 2)).toBe(8);
+    expect(speedKeyTime(s, 3)).toBe(0);     // before the start: the first key
+    expect(speedKeyTime(s, 8.02)).toBe(2);  // snapped to 0.05 s
+  });
+
+  it('is the identity without a start time', () => {
+    const s = defaultScene();
+    expect(speedKeyTime(s, 8)).toBe(8);
+    expect(speedKeyAbsolute(s, 8)).toBe(8);
   });
 });
 

@@ -92,6 +92,11 @@ Drag the disc, or the listener figure, with the Select tool at any time to
 move the start; the active path moves with it and keeps its shape. Shift+drag
 moves it up or down.
 
+A newly drawn path starts at the playhead: *Start* on the Path tab is set to
+the time the playhead stood at, and the listener waits at the path's first
+point until then (the timeline shades the speed lane before the start and
+marks it). Draw with the playhead at 0 and the path starts at once.
+
 **Option-click resets**: Option-click any slider, number field, menu or
 checkbox to return it to its default (sliders also on double-click).
 Option-click a layer's ball or a stereo pair's centre handle to put it back
@@ -111,7 +116,9 @@ and forward (a click jumps 5 s, hold to scrub at 4x), stop, play/pause
 0.1 s with Shift. Click the ruler to seek. Three
 lanes hold keys for speed (m/s), head yaw and head pitch. Double-click a lane
 to add a key, drag to move it, Delete to remove it; the bar above the lanes
-edits the selected key's value and easing. Mouse wheel zooms. In the default
+edits the selected key's value and easing. Speed keys count from the start of
+the path (a key at 0 is the speed the listener sets off at, whenever the path
+starts); head keys are at scene time. Mouse wheel zooms. In the default
 *along path* head mode the yaw and pitch keys turn and tilt the head on top
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.

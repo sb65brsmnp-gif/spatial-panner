@@ -121,7 +121,14 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      **Track** menu on the Layers tab shows which track plays which layer.
      Duplicating a track in Logic puts the copy at the same position.
    * There is no transport. The editor's playhead follows Logic's, and you
-     play, stop, scrub and cycle in Logic.
+     play, stop, scrub and cycle in Logic. With the plug-in window in front,
+     the keys the editor does not use go on to Logic: Space plays and stops,
+     Return, `,` and `.` are Logic's go-to-beginning, rewind and forward,
+     Cmd+S saves the project (scene included). Keys the editor uses (tool
+     and view keys, Delete, Cmd+Z) stay in the editor.
+   * A path drawn while Logic stands at, say, bar 9 starts there: the
+     listener waits at the path's first point until the playhead reaches
+     the time the path was drawn at (*Start* on the Path tab).
    * **Import…** and **Export…** read and write the same scene files as
      the app (`.spscene`, and `.json` from before). On import, layers whose names match track names are bound
      to those tracks.

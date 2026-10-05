@@ -162,6 +162,34 @@ await check('scrubbing asks for Logic instead of moving the playhead', async () 
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'time moved');
 });
 
+await check('Space, Return, comma and Cmd+S are left to Logic; the editor marks its own keys handled', async () => {
+  const sent = async (init) => ed((init) => {
+    const e = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  }, init);
+  await ed(() => { window.__toasts = []; });
+  assert(!(await sent({ key: ' ', code: 'Space' })), 'Space taken from Logic');
+  assert(!(await sent({ key: 'Enter', code: 'Enter' })), 'Return taken from Logic');
+  assert(!(await sent({ key: ',', code: 'Comma' })), 'comma taken from Logic');
+  assert(!(await sent({ key: 's', code: 'KeyS', metaKey: true })), 'Cmd+S taken from Logic');
+  assert(await sent({ key: 'c', code: 'KeyC' }), 'tool key not marked handled');
+  assert(await ed(() => window.spEditor.tools.opts.tool) === 'curve', 'tool key ignored');
+  assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'Enter moved the playhead');
+  assert(await ed(() => window.__toasts.length) === 0, 'a hint was shown');
+  await ed(() => window.spEditor.tools.setTool('select'));
+});
+
+await check('a path drawn while Logic stands at 12.5 s starts there', async () => {
+  await page.keyboard.press('l');
+  for (const p of [[-4, 1.7, -4], [4, 1.7, -4], [4, 1.7, 4]]) await page.mouse.click(...(await ed((p) => window.spEditor.project(p), p)));
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.spEditor.store.scene.listener.paths.length === 1);
+  const start = await ed(() => window.spEditor.store.scene.listener.path_start_time);
+  assert(start === 12.5, `start ${start}`);
+  await page.waitForFunction(() => window.__host.doc.listener.path_start_time === 12.5);
+});
+
 await check('Clear asks through the plugin and only clears on OK', async () => {
   await page.locator('#toolbar >> text=Clear').click();
   await page.waitForFunction(() => window.__host.confirms.length === 1);

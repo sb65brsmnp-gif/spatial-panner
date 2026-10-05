@@ -339,6 +339,29 @@ await check('play advances time (simulated transport in the browser)', async () 
   await page.waitForFunction(() => !window.spEditor.store.playing, null, { timeout: 3000 });
 });
 
+await check('a path drawn at the playhead starts there; speed keys count from the start', async () => {
+  await ed(() => { window.spEditor.tools.setTool('select'); window.spEditor.store.setTime(6); });
+  await page.keyboard.press('l');
+  for (const p of [[-4, 1.7, -4], [4, 1.7, -4], [4, 1.7, 4]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  await waitAnalysis();
+  const r = await ed(() => ({ L: window.spEditor.store.scene.listener, a: window.spEditor.store.analysis, dt: window.spEditor.store.analysis.dt }));
+  assert(r.L.path_start_time === 6, `start ${r.L.path_start_time}`);
+  // The engine keeps the listener at the first point until the start time.
+  const at = (t) => r.a.poses[Math.round(t / r.dt)];
+  assert(Math.hypot(at(5)[0] - at(0)[0], at(5)[2] - at(0)[2]) < 1e-3, 'listener moved before the start');
+  assert(Math.hypot(at(9)[0] - at(0)[0], at(9)[2] - at(0)[2]) > 1, 'listener did not move after the start');
+  // A speed key placed at 8 s on the timeline is 2 s after the path starts.
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const lanes = (box.height - 22) / 3;
+  await page.mouse.dblclick(box.x + 96 + (8 / 20) * (box.width - 96), box.y + 22 + lanes - 8);
+  const keys = await ed(() => window.spEditor.store.scene.listener.speed.map((k) => k.time));
+  assert(keys.includes(2), `speed key times ${keys}`);
+  await page.keyboard.press('Enter');
+  assert(Math.abs(await ed(() => window.spEditor.store.time) - 6) < 1e-6, 'Enter did not go to the path start');
+  await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
+});
+
 await check('room tab edits the room', async () => {
   await page.click('.tab[data-tab=room]');
   const sizeX = page.locator('.vec3').first().locator('input').first();

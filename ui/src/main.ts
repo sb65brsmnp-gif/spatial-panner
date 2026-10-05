@@ -335,22 +335,28 @@ function toast(text: string, level: 'info' | 'warning' | 'error'): void {
 
 // ------------------------------------------------------------ keyboard
 
+// Plugin: a key the editor leaves alone (no preventDefault) goes on to
+// Logic, which runs its own key command for it (the web view hands unhandled
+// keys back to the window). So the transport keys, Save and Open are Logic's
+// there, and a key the editor does use is marked handled so Logic's command
+// on the same key stays quiet.
 window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement;
   const typing = t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA');
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) store.redo(); else store.undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); store.redo(); return; }
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveScene(e.shiftKey); return; }
-  if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openScene(); return; }
+  if (mod && e.key.toLowerCase() === 's') { if (plugin) return; e.preventDefault(); saveScene(e.shiftKey); return; }
+  if (mod && e.key.toLowerCase() === 'o') { if (plugin) return; e.preventDefault(); openScene(); return; }
   if (typing || mod) return;
   // Transport: Enter returns to the beginning of the path, , and . step the
   // playhead (Space, play/pause, is the timeline's). While a line is being
   // drawn, Enter finishes it instead (the drawing tools run first and mark
-  // the event handled).
+  // the event handled). In the plugin these are Logic's keys.
   const transport = transportKeyAction(e);
   if (transport) {
-    if (transport.kind === 'start') { if (e.defaultPrevented || tools.drawing) return; timeline.goToPathStart(); }
+    if (plugin || e.defaultPrevented) return;
+    if (transport.kind === 'start') { if (tools.drawing) return; timeline.goToPathStart(); }
     else timeline.nudge(transport.seconds);
     e.preventDefault();
     return;
@@ -358,8 +364,8 @@ window.addEventListener('keydown', (e) => {
   const toolKeys: Record<string, ToolName> = { v: 'select', f: 'freehand', l: 'polyline', c: 'curve', p: 'pen', s: 'shape' };
   const viewKeys: Record<string, ViewName> = { '1': 'persp', '2': 'top', '3': 'front', '4': 'side', '5': 'listener' };
   const k = e.key.toLowerCase();
-  if (toolKeys[k]) tools.setTool(toolKeys[k]);
-  else if (viewKeys[k]) setView(viewKeys[k]);
+  if (toolKeys[k]) { tools.setTool(toolKeys[k]); e.preventDefault(); }
+  else if (viewKeys[k]) { setView(viewKeys[k]); e.preventDefault(); }
 });
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });

@@ -525,7 +525,9 @@ export class Interaction {
     }
   }
 
-  // Adds drawn segments as a new path (or onto the active one) and makes it active.
+  // Adds drawn segments as a new path (or onto the active one) and makes it
+  // active. A new path starts at the playhead: the listener waits at its
+  // first point until then (in the plugin, the playhead is Logic's).
   private commit(segs: SegmentDoc[], closed: boolean): void {
     this.store.update((s) => {
       const L = s.listener;
@@ -540,6 +542,7 @@ export class Interaction {
         if (f) path.home = f;
         L.paths.push(path);
         L.active_path = L.paths.length - 1;
+        L.path_start_time = Math.max(0, Math.round(this.store.time * 100) / 100);
       }
     });
   }
