@@ -32,11 +32,11 @@ export interface Tick {
   meters?: number[];     // per-layer dBFS (post level, pre spatialisation)
   cpu?: number;
   host?: boolean;        // the host's playhead: follow it even while stopped
+  // Plugin: the host is running the plug-in (false while Logic stands still,
+  // unless the track is record-enabled or input-monitored); time and pose
+  // are then the last ones seen.
+  active?: boolean;
 }
-
-// A key press for the host's own key commands (plugin: Space, Return, comma
-// and period go to Logic's window).
-export interface HostKey { key: string; code: string; shift: boolean; alt: boolean; ctrl: boolean; meta: boolean }
 
 export interface BounceRequest { mode: OutputMode; layout: string; start: number; end: number; sampleRate: number }
 // Progress of a running bounce; `done` with or without `error` at the end.
@@ -49,8 +49,9 @@ export interface Backend {
   // (the plugin stores it in the host's project).
   setScene(scene: SceneDoc, duration: number, doc?: SceneDoc): Promise<{ ok: boolean; error?: string }>;
   transport(cmd: { action: 'play' | 'pause' | 'stop' | 'seek' | 'loop'; time?: number; loop?: boolean }): Promise<void>;
-  // Plugin: presses the key in the host's window (its transport commands).
-  hostKey(k: HostKey): Promise<{ ok: boolean; error?: string } | null>;
+  // Plugin: a text field has focus (or lost it); while it has, Logic's
+  // transport keys are typed into it instead of going to Logic.
+  editing(on: boolean): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
   // The native open dialog for audio files (several); `title` names the ask.
@@ -134,7 +135,7 @@ class AppBackend implements Backend {
     return this.call<{ ok: boolean; error?: string }>('setScene', doc ? { scene, duration, doc } : { scene, duration });
   }
   async transport(cmd: Parameters<Backend['transport']>[0]) { await this.call('transport', cmd); }
-  hostKey(k: HostKey) { return this.call<{ ok: boolean; error?: string } | null>('hostKey', k); }
+  async editing(on: boolean) { await this.call('editing', { on }); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
@@ -219,10 +220,8 @@ class DevBackend implements Backend {
       default: break;
     }
   }
-  async hostKey(k: HostKey) {
-    const w = window as unknown as { __hostKeys?: HostKey[] };
-    (w.__hostKeys ??= []).push(k);
-    return { ok: true };
+  async editing(on: boolean) {
+    (window as unknown as { __editing?: boolean }).__editing = on;
   }
   async setOutput(out: OutputConfig) { this.output = out; return { ok: true }; }
   async info(): Promise<EngineInfo> {

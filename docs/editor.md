@@ -120,7 +120,19 @@ lanes hold keys for speed (m/s), head yaw and head pitch. Double-click a lane
 to add a key, drag to move it, Delete to remove it; the bar above the lanes
 edits the selected key's value and easing. Speed keys count from the start of
 the path (a key at 0 is the speed the listener sets off at, whenever the path
-starts); head keys are at scene time. Mouse wheel zooms. In the default
+starts); head keys are at scene time. Mouse wheel zooms.
+
+The green **path start** line (when the listener sets off) and the red
+**path end** line (when it arrives, as the engine analyses it) drag. Dragging
+the start moves the walk in time: the speed curve and the end go with it,
+head keys stay. Dragging the end makes the walk faster or slower: the speed
+curve is stretched as a whole, so each key keeps its place in the walk and
+its speed scales. Cmd-drag over a time range selects the start, end and keys
+inside it (the bar above says what); drag the band to move them together,
+Delete removes the selected keys, Esc deselects. Moving a band that holds the
+start carries the speed curve and the end with it; one with the end but not
+the start stretches the curve; speed keys move on their own only when neither
+is in the band. In the default
 *along path* head mode the yaw and pitch keys turn and tilt the head on top
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.

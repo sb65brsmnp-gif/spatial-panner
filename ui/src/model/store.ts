@@ -38,6 +38,7 @@ export class Store {
   loop = false;
   livePose: number[] | null = null;  // pose from the audio engine while playing
   hostDriven = false;           // plugin: the host's playhead drives time and pose
+  hostActive = true;            // plugin: the host is running the plug-in (livePose is current)
   meters: number[] = [];        // per-layer dBFS
   filePath: string | null = null;
   dirty = false;
@@ -179,9 +180,11 @@ export class Store {
   }
 
   // Pose at the playhead: the audio engine's while playing (always, when the
-  // host drives it: its automation is not in the analysis), else the analysis.
+  // host drives it and runs the plug-in: its automation is not in the
+  // analysis), else the analysis. While Logic stands still it does not run
+  // the plug-in, so the engine's pose would not follow edits.
   poseAt(t: number): number[] | null {
-    if ((this.playing || this.hostDriven) && this.livePose) return this.livePose;
+    if ((this.playing || (this.hostDriven && this.hostActive)) && this.livePose) return this.livePose;
     const a = this.analysis;
     if (!a || !a.poses.length) return null;
     const f = t / a.dt;

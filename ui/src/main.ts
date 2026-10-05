@@ -196,6 +196,7 @@ backend.onTick((t) => {
   const host = !!t.host;
   const moved = host && Math.abs(t.time - store.time) > 1e-6;
   store.hostDriven = host;
+  store.hostActive = t.active !== false;
   store.playing = t.playing;
   if (t.playing || wasPlaying || host) store.time = t.time;
   store.livePose = t.pose ?? null;
@@ -372,16 +373,11 @@ window.addEventListener('keydown', (e) => {
   // Transport: Enter returns to the beginning of the path, , and . step the
   // playhead (Space, play/pause, is the timeline's). While a line is being
   // drawn, Enter finishes it instead (the drawing tools run first and mark
-  // the event handled). In the plugin these are Logic's keys: the plugin
-  // presses them in Logic's window (keys left to the web view die in the
-  // plug-in window, Logic does not take them from there).
+  // the event handled). In the plugin these are Logic's keys: the plug-in
+  // hands them to Logic before the page sees them (WebViewKeys.mm); should
+  // one arrive here anyway, it is left alone.
   const transport = transportKeyAction(e);
-  if (plugin && (transport || e.code === 'Space')) {
-    if (e.defaultPrevented) return;
-    e.preventDefault();
-    sendKeyToHost(e);
-    return;
-  }
+  if (plugin && (transport || e.code === 'Space')) return;
   if (transport) {
     if (e.defaultPrevented) return;
     if (transport.kind === 'start') { if (tools.drawing) return; timeline.goToPathStart(); }
@@ -397,14 +393,17 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'h') { homeView(); e.preventDefault(); }
 });
 
-let hostKeyWarned = 0;
-function sendKeyToHost(e: KeyboardEvent): void {
-  backend.hostKey({ key: e.key, code: e.code, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey }).then((r) => {
-    if (r && !r.ok && performance.now() - hostKeyWarned > 5000) {
-      hostKeyWarned = performance.now();
-      toast(r.error || 'Could not pass the key to Logic.', 'warning');
-    }
-  }).catch(() => { /* no native side */ });
+// Plugin: while a text field has focus, Logic's transport keys are typed
+// into it; otherwise the plug-in hands them to Logic (WebViewKeys.mm).
+if (plugin) {
+  const editable = (t: EventTarget | null): boolean => {
+    const h = t as HTMLElement | null;
+    if (!h || !h.tagName) return false;
+    if (h.tagName === 'TEXTAREA' || h.isContentEditable) return true;
+    return h.tagName === 'INPUT' && !['checkbox', 'range', 'button', 'radio', 'file', 'color'].includes((h as HTMLInputElement).type);
+  };
+  document.addEventListener('focusin', (e) => { if (editable(e.target)) backend.editing(true).catch(() => { /* no native side */ }); });
+  document.addEventListener('focusout', (e) => { if (editable(e.target)) backend.editing(false).catch(() => { /* no native side */ }); });
 }
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });

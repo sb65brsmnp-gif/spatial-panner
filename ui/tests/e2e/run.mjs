@@ -364,6 +364,72 @@ await check('a path drawn at the playhead starts there; speed keys count from th
   await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
 });
 
+await check('timeline: dragging the path end stretches the speed curve; dragging the start moves the walk', async () => {
+  // A walk that arrives: two speed keys (the earlier test left a near-stop).
+  await ed(() => window.spEditor.store.update((s) => { s.listener.speed = [{ time: 0, speed: 1.4, easing: 'linear' }, { time: 2, speed: 1, easing: 'linear' }]; }));
+  await waitAnalysis();
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const dur = await ed(() => window.spEditor.store.duration);
+  const xAt = (t) => box.x + 96 + (t / dur) * (box.width - 96);
+  const yEmpty = box.y + box.height - 6;   // bottom of the pitch lane: no keys there
+  const read = () => ed(() => ({ end: window.spEditor.store.analysis.arrival_time, start: window.spEditor.store.scene.listener.path_start_time,
+    speed: window.spEditor.store.scene.listener.speed.map((k) => [k.time, k.speed]) }));
+  const r0 = await read();
+  assert(r0.end > 1 && r0.end < dur, `arrival ${r0.end}`);
+  await page.mouse.move(xAt(r0.end), yEmpty);
+  await page.mouse.down();
+  await page.mouse.move(xAt(r0.end / 2), yEmpty, { steps: 8 });
+  await page.mouse.up();
+  await waitAnalysis();
+  const r1 = await read();
+  assert(Math.abs(r1.end - r0.end / 2) < 0.3, `end ${r0.end} -> ${r1.end}`);
+  for (let i = 0; i < r0.speed.length; i++) {
+    assert(Math.abs(r1.speed[i][0] - r0.speed[i][0] / 2) < 0.03, `key time ${r0.speed[i][0]} -> ${r1.speed[i][0]}`);
+    assert(Math.abs(r1.speed[i][1] - r0.speed[i][1] * 2) < 0.03, `key speed ${r0.speed[i][1]} -> ${r1.speed[i][1]}`);
+  }
+  await page.mouse.move(xAt(0) + 1, yEmpty);
+  await page.mouse.down();
+  await page.mouse.move(xAt(3), yEmpty, { steps: 8 });
+  await page.mouse.up();
+  await waitAnalysis();
+  const r2 = await read();
+  assert(Math.abs(r2.start - 3) < 0.1, `start ${r2.start}`);
+  assert(Math.abs(r2.end - r1.end - 3) < 0.3, `end ${r1.end} -> ${r2.end}`);
+  assert(JSON.stringify(r2.speed) === JSON.stringify(r1.speed), 'speed keys changed with the start');
+});
+
+await check('timeline: Cmd-drag selects a range; dragging it moves start, end, speed and head keys together', async () => {
+  await waitAnalysis();
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const dur = await ed(() => window.spEditor.store.duration);
+  const xAt = (t) => box.x + 96 + (t / dur) * (box.width - 96);
+  const yEmpty = box.y + box.height - 6;
+  const read = () => ed(() => { const L = window.spEditor.store.scene.listener; return { end: window.spEditor.store.analysis.arrival_time,
+    start: L.path_start_time, speed: L.speed.map((k) => k.time), head: L.head.keys.map((k) => k.time) }; });
+  const b = await read();
+  assert(b.head.length >= 1 && b.end + 3 < dur, `scene ${JSON.stringify(b)}`);
+  await page.keyboard.down('Meta');
+  await page.mouse.move(xAt(1), yEmpty);
+  await page.mouse.down();
+  await page.mouse.move(xAt(b.end + 1), yEmpty, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up('Meta');
+  await page.waitForFunction(() => document.querySelector('.tl-keybar').textContent.includes('path start, path end'));
+  await page.mouse.move(xAt(2), yEmpty);
+  await page.mouse.down();
+  await page.mouse.move(xAt(4), yEmpty, { steps: 8 });
+  await page.mouse.up();
+  await waitAnalysis();
+  const a = await read();
+  assert(Math.abs(a.start - b.start - 2) < 0.1, `start ${b.start} -> ${a.start}`);
+  assert(Math.abs(a.end - b.end - 2) < 0.3, `end ${b.end} -> ${a.end}`);
+  assert(JSON.stringify(a.speed) === JSON.stringify(b.speed), 'speed keys moved on their own');
+  for (let i = 0; i < b.head.length; i++) assert(Math.abs(a.head[i] - b.head[i] - 2) < 0.1, `head key ${b.head[i]} -> ${a.head[i]}`);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.querySelector('.tl-keybar').textContent.includes('selected'));
+  await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
+});
+
 await check('Home (H) returns to the default 3D view with the scene in frame', async () => {
   await ed(() => { const vp = window.spEditor.vp; vp.persp.position.set(0.5, 0.5, 0.5); vp.controls.target.set(0, 0.5, 0); vp.controls.update(); });
   await page.keyboard.press('h');

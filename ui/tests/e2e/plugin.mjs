@@ -74,9 +74,9 @@ await page.addInitScript(() => {
     audioInfo() { return []; },
     chooseAudioFiles() { return []; },
     confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
-    hostKey(k) { host.keys.push(k); return { ok: true }; },
+    editing(a) { host.editing.push(a.on); },
   };
-  host.keys = [];
+  host.editing = [];
   // "Reopening the window": a saved document from the last session.
   try {
     const saved = localStorage.getItem('e2e-doc');
@@ -102,7 +102,7 @@ await page.addInitScript(() => {
   };
   setInterval(() => {
     if (host.playing) host.time += 1 / 30;
-    fire('tick', { time: host.time, playing: host.playing, pose: [0, 1.7, 0, host.yaw, 0, 0, 0, 0], meters: [-12, -20], host: true });
+    fire('tick', { time: host.time, playing: host.playing, active: host.active !== false, pose: [0, 1.7, 0, host.yaw, 0, 0, 0, 0], meters: [-12, -20], host: true });
   }, 33);
 });
 
@@ -171,26 +171,32 @@ await check('scrubbing asks for Logic instead of moving the playhead', async () 
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'time moved');
 });
 
-await check('Space, Return, comma and period are pressed in Logic\'s window; Cmd+S is left to the menu', async () => {
+await check('Logic\'s transport keys are left alone (the plug-in passes them to Logic before the page); Cmd+S too', async () => {
   const sent = async (init) => ed((init) => {
     const e = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
     window.dispatchEvent(e);
     return e.defaultPrevented;
   }, init);
-  await ed(() => { window.__toasts = []; window.__host.keys = []; });
-  assert(await sent({ key: ' ', code: 'Space' }), 'Space not taken for Logic');
-  assert(await sent({ key: 'Enter', code: 'Enter' }), 'Return not taken for Logic');
-  assert(await sent({ key: ',', code: 'Comma' }), 'comma not taken for Logic');
-  assert(await sent({ key: '.', code: 'Period', shiftKey: true }), 'period not taken for Logic');
+  await ed(() => { window.__toasts = []; });
+  assert(!(await sent({ key: ' ', code: 'Space' })), 'Space taken from Logic');
+  assert(!(await sent({ key: 'Enter', code: 'Enter' })), 'Return taken from Logic');
+  assert(!(await sent({ key: ',', code: 'Comma' })), 'comma taken from Logic');
+  assert(!(await sent({ key: '.', code: 'Period', shiftKey: true })), 'period taken from Logic');
   assert(!(await sent({ key: 's', code: 'KeyS', metaKey: true })), 'Cmd+S taken from the menu');
   assert(await sent({ key: 'c', code: 'KeyC' }), 'tool key not marked handled');
   assert(await ed(() => window.spEditor.tools.opts.tool) === 'curve', 'tool key ignored');
-  await page.waitForFunction(() => window.__host.keys.length === 4);
-  const codes = await ed(() => window.__host.keys.map((k) => k.code + (k.shift ? '+shift' : '')));
-  assert(JSON.stringify(codes) === '["Space","Enter","Comma","Period+shift"]', JSON.stringify(codes));
   assert(Math.abs(await ed(() => window.spEditor.store.time) - 12.5) < 1e-6, 'Enter moved the playhead');
   assert(await ed(() => window.__toasts.length) === 0, 'a hint was shown');
   await ed(() => window.spEditor.tools.setTool('select'));
+});
+
+await check('a focused text field tells the plug-in, so typed keys stay in the page', async () => {
+  await ed(() => { window.__host.editing = []; });
+  await page.locator('.tl-bar input[type=number]').first().focus();
+  await page.waitForFunction(() => window.__host.editing.length === 1 && window.__host.editing[0] === true);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__host.editing.length === 2 && window.__host.editing[1] === false);
+  assert(await ed(() => document.activeElement === document.body), 'Escape left the field focused');
 });
 
 await check('a path drawn while Logic stands at 12.5 s starts there', async () => {
@@ -201,6 +207,27 @@ await check('a path drawn while Logic stands at 12.5 s starts there', async () =
   const start = await ed(() => window.spEditor.store.scene.listener.path_start_time);
   assert(start === 12.5, `start ${start}`);
   await page.waitForFunction(() => window.__host.doc.listener.path_start_time === 12.5);
+});
+
+await check('while Logic is idle the figure follows the start disc (the engine\'s pose is stale then)', async () => {
+  // Playing: the figure is where the engine says (0, 1.7, 0), whatever the path.
+  await ed(() => { window.__host.active = true; window.__host.time = 12.5; });
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.listener.position.x) < 1e-3);
+  // Idle: the editor evaluates the pose itself, so the figure sits on the path.
+  await ed(() => { window.__host.active = false; });
+  await page.waitForFunction(() => window.spEditor.view.listener.position.x < -3.9, null, { timeout: 5000 });
+  assert((await page.locator('.tl-idle').textContent()).includes('idle'), 'no idle hint');
+  await ed(() => window.spEditor.tools.setTool('select'));
+  const s0 = await ed(() => window.spEditor.store.scene.listener.paths[0].segments[0].points[0]);
+  const grab = [s0[0] + 0.3, 0, s0[2]];
+  await page.mouse.move(...(await ed((p) => window.spEditor.project(p), grab)));
+  await page.mouse.down();
+  await page.mouse.move(...(await ed((p) => window.spEditor.project(p), [grab[0] + 2, 0, grab[2]])), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForFunction((x0) => window.spEditor.store.scene.listener.paths[0].segments[0].points[0][0] > x0 + 1, s0[0]);
+  const s1 = await ed(() => window.spEditor.store.scene.listener.paths[0].segments[0].points[0]);
+  await page.waitForFunction((x) => Math.abs(window.spEditor.view.listener.position.x - x) < 0.1, s1[0], { timeout: 5000 });
+  await ed(() => { window.__host.active = true; window.__host.time = 12.5; });
 });
 
 await check('Clear asks through the plugin and only clears on OK', async () => {

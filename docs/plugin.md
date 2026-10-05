@@ -122,13 +122,23 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      Duplicating a track in Logic puts the copy at the same position.
    * There is no transport. The editor's playhead follows Logic's, and you
      play, stop, scrub and cycle in Logic. With the plug-in window in front,
-     Space, Return, `,` and `.` still run Logic's play/stop, go to
-     beginning, rewind and forward: Logic does not take keys from a plug-in
-     window, so the plug-in presses them in Logic's project window itself
-     (`plugin/Source/HostKeys.mm`: the project window is made key for the
-     key press and the plug-in window gets key status back). Cmd+S saves
-     the project (scene included) through the menu. Keys the editor uses
-     (tool and view keys, Delete, Cmd+Z) stay in the editor.
+     Space, Return, `,`, `.`, Home and End still run Logic's play/stop, go
+     to beginning, rewind, forward and so on: Logic runs its key commands
+     for a key the plug-in's view leaves unhandled (that is how every
+     plug-in window lets Space through, also when Logic hosts the plug-in in
+     its own process), but the editor's web view would take every key, so
+     `plugin/Source/WebViewKeys.mm` sends those keys straight up the
+     window's responder chain instead, unless a text field is focused (the
+     page tells the plug-in through the `editing` native function). Cmd+S
+     saves the project (scene included) through the menu. Keys the editor
+     uses (tool and view keys, Delete, Cmd+Z) stay in the editor.
+   * Logic runs a plug-in only while playing, or on a track that is
+     record-enabled or input-monitored. While Logic stands still the
+     plug-in sees neither the playhead nor its own listener pose, so the
+     editor keeps the last position it saw, says "Logic is idle" in the
+     timeline bar, and draws the listener figure from its own evaluation of
+     the scene (so edits such as moving the start still show). The tick
+     carries `active` for this.
    * A path drawn while Logic stands at, say, bar 9 starts there: the
      listener waits at the path's first point until the playhead reaches
      the time the path was drawn at (*Start* on the Path tab).

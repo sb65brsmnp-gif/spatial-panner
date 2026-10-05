@@ -6,7 +6,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include "BinaryData.h"
-#include "HostKeys.h"
+#include "WebViewKeys.h"
 #include "SceneDoc.h"
 #include "sp/Pose.h"
 #include "sp/SceneAnalysis.h"
@@ -113,7 +113,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "hostKey"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -148,6 +148,11 @@ private:
     }
 
     void timerCallback() override {
+#if JUCE_MAC
+        // Logic's transport keys go up to Logic (WebViewKeys.mm); the web
+        // view may be created late or again, so this is repeated every second.
+        if (ticks_++ % 30 == 0) passTransportKeysToHost(*this);
+#endif
         const auto tr = proc_.transport();
         const auto p = proc_.listenerPose();
         const auto tracks = proc_.hostTracks();
@@ -161,7 +166,10 @@ private:
                     if (t.id == id) db = t.meterDb;
                 meters.push_back(db);
             }
-        json j{{"time", tr.time}, {"playing", tr.playing}, {"pose", {p[0], p[1], p[2], p[3], p[4], p[5], 0, 0}},
+        // `active`: Logic is running the plug-in (it does not while stopped,
+        // unless the track is record-enabled or input-monitored); the time
+        // and pose are stale otherwise.
+        json j{{"time", tr.time}, {"playing", tr.playing}, {"active", tr.active}, {"pose", {p[0], p[1], p[2], p[3], p[4], p[5], 0, 0}},
                {"meters", meters}, {"cpu", proc_.cpuLoad()}, {"host", true}};
         emit("tick", j.dump());
     }
@@ -208,23 +216,14 @@ private:
             done(json{{"path", nullptr}, {"scene", d}, {"raw", d}}.dump());
             return;
         }
-        if (name == "hostKey") {
-            // Space, Return, comma, period: Logic's transport keys, pressed in
-            // Logic's window (HostKeys.mm).
+        if (name == "editing") {
+            // The page has a text field focused (or not): while it has,
+            // Logic's transport keys are typed into it instead of going to
+            // Logic (WebViewKeys.mm).
 #if JUCE_MAC
-            HostKey k;
-            k.key = a.value("key", std::string());
-            k.code = a.value("code", std::string());
-            k.shift = a.value("shift", false);
-            k.alt = a.value("alt", false);
-            k.ctrl = a.value("ctrl", false);
-            k.meta = a.value("meta", false);
-            std::string e;
-            const bool ok = sendKeyToHost(*this, k, e);
-            done(json{{"ok", ok}, {"error", e}}.dump());
-#else
-            done(json{{"ok", false}, {"error", "Keys reach the host on macOS only."}}.dump());
+            setTextEditing(a.value("on", false));
 #endif
+            done(json{{"ok", true}}.dump());
             return;
         }
         if (name == "confirm") {
@@ -326,6 +325,7 @@ private:
     std::unique_ptr<juce::WebBrowserComponent> browser_;
     std::unique_ptr<juce::FileChooser> chooser_;
     juce::File lastDir_;
+    unsigned ticks_ = 0;
 };
 
 // ================================================================ map (layer)

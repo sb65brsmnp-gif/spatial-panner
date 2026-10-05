@@ -40,7 +40,7 @@ set(SP_PLUGIN_SOURCES
 
 target_sources(SpatialPannerPlugin PRIVATE ${SP_PLUGIN_SOURCES} Source/PluginEditor.cpp)
 if(APPLE)
-  target_sources(SpatialPannerPlugin PRIVATE Source/HostKeys.mm)
+  target_sources(SpatialPannerPlugin PRIVATE Source/WebViewKeys.mm)
 endif()
 
 target_compile_definitions(SpatialPannerPlugin PUBLIC

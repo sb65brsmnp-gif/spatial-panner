@@ -51,6 +51,12 @@ export function numberInput(value: number, onChange: (v: number) => void, o: Num
     if (o.max !== undefined) v = Math.min(o.max, v);
     onChange(v);
   });
+  // Return and Escape leave the field (so keys go back to the editor, or to
+  // Logic in the plug-in); Return commits first, Escape puts the value back.
+  i.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { i.value = fmt(value); i.blur(); e.preventDefault(); }
+    else if (e.key === 'Enter') { i.blur(); e.preventDefault(); }
+  });
   if (o.def !== undefined) {
     const d = o.def;
     resetOnOptionClick(i, () => { i.value = fmt(d); onChange(d); });
