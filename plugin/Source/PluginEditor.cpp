@@ -519,7 +519,8 @@ void PluginEditor::refreshHeader() {
     const auto r = proc_.role();
     role_.setSelectedId(r == SpatialPannerProcessor::Role::Scene ? (proc_.sceneIsLayer() ? 2 : 3) : (r == SpatialPannerProcessor::Role::Layer ? 1 : 0),
                         juce::dontSendNotification);
-    status_.setText(proc_.statusText(), juce::dontSendNotification);
+    // The build (commit and date) so a report can say which one it is about.
+    status_.setText(proc_.statusText() + "  ·  build " SP_BUILD_ID, juce::dontSendNotification);
     const auto out = proc_.getBus(false, 0) ? proc_.getBus(false, 0)->getCurrentLayout() : juce::AudioChannelSet::stereo();
     const bool stereo = out == juce::AudioChannelSet::stereo();
     const bool pass = r == SpatialPannerProcessor::Role::Scene && !proc_.sceneIsLayer();

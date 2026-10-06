@@ -49,7 +49,8 @@ target_compile_definitions(SpatialPannerPlugin PUBLIC
   JUCE_USE_CURL=0
   JUCE_VST3_CAN_REPLACE_VST2=0
   JUCE_DISPLAY_SPLASH_SCREEN=0
-  SP_DEFAULT_HRTF="${SP_DEFAULT_HRTF}")
+  SP_DEFAULT_HRTF="${SP_DEFAULT_HRTF}"
+  SP_BUILD_ID="${SP_BUILD_ID}")
 
 target_link_libraries(SpatialPannerPlugin
   PRIVATE

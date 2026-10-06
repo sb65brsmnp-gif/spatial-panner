@@ -105,6 +105,9 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    * **Scene only**: this track holds the scene and passes its own audio
      through. Use this on an empty or aux track if you want the listener
      controls on a track of their own.
+   The status line ends with **build** and the commit and date the plug-in
+   was built from (`SP_BUILD_ID`, set by CI or from git), so a report can
+   say which build it is about.
 
    One scene per session. Choosing Scene on another track takes the scene
    over: the document moves with it, and the old scene track becomes a

@@ -23,6 +23,19 @@ option(SP_BUILD_APP   "Build the standalone app (JUCE + the editor UI; needs npm
 option(SP_BUILD_PLUGIN "Build the plugin (AUv2 on macOS; needs SP_BUILD_APP for the editor UI)" ON)
 option(SP_WITH_STEAM_AUDIO "Build Steam Audio from source for ray-traced reflections and occlusion" ON)
 
+# Which build this is, shown in the plug-in's header: the commit and the
+# date (CI passes it; a local build takes it from git).
+if(NOT SP_BUILD_ID)
+  execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                  OUTPUT_VARIABLE SP_GIT_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  string(TIMESTAMP SP_BUILD_DATE "%Y-%m-%d" UTC)
+  if(SP_GIT_SHORT)
+    set(SP_BUILD_ID "${SP_GIT_SHORT} ${SP_BUILD_DATE}")
+  else()
+    set(SP_BUILD_ID "local ${SP_BUILD_DATE}")
+  endif()
+endif()
+
 include(cmake/Dependencies.cmake)
 if(SP_WITH_STEAM_AUDIO)
   include(cmake/SteamAudio.cmake)
