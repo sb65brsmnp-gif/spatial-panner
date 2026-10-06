@@ -123,3 +123,9 @@ input.num { width: 64px; }
 .recent-item:hover { background: #2c3340; }
 .recent-clear { border-top: 1px solid #2c323c; border-radius: 0; color: #8a94a6; margin-top: 2px; }
 .recent-empty { padding: 5px 8px; color: #8a94a6; }
+
+/* Plugin: the window's resize grip (bottom-right corner), drawn by the page. */
+.resize-grip { position: fixed; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 60; touch-action: none;
+  background: linear-gradient(135deg, transparent 0 50%, var(--muted) 50% 58%, transparent 58% 70%, var(--muted) 70% 78%, transparent 78% 90%, var(--muted) 90%);
+  opacity: 0.7; }
+.resize-grip:hover { opacity: 1; }

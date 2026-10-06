@@ -148,8 +148,10 @@ export class Sidebar {
   private renderLayers(): void {
     const s = this.store.scene;
     if (this.plugin) {
+      const strays = s.layers.filter((l) => !this.trackName(l.host_id)).length;
       this.body.append(el('p', { class: 'hint' }, s.layers.length
         ? 'Each track running Spatial Panner plays its layer. Drag layers in the 3D view to place them.'
+          + (strays ? ' A layer marked "no track" has no running track: select it and press Remove layer if it is not wanted.' : '')
         : 'Insert Spatial Panner on a track to add it here as a layer. Each track plays its own layer.'));
       if (!s.layers.length) return;
     } else {
@@ -179,7 +181,7 @@ export class Sidebar {
       const unbound = this.plugin && !this.trackName(l.host_id);
       const name = el('span', { class: 'layer-name' + (unbound ? ' muted' : ''),
         title: this.plugin ? (unbound ? 'No track plays this layer' : `Track: ${this.trackName(l.host_id)}`) : l.audio || 'no audio file' },
-        l.name || `Layer ${i + 1}`);
+        (l.name || `Layer ${i + 1}`) + (unbound ? ' (no track)' : ''));
       const mute = el('button', { class: 'ms' + (l.mute ? ' on mute' : ''), title: 'Mute' }, 'M');
       mute.addEventListener('click', (e) => { e.stopPropagation(); this.upd((sc) => { sc.layers[i].mute = !sc.layers[i].mute; }); });
       const solo = el('button', { class: 'ms' + (l.solo ? ' on solo' : ''), title: 'Solo' }, 'S');

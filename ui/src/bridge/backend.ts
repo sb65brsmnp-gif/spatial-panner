@@ -52,6 +52,9 @@ export interface Backend {
   // Plugin: a text field has focus (or lost it); while it has, Logic's
   // transport keys are typed into it instead of going to Logic.
   editing(on: boolean): Promise<void>;
+  // Plugin: the page's corner grip asks the host window for a new size of
+  // the page area (CSS pixels); the plug-in clamps it to its limits.
+  resize(width: number, height: number): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
   info(): Promise<EngineInfo>;
   // The native open dialog for audio files (several); `title` names the ask.
@@ -136,6 +139,7 @@ class AppBackend implements Backend {
   }
   async transport(cmd: Parameters<Backend['transport']>[0]) { await this.call('transport', cmd); }
   async editing(on: boolean) { await this.call('editing', { on }); }
+  async resize(width: number, height: number) { await this.call('resize', { width: Math.round(width), height: Math.round(height) }); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
@@ -223,6 +227,7 @@ class DevBackend implements Backend {
   async editing(on: boolean) {
     (window as unknown as { __editing?: boolean }).__editing = on;
   }
+  async resize() { /* the browser window is the user's to size */ }
   async setOutput(out: OutputConfig) { this.output = out; return { ok: true }; }
   async info(): Promise<EngineInfo> {
     return { device: 'Browser preview (no audio)', sampleRate: 48000, outputChannels: 2, cpu: 0, output: this.output, status: 'Preview' };

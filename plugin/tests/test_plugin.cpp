@@ -48,10 +48,12 @@ struct FreshSession {
     FreshSession() {
         SharedSession::detachAllForTesting();
         SpatialPannerProcessor::setSessionPathForTesting(file.getFile().getFullPathName().toStdString());
+        SpatialPannerProcessor::setAdoptDelaysForTesting(0, 0);
     }
     ~FreshSession() {
         SharedSession::detachAllForTesting();
         SpatialPannerProcessor::setSessionPathForTesting({});
+        SpatialPannerProcessor::setAdoptDelaysForTesting(1000, 5000);
     }
 };
 
@@ -150,6 +152,29 @@ TEST_CASE("A new instance holds the scene when there is none; later ones are lay
         pump(700);
         c->tickForTesting();
         CHECK(c->role() == SpatialPannerProcessor::Role::Layer);
+    }
+
+    SECTION("an undecided instance claims no layer slot: its saved id may still be on the way") {
+        auto c = std::make_unique<SpatialPannerProcessor>();
+        c->tickForTesting();
+        CHECK(c->role() == SpatialPannerProcessor::Role::Undecided);
+        for (const auto& l : a->session().liveLayers(5000, false)) CHECK(l.id != c->layerId());
+        a->tickForTesting();
+        CHECK(a->sceneDoc()["layers"].size() == 2);
+    }
+
+    SECTION("a slot becomes a layer only once it has been alive for a while") {
+        // Logic makes short-lived instances while loading a project; one that
+        // comes and goes within the wait leaves nothing behind.
+        SpatialPannerProcessor::setAdoptDelaysForTesting(300, 300);
+        auto c = makeInstance(ph);
+        c->setRole(SpatialPannerProcessor::Role::Layer);
+        tickAll({c.get(), a.get()}, 2);
+        CHECK(a->sceneDoc()["layers"].size() == 2);
+        pump(350);
+        tickAll({c.get(), a.get()}, 2);
+        CHECK(a->sceneDoc()["layers"].size() == 3);
+        CHECK(doc::layerIndex(a->sceneDoc(), c->layerId()) >= 0);
     }
 }
 

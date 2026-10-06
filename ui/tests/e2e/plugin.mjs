@@ -75,8 +75,10 @@ await page.addInitScript(() => {
     chooseAudioFiles() { return []; },
     confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
     editing(a) { host.editing.push(a.on); },
+    resize(a) { host.resizes.push([a.width, a.height]); },
   };
   host.editing = [];
+  host.resizes = [];
   // "Reopening the window": a saved document from the last session.
   try {
     const saved = localStorage.getItem('e2e-doc');
@@ -276,6 +278,33 @@ await check('reopened with an outdoor room and one layer, the 3D view can still 
   const want = [14, 13, 18].map((v) => v / Math.hypot(14, 13, 18));
   assert(home.every((v, i) => Math.abs(v - want[i]) < 1e-3), `Home direction ${home}`);
   assert(d2 > 5, `Home distance ${d2}`);
+});
+
+await check('dragging the corner grip asks the plug-in for a new window size', async () => {
+  const grip = page.locator('.resize-grip');
+  assert(await grip.count() === 1, 'no grip');
+  const box = await grip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + 60, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const sizes = await ed(() => window.__host.resizes);
+  assert(sizes.length >= 1, 'no resize request');
+  const [w, h] = sizes[sizes.length - 1];
+  assert(w >= 1440 + 100 && h >= 900 + 40, `asked for ${w}x${h}`);
+});
+
+await check('a layer whose track is gone is marked, with the hint on removing it', async () => {
+  await ed(() => { window.__host.tracks = window.__host.tracks.filter((t) => t.id !== 't-vox'); });
+  await page.waitForTimeout(2300);  // the sidebar re-reads the track list every 2 s
+  await page.click('.tab[data-tab="path"]');
+  await page.click('.tab[data-tab="layers"]');
+  await page.waitForTimeout(200);
+  const names = await page.locator('#sidebar .layer-name').allTextContents();
+  assert(names.some((n) => n.includes('Vox (no track)')), `names ${names}`);
+  const hint = await page.locator('#sidebar .hint').first().textContent();
+  assert(hint.includes('Remove layer'), `hint ${hint}`);
 });
 
 await page.screenshot({ path: resolve(outDir, 'plugin-mode.png') });

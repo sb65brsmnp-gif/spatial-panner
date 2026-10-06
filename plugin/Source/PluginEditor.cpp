@@ -94,6 +94,8 @@ json audioInfoJson(const juce::File& f) {
 
 }  // namespace
 
+constexpr int kHeaderHeight = 40;
+
 // ============================================================ 3D editor (scene)
 
 class SceneWebView : public juce::Component, private juce::Timer {
@@ -113,7 +115,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing", "resize"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -141,6 +143,10 @@ public:
     }
 
     void resized() override { browser_->setBounds(getLocalBounds()); }
+
+    // The page's corner grip asks for a new size of this view (CSS pixels,
+    // which are JUCE pixels); the editor turns it into a window size.
+    std::function<void(int, int)> onResizeRequest;
 
 private:
     void emit(const char* id, const std::string& j) {
@@ -223,6 +229,14 @@ private:
 #if JUCE_MAC
             setTextEditing(a.value("on", false));
 #endif
+            done(json{{"ok", true}}.dump());
+            return;
+        }
+        if (name == "resize") {
+            // The window's resize grip lives in the page: JUCE's own corner
+            // resizer is painted underneath the web view, where it cannot be
+            // reached, and Logic sizes the plug-in window from the view.
+            if (onResizeRequest) onResizeRequest(a.value("width", 0), a.value("height", 0));
             done(json{{"ok", true}}.dump());
             return;
         }
@@ -503,6 +517,10 @@ void PluginEditor::rebuildContent() {
         web_ = std::make_unique<SceneWebView>(proc_);
         addAndMakeVisible(*web_);
         setResizeLimits(900, 560, 2560, 1600);
+        web_->onResizeRequest = [this](int w, int h) {
+            if (w <= 0 || h <= 0) return;
+            setSize(juce::jlimit(900, 2560, w), juce::jlimit(560, 1600, h + kHeaderHeight));
+        };
         setSize(1320, 840);
     } else if (!scene && !map_) {
         web_.reset();
@@ -540,7 +558,7 @@ void PluginEditor::paint(juce::Graphics& g) { g.fillAll(kPanel); }
 
 void PluginEditor::resized() {
     auto area = getLocalBounds();
-    auto header = area.removeFromTop(40).reduced(8, 6);
+    auto header = area.removeFromTop(kHeaderHeight).reduced(8, 6);
     role_.setBounds(header.removeFromLeft(std::min(390, header.getWidth() / 2)));
     header.removeFromLeft(8);
     if (output_.isVisible()) output_.setBounds(header.removeFromLeft(180));

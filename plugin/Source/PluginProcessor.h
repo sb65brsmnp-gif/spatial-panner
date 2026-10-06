@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 
@@ -100,6 +101,9 @@ public:
 
     // ---- tests
     static void setSessionPathForTesting(const std::string& path);
+    // How long a live layer slot must have existed before the scene turns it
+    // into a layer (named / unnamed), in ms; the defaults are 1000 and 5000.
+    static void setAdoptDelaysForTesting(int namedMs, int unnamedMs);
     void tickForTesting() { timerCallback(); }
     LayerEngine& engineForTesting() { return engine_; }
     juce::AudioProcessorValueTreeState& parametersForTesting() { return params_; }
@@ -111,6 +115,7 @@ private:
     void becomeScene(bool force);
     void becomeLayer();
     void manageSlot();
+    std::vector<SharedSession::LayerInfo> adoptableLayers();
     void adoptPublishedScene();
     void applyDocToEngine(const nlohmann::json& doc);
     void publish();
@@ -136,6 +141,7 @@ private:
     std::string historyText_;         // restored automation history, written on becoming the scene
     uint64_t seenRevision_ = 0;
     uint32_t seenGeneration_ = 0;
+    std::map<std::string, uint32_t> seenSince_;   // scene: live layer ids and when each was first seen
     bool needsPublish_ = false;
     juce::String status_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);   // for callAsync from host threads

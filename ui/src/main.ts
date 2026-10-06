@@ -418,6 +418,29 @@ if (plugin) {
   };
   document.addEventListener('focusin', (e) => { if (editable(e.target)) backend.editing(true).catch(() => { /* no native side */ }); });
   document.addEventListener('focusout', (e) => { if (editable(e.target)) backend.editing(false).catch(() => { /* no native side */ }); });
+
+  // The window's resize grip. JUCE's own corner resizer is painted under
+  // the web view, so the page draws one and asks the plug-in for the size.
+  const grip = el('div', { class: 'resize-grip', title: 'Drag to resize the window' });
+  document.body.append(grip);
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const start = { x: e.clientX, y: e.clientY, w: window.innerWidth, h: window.innerHeight };
+    let want: [number, number] | null = null;
+    let sending = false;
+    const send = () => {
+      if (sending || !want) return;
+      sending = true;
+      const [w, h] = want;
+      want = null;
+      backend.resize(w, h).catch(() => { /* no native side */ }).finally(() => { sending = false; send(); });
+    };
+    const move = (ev: PointerEvent) => { want = [start.w + ev.clientX - start.x, start.h + ev.clientY - start.y]; send(); };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
 }
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });

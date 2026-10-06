@@ -347,7 +347,7 @@ bool SpatialPannerProcessor::setSceneDoc(const json& d, std::string& error) {
         if (std::abs(f - fractionOf(doc_)) > 1e-6)
             if (auto* p = params_.getParameter("position")) p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(f * 100.0)));
         doc_ = d;
-        changedByPlugin = doc::reconcile(doc_, session_->liveLayers(5000, false));
+        changedByPlugin = doc::reconcile(doc_, adoptableLayers());
         copy = doc_;
     }
     publish();
@@ -432,6 +432,10 @@ void SpatialPannerProcessor::decideRole() {
 }
 
 void SpatialPannerProcessor::manageSlot() {
+    // Nothing is claimed until the role is known: a new instance only learns
+    // its saved layer id when the host restores its state, and a slot claimed
+    // before that (under a random id) would become a stray layer in the scene.
+    if (role_ == Role::Undecided) return;
     const bool want = role_ != Role::Scene || sceneIsLayer_;
     if (!want) {
         if (slot_ >= 0) session_->releaseSlot(slot_, token_);
@@ -462,6 +466,36 @@ void SpatialPannerProcessor::manageSlot() {
         slotChannels_ = ch;
     }
     slotForAudio_ = slot_;
+}
+
+namespace {
+int gAdoptNamedMs = 1000, gAdoptUnnamedMs = 5000;
+}
+
+void SpatialPannerProcessor::setAdoptDelaysForTesting(int namedMs, int unnamedMs) {
+    gAdoptNamedMs = namedMs;
+    gAdoptUnnamedMs = unnamedMs;
+}
+
+// The live layer slots the scene may turn into layers (docLock_ held). A
+// slot has to have been alive for a while first: Logic creates short-lived
+// instances while it loads a project (each claims a slot and goes away), and
+// a slot adopted in that moment stayed in the scene for good as an unnamed
+// "Layer N". A named slot (Logic names the track at once) waits 1 s, an
+// unnamed one 5 s; a slot whose layer the scene already has is always kept.
+std::vector<SharedSession::LayerInfo> SpatialPannerProcessor::adoptableLayers() {
+    const uint32_t now = juce::Time::getMillisecondCounter();
+    std::map<std::string, uint32_t> seen;
+    std::vector<SharedSession::LayerInfo> out;
+    for (auto& l : session_->liveLayers(5000, false)) {
+        const auto it = seenSince_.find(l.id);
+        const uint32_t since = it == seenSince_.end() ? now : it->second;
+        seen[l.id] = since;
+        const int wait = l.name.empty() ? gAdoptUnnamedMs : gAdoptNamedMs;
+        if (static_cast<int>(now - since) >= wait || doc::layerIndex(doc_, l.id) >= 0) out.push_back(std::move(l));
+    }
+    seenSince_ = std::move(seen);
+    return out;
 }
 
 void SpatialPannerProcessor::updateTrackProperties(const TrackProperties& p) {
@@ -512,7 +546,7 @@ void SpatialPannerProcessor::timerCallback() {
         json copy;
         {
             const juce::ScopedLock l(docLock_);
-            changed = doc::reconcile(doc_, session_->liveLayers(5000, false));
+            changed = doc::reconcile(doc_, adoptableLayers());
             if (changed) copy = doc_;
         }
         if (changed) needsPublish_ = true;

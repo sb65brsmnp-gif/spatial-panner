@@ -123,6 +123,13 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    * Each track is a layer. The layer is named after the track, and the
      **Track** menu on the Layers tab shows which track plays which layer.
      Duplicating a track in Logic puts the copy at the same position.
+     A track becomes a layer once its instance has announced itself for a
+     second (five seconds when the host has not named the track yet): Logic
+     creates short-lived instances while it loads a project, and a new
+     instance only learns its saved layer id when Logic restores its state,
+     so adopting instances at once left unnamed stray layers behind. A layer
+     whose track is gone stays, marked "(no track)" on the Layers tab, with
+     its placement; **Remove layer** in its details deletes it.
    * There is no transport. The editor's playhead follows Logic's, and you
      play, stop, scrub and cycle in Logic. With the plug-in window in front,
      Space, Return, `,`, `.`, Home and End still run Logic's play/stop, go
@@ -135,6 +142,16 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      page tells the plug-in through the `editing` native function). Cmd+S
      saves the project (scene included) through the menu. Keys the editor
      uses (tool and view keys, Delete, Cmd+Z) stay in the editor.
+     Logic's out-of-process hosting hands the same key-down event to the
+     view twice (the second copy after the key-up), and each copy that goes
+     up unhandled toggles Logic's transport once, so Space played and
+     stopped again; the second copy of an event is swallowed. Every key the
+     view receives is appended to `~/Library/Logs/Spatial Panner/keys.log`
+     with the call path that delivered it.
+   * The window is resized with the grip in the page's bottom-right corner
+     (the page calls the `resize` native function; JUCE's own corner
+     resizer sits underneath the web view, where it cannot be reached).
+     Logic sizes the plug-in window from the view.
    * Logic runs a plug-in only while playing, or on a track that is
      record-enabled or input-monitored. While Logic stands still the
      plug-in sees neither the playhead nor its own listener pose, so the
