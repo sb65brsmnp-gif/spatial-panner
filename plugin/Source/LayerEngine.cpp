@@ -25,7 +25,14 @@ bool sameLayout(const sp::SpeakerLayout& a, const sp::SpeakerLayout& b) {
 float headroomDistance(const sp::Scene& s) {
     float r = 5.0f;
     auto grow = [&](const sp::Vec3& p) { r = std::max(r, p.length()); };
-    for (const auto& l : s.layers) grow(l.position);
+    for (const auto& l : s.layers) {
+        grow(l.position);
+        // A layer's path carries it from its place by the path's shape.
+        if (!l.motion.hasPath() || l.motion.path.segments.front().points.empty()) continue;
+        const sp::Vec3 p0 = l.motion.path.segments.front().points.front();
+        for (const auto& seg : l.motion.path.segments)
+            for (const auto& q : seg.points) grow(l.position + (q - p0));
+    }
     for (const auto& p : s.listener.paths)
         for (const auto& seg : p.segments)
             for (const auto& q : seg.points) grow(q);
