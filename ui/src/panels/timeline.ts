@@ -17,13 +17,13 @@
 // holding scrubs at 4x), stop, play/pause (Space), end of path; , and . step
 // the playhead 1 s (0.1 s with Shift).
 import type { Analysis, Store } from '../model/store';
-import { EASINGS, headKeyAt, sortKeys, speedAt, pathKeyAt, levelAt, hasPath, SILENT_DB, type Easing, type HeadKey, type LayerDoc, type SceneDoc, type SpeedKey } from '../model/scene';
+import { EASINGS, headKeyAt, sortKeys, speedAt, pathKeyAt, levelAt, hasPath, isLinked, linkedAt, SILENT_DB, type Easing, type HeadKey, type LayerDoc, type SceneDoc, type SpeedKey } from '../model/scene';
 import { layerArrival, layerOfPath, layerPathLength, stretchSpeed } from '../model/layerMotion';
 import type { Backend } from '../bridge/backend';
 import { el, fmtTime, numberInput, select } from './dom';
 
-type LaneId = 'speed' | 'yaw' | 'pitch' | 'lmove' | 'llevel';
-interface AnyKey { time: number; easing: Easing; level_db?: number; fraction?: number }
+type LaneId = 'speed' | 'yaw' | 'pitch' | 'lmove' | 'llevel' | 'llink';
+interface AnyKey { time: number; easing?: Easing; level_db?: number; fraction?: number; linked?: boolean }
 // How a lane's keys are read and written: absolute time and shown value.
 interface KeyAccess {
   keys: AnyKey[];
@@ -39,7 +39,7 @@ interface KeyAccess {
 // layer's (speed timing).
 interface Walk { start: number; end: number | null; setStart(s: SceneDoc, t: number): void; stretch(s: SceneDoc, from: number, to: number): void }
 const LEVEL_MIN = -60;  // the bottom of the level lane: silence
-interface Lane { id: LaneId; label: string; y: number; h: number; min: number; max: number; unit: string }
+interface Lane { id: LaneId; label: string; y: number; h: number; min: number; max: number; unit: string; marks?: [string, string] }
 interface KeySel { lane: LaneId; index: number }
 
 const GUTTER = 96;
@@ -266,12 +266,17 @@ export class Timeline {
     const h = this.canvas.clientHeight - RULER;
     const l = this.layer;
     if (l) {
-      const lh = Math.max(30, Math.floor(h / 2));
+      // A linked layer gets a third, step lane: linked (1) or not (0).
+      const linked = isLinked(l);
+      const kh = linked ? Math.max(26, Math.floor(h / 4)) : 0;
+      const lh = Math.max(30, Math.floor((h - kh) / 2));
       const m = l.motion;
       const move: Lane = m?.timing === 'keys'
         ? { id: 'lmove', label: 'Path %', y: RULER, h: lh, min: 0, max: 100, unit: '%' }
         : { id: 'lmove', label: 'Layer speed', y: RULER, h: lh, min: 0, max: Math.ceil(Math.max(3, ...(m?.speed ?? []).map((k) => k.speed * 1.2))), unit: 'm/s' };
-      return [move, { id: 'llevel', label: 'Layer level', y: RULER + lh, h: h - lh, min: LEVEL_MIN, max: 12, unit: 'dB' }];
+      const lanes: Lane[] = [move, { id: 'llevel', label: 'Layer level', y: RULER + lh, h: h - lh - kh, min: LEVEL_MIN, max: 12, unit: 'dB' }];
+      if (linked) lanes.push({ id: 'llink', label: 'Link', y: RULER + (h - kh), h: kh, min: 0, max: 1, unit: '', marks: ['free', 'linked'] });
+      return lanes;
     }
     const lh = Math.max(30, Math.floor(h / 3));
     const keys = this.store.scene.listener.speed;
@@ -324,6 +329,14 @@ export class Timeline {
     }
     const l = scene.layers[this.layerIndex()];
     if (!l) return null;
+    if (lane === 'llink') {
+      if (!isLinked(l)) return null;
+      const link = l.link!;
+      return { keys: link.keys, abs: (k) => k.time, setAbs: (k, t) => { k.time = t; },
+        val: (k) => (k.linked ? 1 : 0), setVal: (k, v) => { k.linked = v >= 0.5; },
+        make: (t, v) => ({ time: t, linked: v >= 0.5 }) as AnyKey,
+        def: 1, curve: (t) => (linkedAt(link, t) ? 1 : 0) };
+    }
     if (lane === 'llevel') {
       const keys = l.level_keys ?? [];
       const lv = (v: number) => (v <= LEVEL_MIN + 0.5 ? SILENT_DB : Math.min(12, r(v, 2)));
@@ -409,9 +422,13 @@ export class Timeline {
       ctx.fillStyle = '#c9d1dc';
       ctx.fillText(lane.label, 8, lane.y + 16);
       ctx.fillStyle = '#6f7889';
-      ctx.fillText(`${lane.max}${lane.unit}`, 8, lane.y + 30);
-      ctx.fillText(`${lane.min}${lane.unit}`, 8, lane.y + lane.h - 6);
-      if (lane.id !== 'speed') {
+      if (lane.marks) {
+        ctx.fillText(lane.marks[1], 8, lane.y + lane.h - 6 - (lane.h - 12) * 0.5 + 4);
+      } else {
+        ctx.fillText(`${lane.max}${lane.unit}`, 8, lane.y + 30);
+        ctx.fillText(`${lane.min}${lane.unit}`, 8, lane.y + lane.h - 6);
+      }
+      if (lane.id !== 'speed' && lane.id !== 'llink') {
         const zy = this.y(lane, 0);
         ctx.strokeStyle = '#323844';
         ctx.setLineDash([3, 3]);
@@ -543,7 +560,7 @@ export class Timeline {
     const acc = this.access(lane.id);
     if (!acc) return;
     const head = lane.id === 'yaw' || lane.id === 'pitch';
-    const color = lane.id === 'speed' || lane.id === 'lmove' ? '#5fd38d' : lane.id === 'yaw' ? '#56ccf2' : lane.id === 'llevel' ? '#f2c94c' : '#bb6bd9';
+    const color = lane.id === 'speed' || lane.id === 'lmove' ? '#5fd38d' : lane.id === 'yaw' ? '#56ccf2' : lane.id === 'llevel' ? '#f2c94c' : lane.id === 'llink' ? '#f2994a' : '#bb6bd9';
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -612,6 +629,13 @@ export class Timeline {
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'Key at'),
       numberInput(key.time, (v) => upd(() => { key.time = Math.max(0, v); }), { step: 0.1, width: 56 }),
       el('span', { class: 'tl-unit' }, fromStart ? (s.lane === 'lmove' ? 's after the layer sets off' : 's after the path starts') : 's'));
+    if (s.lane === 'llink') {
+      this.keyBar.append(select(['linked', 'free'], key.linked ? 'linked' : 'free', (v) => upd(() => { key.linked = v === 'linked'; }), { linked: 'links it', free: 'unlinks it' }, 'linked'));
+      const del = el('button', { class: 'tbtn small', title: 'Delete key (Delete)' }, '✕');
+      del.addEventListener('click', () => this.deleteKey());
+      this.keyBar.append(del);
+      return;
+    }
     if (s.lane === 'lmove' || s.lane === 'llevel') {
       const a = acc!;
       const unit = s.lane === 'llevel' ? 'dB' : this.layer?.motion?.timing === 'keys' ? '% of the path' : 'm/s';
@@ -628,7 +652,7 @@ export class Timeline {
         el('span', { class: 'tl-sep' }, 'Pitch'), numberInput(k.pitch, (v) => upd(() => { k.pitch = Math.max(-90, Math.min(90, v)); }), { step: 1, width: 52, def: 0 }));
     }
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'then'),
-      select(EASINGS, key.easing, (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }, 'linear'));
+      select(EASINGS, key.easing ?? 'linear', (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }, 'linear'));
     const del = el('button', { class: 'tbtn small', title: 'Delete key (Delete)' }, '✕');
     del.addEventListener('click', () => this.deleteKey());
     this.keyBar.append(del);

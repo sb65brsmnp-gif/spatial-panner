@@ -360,7 +360,8 @@ MotionState LayerMotionEvaluator::evaluate(double t, const MotionOverride& o) co
     st.distance = s;
     st.forward = forward;
     st.offset = path_.positionAt(s) - path_.positionAt(0);
-    if (m_.turnAlongPath) st.yawDeg = wrap180(headingAt(s, forward) - startHeading_);
+    st.headingDeg = headingAt(s, forward);
+    if (m_.turnAlongPath) st.yawDeg = wrap180(st.headingDeg - startHeading_);
     return st;
 }
 
@@ -405,7 +406,123 @@ const LayerMotionEvaluator& PoseEvaluator::layerMotion(int i) const {
 
 Vec3 PoseEvaluator::layerPosition(int i, double time) const {
     if (i < 0 || i >= static_cast<int>(scene_.layers.size())) return {};
-    return scene_.layers[static_cast<size_t>(i)].position + layerMotion(i).evaluate(time).offset;
+    return layerPlacement(i, time).position;
+}
+
+bool PoseEvaluator::layerMoves(int i) const {
+    // A link does not move the layer unless its leader moves (the listener
+    // along a path, or a layer that moves itself); a chain is followed to
+    // the same depth as placementAt, which also bounds a cycle.
+    for (int depth = 0; depth <= 8; ++depth) {
+        if (i < 0 || i >= static_cast<int>(scene_.layers.size())) return false;
+        const Layer& L = scene_.layers[static_cast<size_t>(i)];
+        if (layerMotion(i).active()) return true;
+        if (!L.link.active() || L.link.to == i) return false;
+        if (L.link.to == kLinkListener) return !scene_.listener.paths.empty();
+        i = L.link.to;
+    }
+    return false;
+}
+
+float PoseEvaluator::listenerHeading(double time, const ListenerControls& controls) const {
+    Vec3 tangent;
+    listenerPosition(time, controls, &tangent);
+    tangent.y = 0;
+    return tangent.lengthSquared() < 1e-8f ? 0.0f : headingOf(tangent);
+}
+
+// Where a layer's leader is and which way it travels. A chain of links is
+// followed up to a depth; a layer never leads itself.
+PoseEvaluator::Frame PoseEvaluator::leaderFrame(int to, double time, const ListenerControls& controls, int depth) const {
+    if (to == kLinkListener) {
+        Vec3 tangent;
+        Frame f;
+        f.position = listenerPosition(time, controls, &tangent);
+        tangent.y = 0;
+        f.headingDeg = tangent.lengthSquared() < 1e-8f ? 0.0f : headingOf(tangent);
+        return f;
+    }
+    const Placement p = placementAt(to, time, controls, {}, depth + 1);
+    return {p.position, p.headingDeg};
+}
+
+Placement PoseEvaluator::layerPlacement(int i, double time, const ListenerControls& controls, const MotionOverride& own) const {
+    return placementAt(i, time, controls, own, 0);
+}
+
+Placement PoseEvaluator::placementAt(int i, double time, const ListenerControls& controls, const MotionOverride& own,
+                                     int depth) const {
+    Placement P;
+    if (i < 0 || i >= static_cast<int>(scene_.layers.size())) return P;
+    const Layer& L = scene_.layers[static_cast<size_t>(i)];
+    const LayerMotionEvaluator& m = layerMotion(i);
+    // The layer's own travel at a time, with the override carried back from
+    // `time` the way the renderer does for retarded time.
+    auto ownAt = [&](double t) {
+        MotionOverride q = own;
+        if (q.distance) q.distance = std::max(0.0, *q.distance - static_cast<double>(q.speed) * (time - t));
+        return m.evaluate(t, q);
+    };
+    const MotionState st = ownAt(time);
+    P.gain = st.gain;
+    P.distance = st.distance;
+    P.forward = st.forward;
+    const int to = L.link.to;
+    const bool linkable = L.link.active() && to != i && depth <= 8 && (to == kLinkListener || to < static_cast<int>(scene_.layers.size()));
+    if (!linkable) {
+        P.offset = st.offset;
+        P.position = L.position + st.offset;
+        P.yawDeg = st.yawDeg;
+        P.headingDeg = st.headingDeg;
+        return P;
+    }
+    // Each linked stretch carries the layer with its leader: where it was
+    // (own travel included) when the stretch began, taken in the leader's
+    // frame then, is where it stays in the leader's frame. When a stretch
+    // ends, the displacement and turn it brought stay with the layer.
+    Vec3 carried;      // displacement from past stretches
+    float turned = 0;  // turn from past stretches
+    bool on = L.link.linkedAtStart;
+    double since = 0;
+    auto during = [&](double a, double t, Vec3& pos, float& yaw) {
+        const Frame fa = leaderFrame(to, a, controls, depth);
+        const Frame ft = leaderFrame(to, t, controls, depth);
+        const MotionState o = ownAt(t);
+        const Vec3 local = rotateYaw(L.position + o.offset + carried - fa.position, -fa.headingDeg);
+        pos = ft.position + rotateYaw(local, fa.headingDeg + (ft.headingDeg - fa.headingDeg));
+        yaw = ft.headingDeg - fa.headingDeg;
+        return ft;
+    };
+    for (const auto& k : L.link.keys) {
+        if (k.time > time) break;
+        if (k.linked == on) continue;
+        if (on) {
+            Vec3 pos;
+            float yaw;
+            during(since, k.time, pos, yaw);
+            carried = pos - (L.position + ownAt(k.time).offset);
+            turned += yaw;
+        } else {
+            since = k.time;
+        }
+        on = k.linked;
+    }
+    if (on) {
+        Vec3 pos;
+        float yaw;
+        const Frame ft = during(since, time, pos, yaw);
+        P.position = pos;
+        P.yawDeg = st.yawDeg + turned + yaw;
+        P.headingDeg = st.headingDeg + turned + yaw;
+        P.linked = true;
+        P.leaderPosition = ft.position;
+    } else {
+        P.position = L.position + st.offset + carried;
+        P.yawDeg = st.yawDeg + turned;
+        P.headingDeg = st.headingDeg + turned;
+    }
+    P.offset = P.position - L.position;
+    return P;
 }
 
 const SampledPath* PoseEvaluator::activePath(const ListenerControls& controls) const {
@@ -495,18 +612,26 @@ Quat PoseEvaluator::orientationAt(double time, const Vec3& position, const Vec3&
     return (base * offset).normalized();
 }
 
-Pose PoseEvaluator::evaluate(double time, const ListenerControls& controls) const {
-    Pose pose;
+Vec3 PoseEvaluator::listenerPosition(double time, const ListenerControls& controls, Vec3* tangent) const {
     const SampledPath* path = activePath(controls);
     if (!path) {
-        pose.position = scene_.listener.staticPosition;
+        if (tangent) *tangent = {};
+        return scene_.listener.staticPosition;
+    }
+    const float s = distanceAlongPath(time, controls);
+    if (tangent) *tangent = path->tangentAt(s);
+    return path->positionAt(s);
+}
+
+Pose PoseEvaluator::evaluate(double time, const ListenerControls& controls) const {
+    Pose pose;
+    Vec3 tangent;
+    pose.position = listenerPosition(time, controls, &tangent);
+    if (!activePath(controls)) {
         pose.orientation = orientationAt(time, pose.position, {0, 0, -1}, controls);
         pose.velocity = {};
         return pose;
     }
-    const float s = distanceAlongPath(time, controls);
-    pose.position = path->positionAt(s);
-    Vec3 tangent = path->tangentAt(s);
     const float v = scene_.listener.positionMode == PositionMode::Speed
                         ? speed_.speedAt(time - scene_.listener.pathStartTime) * controls.speedMultiplier
                         : 0.0f;

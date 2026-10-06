@@ -193,6 +193,8 @@ private:
     std::atomic<float>* pZ_;
     std::atomic<float>* pPathSpeed_;
     std::atomic<float>* pPathPosition_;
+    std::atomic<float>* pSpatialize_;
+    std::atomic<float>* pRoomSend_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpatialPannerProcessor)
 };

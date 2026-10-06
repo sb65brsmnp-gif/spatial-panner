@@ -1,7 +1,7 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
 import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoom, layerHome, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
-  LAYOUTS, MATERIALS, WALLS, layerColor, hasPath, type HeadMode, type LayerDoc, type LayerTiming, type PathEnd, type SceneDoc, type V3 } from '../model/scene';
+  LAYOUTS, MATERIALS, WALLS, layerColor, hasPath, defaultLink, isSpatialized, isLinked, leadsTo, type HeadMode, type LayerDoc, type LayerTiming, type PathEnd, type SceneDoc, type V3 } from '../model/scene';
 import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
 import { speedArrival } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
@@ -355,6 +355,42 @@ export class Sidebar {
     ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
   }
 
+  // Straight through or spatialised, and the layer's link to the listener
+  // or another layer.
+  private renderSpatializeAndLink(i: number): void {
+    const s = this.store.scene;
+    const l = s.layers[i];
+    const u = (fn: (l: LayerDoc) => void) => this.upd((sc) => fn(sc.layers[i]));
+    const on = isSpatialized(l);
+    this.body.append(section('Spatialize',
+      row('Spatialize', checkbox(on, (v) => u((x) => { if (v) delete x.spatialize; else x.spatialize = false; }), on ? 'on' : 'off: plays straight through', true)),
+      on ? el('p', { class: 'muted' }, 'Off, the layer plays as it is: mono to both ears, stereo left to left and right to right, with no distance, direction, Doppler or room. Its level, mute, fades and place in the scene stay.')
+        : row('Room', checkbox(!!l.room_send, (v) => u((x) => { if (v) x.room_send = true; else delete x.room_send; }), 'send it to the room\'s reverb anyway', false)),
+      this.plugin ? el('p', { class: 'muted' }, 'The track\'s Layer Spatialize and Layer Room Send parameters do the same live and can be automated in Logic (Spatialize must be on here for the parameter to turn it on).') : '',
+    ));
+    // Leaders on offer: the listener and any layer that does not follow this one.
+    const others = s.layers.map((_, j) => j).filter((j) => j !== i && !leadsTo(s.layers, j, i));
+    const cur = !isLinked(l) ? 'none' : String(l.link!.to);
+    const labels: Record<string, string> = { none: 'nothing', listener: 'the listener' };
+    for (const j of others) labels[String(j)] = s.layers[j].name || `Layer ${j + 1}`;
+    const to = select(['none', 'listener', ...others.map(String)], cur, (v) => u((x) => {
+      if (v === 'none') delete x.link;
+      else x.link = { ...(x.link ?? defaultLink('listener')), to: v === 'listener' ? 'listener' : parseInt(v, 10) };
+    }), labels, 'none');
+    const link = l.link;
+    const nk = link?.keys.length ?? 0;
+    const clear = el('button', { class: 'btn small' }, 'Clear');
+    clear.addEventListener('click', () => u((x) => { if (x.link) x.link.keys = []; }));
+    this.body.append(section('Link',
+      row('Linked to', to),
+      isLinked(l) ? row('From the start', checkbox(link!.linked_at_start, (v) => u((x) => { x.link!.linked_at_start = v; }), link!.linked_at_start ? 'linked' : 'free until a key links it', true)) : '',
+      isLinked(l) ? el('p', { class: 'muted' }, 'While linked it keeps its place and bearing relative to that one as it moves and turns with its direction of travel (its own path, if any, goes with it). '
+        + (nk ? `${nk} link key${nk === 1 ? '' : 's'} on the Link lane of the timeline. ` : 'Double-click the Link lane on the timeline to add keys that unlink and link it again at times. ')
+        + 'Unlinking leaves it where it is.', nk ? clear : '')
+        : el('p', { class: 'muted' }, 'Link the layer to the listener or another layer and it moves with it, keeping its distance and bearing; the timeline\'s Link lane unlinks and links it again at times.'),
+    ));
+  }
+
   // The layer's own path: drawing it, how it is timed, what happens at the
   // end, turning with it; and its level automation (fades).
   private renderLayerPath(i: number): void {
@@ -420,6 +456,7 @@ export class Sidebar {
       );
     }
     this.body.append(section('Path', ...rows));
+    this.renderSpatializeAndLink(i);
     const keys = l.level_keys ?? [];
     const clear = el('button', { class: 'btn small' }, 'Clear');
     clear.addEventListener('click', () => u((x) => { delete x.level_keys; }));

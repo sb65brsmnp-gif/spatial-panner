@@ -440,4 +440,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project, dropAudio, openRecent };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, timeline, setView, project, dropAudio, openRecent };

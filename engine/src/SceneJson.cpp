@@ -275,6 +275,15 @@ json layerToJson(const Layer& l) {
         for (const auto& k : l.levelKeys) keys.push_back({{"time", k.time}, {"level_db", k.levelDb}, {"easing", enumToString(k.easing)}});
         j["level_keys"] = keys;
     }
+    if (!l.spatialize) j["spatialize"] = false;
+    if (l.roomSend) j["room_send"] = true;
+    if (l.link.active()) {
+        json keys = json::array();
+        for (const auto& k : l.link.keys) keys.push_back({{"time", k.time}, {"linked", k.linked}});
+        j["link"] = json{{"to", l.link.to == kLinkListener ? json("listener") : json(l.link.to)},
+                         {"linked_at_start", l.link.linkedAtStart}, {"keys", keys}};
+    }
+    if (l.referenceOnly) j["reference_only"] = true;
     return j;
 }
 
@@ -337,6 +346,24 @@ Layer layerFromJson(const json& j) {
         }
         std::sort(l.levelKeys.begin(), l.levelKeys.end(), [](const LevelKey& a, const LevelKey& b) { return a.time < b.time; });
     }
+    l.spatialize = j.value("spatialize", l.spatialize);
+    l.roomSend = j.value("room_send", l.roomSend);
+    if (j.contains("link") && j["link"].is_object()) {
+        const json& k = j["link"];
+        auto& ln = l.link;
+        if (k.contains("to")) {
+            const json& to = k["to"];
+            if (to.is_string() && to.get<std::string>() == "listener") ln.to = kLinkListener;
+            else if (to.is_number_integer() && to.get<int>() >= 0) ln.to = to.get<int>();
+            else ln.to = kLinkNone;
+        }
+        ln.linkedAtStart = k.value("linked_at_start", ln.linkedAtStart);
+        if (k.contains("keys") && k["keys"].is_array()) {
+            for (const auto& e : k["keys"]) ln.keys.push_back({e.value("time", 0.0), e.value("linked", true)});
+            std::sort(ln.keys.begin(), ln.keys.end(), [](const LinkKey& a, const LinkKey& b) { return a.time < b.time; });
+        }
+    }
+    l.referenceOnly = j.value("reference_only", l.referenceOnly);
     return l;
 }
 

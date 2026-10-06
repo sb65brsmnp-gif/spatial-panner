@@ -89,6 +89,21 @@ struct MotionState {
     float gain = 1;     // < 1 only around the jump back to the start of an open looping path
     float distance = 0; // metres along the path (0..length)
     bool forward = true;  // travelling in the path's direction
+    float headingDeg = 0; // direction of travel about +Y (0 = -Z), whether or not it turns; 0 without a path
+};
+
+// Where a layer is at a time: its own travel and its link to a leader (the
+// listener or another layer, Layer::link) applied.
+struct Placement {
+    Vec3 position;          // world
+    Vec3 offset;            // position - Layer::position
+    float yawDeg = 0;       // turn about +Y: along its own path (turnAlongPath) plus its leader's turn while linked
+    float gain = 1;         // the loop fade of its own path
+    float distance = 0;     // along its own path
+    bool forward = true;
+    float headingDeg = 0;   // its direction of travel, turned with its leader: the frame it leads others in
+    bool linked = false;    // following a leader at this time
+    Vec3 leaderPosition;    // when linked
 };
 
 // A layer's path and timing, built once, queried per sub-block. Like the
@@ -145,6 +160,16 @@ public:
     const LayerMotionEvaluator& layerMotion(int i) const;
     // Where layer i is at `time` (its own timing, no overrides).
     Vec3 layerPosition(int i, double time) const;
+    // Where layer i is at `time` with its own path and its link followed.
+    // `own` overrides its own travel (the plugin's automation); a leader is
+    // evaluated with none. Does layer i move at all (a path or a link)?
+    Placement layerPlacement(int i, double time, const ListenerControls& controls = {},
+                             const MotionOverride& own = {}) const;
+    bool layerMoves(int i) const;
+    // The listener's position, and the direction it travels in (degrees
+    // about +Y, 0 = -Z; 0 without a path).
+    Vec3 listenerPosition(double time, const ListenerControls& controls, Vec3* tangent = nullptr) const;
+    float listenerHeading(double time, const ListenerControls& controls = {}) const;
 
 private:
     Scene scene_;  // copy: the evaluator owns its inputs
@@ -155,6 +180,9 @@ private:
 
     Quat orientationAt(double time, const Vec3& position, const Vec3& tangent,
                        const ListenerControls& controls) const;
+    struct Frame { Vec3 position; float headingDeg; };
+    Frame leaderFrame(int to, double time, const ListenerControls& controls, int depth) const;
+    Placement placementAt(int i, double time, const ListenerControls& controls, const MotionOverride& own, int depth) const;
 };
 
 float applyEasing(Easing e, float u);

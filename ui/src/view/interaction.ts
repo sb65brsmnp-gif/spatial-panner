@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
 import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint, layerHome, firstPoint,
-  defaultScene, hasPath } from '../model/scene';
+  defaultScene, hasPath, removeLayerLinks } from '../model/scene';
 import { attachPath, layerOfPath, layerPathIndex, moveLayerTo, pathOf, removePath } from '../model/layerMotion';
 import {
   appendSegments, translatePath, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
@@ -525,6 +525,7 @@ export class Interaction {
     } else if (sel.kind === 'layer') {
       this.store.update((s) => {
         s.layers.splice(sel.index, 1);
+        removeLayerLinks(s.layers, sel.index);
         if (s.listener.head.look_at_layer === sel.index) s.listener.head.look_at_layer = -1;
         else if (s.listener.head.look_at_layer > sel.index) s.listener.head.look_at_layer--;
       });

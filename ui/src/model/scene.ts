@@ -50,6 +50,14 @@ export interface LayerDoc {
   // level automation (fades). See MotionDoc.
   motion?: MotionDoc;
   level_keys?: LevelKey[];
+  // Off: the layer plays straight through (mono to both ears, stereo left to
+  // left and right to right), unprocessed; still a layer with its level,
+  // mute, fades and place in the scene. `room_send` keeps it feeding the
+  // room's reverb. Absent: on / off.
+  spatialize?: boolean;
+  room_send?: boolean;
+  // Linked to the listener or another layer: see LinkDoc. Absent: not linked.
+  link?: LinkDoc;
   // editor-only
   color?: string;
   solo?: boolean;
@@ -101,6 +109,47 @@ export interface MotionDoc {
 // Level automation: dB at absolute times; SILENT_DB is silence.
 export interface LevelKey { time: number; level_db: number; easing: Easing }
 export const SILENT_DB = -80;
+
+// A layer linked to the listener ('listener') or to another layer (its
+// index) keeps its place and bearing relative to that leader while linked,
+// as the leader moves and turns with its direction of travel; its own path,
+// if any, is travelled in the leader's frame. `keys` link and unlink it at
+// times (each sets the state from its time on; `linked_at_start` before the
+// first). Unlinking leaves it where it is; linking again takes hold there.
+export interface LinkKey { time: number; linked: boolean }
+export interface LinkDoc { to: 'listener' | number; linked_at_start: boolean; keys: LinkKey[] }
+
+export function defaultLink(to: 'listener' | number): LinkDoc {
+  return { to, linked_at_start: true, keys: [] };
+}
+export function isSpatialized(l: LayerDoc): boolean { return l.spatialize !== false; }
+export function isLinked(l: LayerDoc): boolean { return !!l.link && (l.link.to === 'listener' || (typeof l.link.to === 'number' && l.link.to >= 0)); }
+// Linked at time t?
+export function linkedAt(link: LinkDoc, t: number): boolean {
+  let on = link.linked_at_start;
+  for (const k of link.keys) { if (k.time <= t) on = k.linked; else break; }
+  return on;
+}
+// Does layer `i` lead (directly or through others) to layer `j`? Used to
+// keep a layer from following one of its own followers.
+export function leadsTo(layers: LayerDoc[], i: number, j: number): boolean {
+  for (let n = 0, k = i; n < layers.length; n++) {
+    const to = layers[k]?.link?.to;
+    if (typeof to !== 'number' || to < 0) return false;
+    if (to === j) return true;
+    k = to;
+  }
+  return false;
+}
+// A layer removed: links to it go, links past it move down.
+export function removeLayerLinks(layers: LayerDoc[], removed: number): void {
+  for (const l of layers) {
+    const to = l.link?.to;
+    if (typeof to !== 'number') continue;
+    if (to === removed) delete l.link;
+    else if (to > removed) l.link!.to = to - 1;
+  }
+}
 
 export function defaultMotion(path: PathDoc): MotionDoc {
   return { path, timing: 'speed', speed: [{ time: 0, speed: 1.4, easing: 'linear' }], start_time: 0, keys: [], fraction: 0, end: 'stop', turn: false };

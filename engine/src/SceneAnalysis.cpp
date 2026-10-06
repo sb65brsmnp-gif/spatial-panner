@@ -54,24 +54,29 @@ SceneAnalysis analyzeScene(const Scene& scene, double duration, double dt, float
     }
 
     int moving = 0;
-    for (size_t i = 0; i < scene.layers.size(); ++i) moving += eval.layerMotion(static_cast<int>(i)).active() ? 1 : 0;
+    for (size_t i = 0; i < scene.layers.size(); ++i) moving += eval.layerMoves(static_cast<int>(i)) ? 1 : 0;
     // Coarser in time than the listener when many layers move (keeps the JSON small).
     const double ldt = std::max(dt, duration * moving / 30000.0);
     for (size_t i = 0; i < scene.layers.size(); ++i) {
         const LayerMotionEvaluator& m = eval.layerMotion(static_cast<int>(i));
-        if (!m.active()) continue;
+        // Layers with a path, and layers carried by a link.
+        if (!eval.layerMoves(static_cast<int>(i))) continue;
         LayerTrack tr;
         tr.layer = static_cast<int>(i);
-        tr.length = m.length();
-        const Vec3 base = scene.layers[i].position - m.path().positionAt(0);
-        const int n = std::min(std::max(2, static_cast<int>(std::ceil(tr.length / pathStep)) + 1), 20000);
-        for (int k = 0; k < n; ++k) tr.points.push_back(base + m.path().positionAt(tr.length * k / (n - 1)));
+        if (m.active()) {
+            tr.length = m.length();
+            const Vec3 base = scene.layers[i].position - m.path().positionAt(0);
+            const int n = std::min(std::max(2, static_cast<int>(std::ceil(tr.length / pathStep)) + 1), 20000);
+            for (int k = 0; k < n; ++k) tr.points.push_back(base + m.path().positionAt(tr.length * k / (n - 1)));
+        } else {
+            tr.points.push_back(scene.layers[i].position);   // no path: where it stands, for the editor's drag offset
+        }
         tr.dt = ldt;
         const int ls = static_cast<int>(std::floor(duration / ldt + 1e-9)) + 1;
         tr.samples.reserve(ls);
         for (int k = 0; k < ls; ++k) {
-            const MotionState st = m.evaluate(k * ldt);
-            tr.samples.push_back({scene.layers[i].position + st.offset, st.yawDeg, st.distance});
+            const Placement st = eval.layerPlacement(static_cast<int>(i), k * ldt);
+            tr.samples.push_back({st.position, st.yawDeg, st.distance});
         }
         a.layers.push_back(std::move(tr));
     }

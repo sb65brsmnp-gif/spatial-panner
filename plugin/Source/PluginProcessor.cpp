@@ -159,6 +159,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpatialPannerProcessor::crea
     layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"lppos", 1}, "Layer Path Position",
                                                           NormalisableRange<float>(0.0f, 100.0f, 0.01f), 0.0f,
                                                           AudioParameterFloatAttributes().withLabel("%")));
+    // Off: the track plays straight through, unprocessed (the scene's own
+    // Spatialize switch must be on for this to spatialise). Room Send keeps
+    // a straight-through track feeding the room's reverb.
+    layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"spatial", 1}, "Layer Spatialize", true));
+    layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"rsend", 1}, "Layer Room Send", false));
     layout.add(std::move(listener), std::move(layer));
     return layout;
 }
@@ -194,6 +199,8 @@ SpatialPannerProcessor::SpatialPannerProcessor()
     pZ_ = params_.getRawParameterValue("offz");
     pPathSpeed_ = params_.getRawParameterValue("lpspeed");
     pPathPosition_ = params_.getRawParameterValue("lppos");
+    pSpatialize_ = params_.getRawParameterValue("spatial");
+    pRoomSend_ = params_.getRawParameterValue("rsend");
 
     layerId_ = newId();
     doc_ = doc::defaultScene();
@@ -673,6 +680,8 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     lc.ambisonicRadiusScale = pSphereRadius_->load() / 100.0f;
     lc.ambisonicYawOffsetDeg = pSphereRotation_->load();
     if (pMono_->load() > 0.5f) lc.mono = true;   // off: the scene's setting stands
+    lc.spatialize = pSpatialize_->load() > 0.5f;
+    lc.roomSend = pRoomSend_->load() > 0.5f;
     const float pathSpeed = pPathSpeed_->load();
     const float pathPosition = std::clamp(pPathPosition_->load() / 100.0f, 0.0f, 1.0f);
     // Ramped over the block from where the last one ended (jumps are not ramped).

@@ -107,6 +107,34 @@ struct LevelKey {
 };
 constexpr float kSilentDb = -80.0f;
 
+// A layer linked to the listener or to another layer: while linked it keeps
+// its place and bearing relative to that object as the object moves and
+// turns with its direction of travel, so a pair that start out 2 m apart
+// stay 2 m apart however the leader travels. Its own path, if any, is
+// travelled in the leader's frame. Unlinking (a key with `linked` false)
+// leaves it where it is, and its own path carries on from there; linking
+// again takes hold from wherever it is then. `to`: kLinkNone, kLinkListener
+// or a layer index (chains are followed; a layer never leads itself).
+constexpr int kLinkNone = -2;
+constexpr int kLinkListener = -1;
+struct LinkKey {
+    double time = 0;
+    bool linked = true;
+};
+struct LayerLink {
+    int to = kLinkNone;
+    bool linkedAtStart = true;
+    std::vector<LinkKey> keys;  // sorted by time; each sets the state from its time on
+
+    bool active() const { return to != kLinkNone; }
+    // Linked at `t`?
+    bool linkedAt(double t) const {
+        bool on = linkedAtStart;
+        for (const auto& k : keys) { if (k.time <= t) on = k.linked; else break; }
+        return on;
+    }
+};
+
 // ------------------------------------------------------------------ Layers
 
 // Six octave bands used for materials: 125, 250, 500, 1k, 2k, 4k Hz.
@@ -174,6 +202,18 @@ struct Layer {
 
     LayerMotion motion;
     std::vector<LevelKey> levelKeys;  // sorted by time
+
+    // Off: the layer plays straight through, unprocessed (mono to both
+    // ears or the front pair, stereo left to left and right to right): no
+    // HRTF, distance, Doppler, reflections or occlusion. It is still a
+    // layer, with its level, mute, fades and place in the scene. With
+    // `roomSend` it still feeds the room's late reverb.
+    bool spatialize = true;
+    bool roomSend = false;
+    LayerLink link;
+    // Plugin only: a leader of this track's layer, carried along so the link
+    // can be followed; it has no audio and no voice.
+    bool referenceOnly = false;
 };
 
 // Half-vector from a stereo layer's centre to its right end (left = -offset).
@@ -185,7 +225,7 @@ void stereoFromEnds(const Vec3& left, const Vec3& right, Vec3& centre, Layer::St
 int ambisonicOrder(int channels);
 inline bool isAmbisonic(const Layer& l) { return ambisonicOrder(l.channels) > 0; }
 // The renderer inputs a layer takes: 1, 2, or its Ambisonic channel count.
-inline int layerInputs(const Layer& l) { return isAmbisonic(l) ? l.channels : (l.channels == 2 ? 2 : 1); }
+inline int layerInputs(const Layer& l) { return l.referenceOnly ? 0 : isAmbisonic(l) ? l.channels : (l.channels == 2 ? 2 : 1); }
 // Orientation of an Ambisonic layer's recording (recording frame -> world).
 Quat ambisonicOrientation(const Layer::Ambisonic& a, float extraYawDeg = 0);
 

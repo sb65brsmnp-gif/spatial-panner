@@ -184,13 +184,13 @@ export class Store {
   }
 
   // Where layer i is drawn at time t: [x, y, z, yaw] of its centre, from the
-  // engine's analysis; its own position when it has no path or the analysis
-  // does not cover it yet.
+  // engine's analysis (which covers layers with a path and layers carried
+  // by a link); its own position when the analysis does not cover it.
   layerPlace(i: number, t: number): [number, number, number, number] {
     const l = this.scene.layers[i];
     const own: [number, number, number, number] = [l.position[0], l.position[1], l.position[2], 0];
     const tr = this.analysis?.layers?.find((x) => x.layer === i);
-    if (!l?.motion || !tr || !tr.samples.length) return own;
+    if (!tr || !tr.samples.length) return own;
     const f = t / tr.dt;
     const a = Math.max(0, Math.min(tr.samples.length - 1, Math.floor(f)));
     const b = Math.min(tr.samples.length - 1, a + 1);

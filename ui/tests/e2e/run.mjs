@@ -565,6 +565,56 @@ await check('layer path: a toolbar drawing tool draws for the selected layer; "f
   await ed(() => window.spEditor.store.select({ kind: 'none' }));
 });
 
+await check('spatialize off and a link to the listener: the sidebar, the Link lane, the 3D view and the engine follow', async () => {
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[0].position = [1, 1.6, 0]; s.layers[0].home = [1, 1.6, 0]; delete s.layers[0].motion; s.listener.paths = []; s.listener.active_path = 0; });
+    st.select({ kind: 'layer', index: 0 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  // Spatialize off: the file says so, the ball goes see-through, the label says "direct".
+  await page.waitForSelector('.section-title:has-text("Spatialize")');
+  const spat = page.locator('.section:has(.section-title:has-text("Spatialize")) input[type=checkbox]').first();
+  await spat.uncheck();
+  let r = await ed(() => ({ sp: window.spEditor.store.scene.layers[0].spatialize, label: document.querySelector('.layer-label span').textContent }));
+  assert(r.sp === false && r.label.includes('direct'), JSON.stringify(r));
+  await page.waitForSelector('text=send it to the room');
+  await spat.check();
+  r = await ed(() => ({ sp: window.spEditor.store.scene.layers[0].spatialize, label: document.querySelector('.layer-label span').textContent }));
+  assert(r.sp === undefined && !r.label.includes('direct'), JSON.stringify(r));
+  // Linked to the listener: the Link lane appears; a key on it unlinks at 3 s.
+  await page.locator('.section:has(.section-title:has-text("Link")) select').first().selectOption('listener');
+  r = await ed(() => window.spEditor.store.scene.layers[0].link);
+  assert(r && r.to === 'listener' && r.linked_at_start === true, JSON.stringify(r));
+  await page.waitForFunction(() => window.spEditor.timeline.lanes().some((l) => l.id === 'llink'));
+  const lane = await ed(() => window.spEditor.timeline.lanes().find((l) => l.id === 'llink'));
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const x3 = await ed(() => window.spEditor.timeline.x(3));
+  await page.mouse.dblclick(box.x + x3, box.y + lane.y + lane.h - 6);   // the bottom of the lane: free
+  r = await ed(() => window.spEditor.store.scene.layers[0].link);
+  assert(r.keys.length === 1 && Math.abs(r.keys[0].time - 3) < 0.06 && r.keys[0].linked === false, JSON.stringify(r));
+  // The listener walks: while linked (t = 1) the layer stays 1 m to its right; unlinked (t = 5) it stays put.
+  await page.keyboard.press('Escape');
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await ed(() => window.spEditor.store.update((s) => {
+    s.listener.paths = [{ name: 'walk', closed: false, segments: [{ type: 'line', points: [[0, 1.7, 0], [0, 1.7, -10]] }] }];
+    s.listener.active_path = 0;
+    s.listener.path_start_time = 0;
+    s.listener.speed = [{ time: 0, speed: 1, easing: 'linear' }];
+  }));
+  await waitAnalysis();
+  await ed(() => window.spEditor.store.setTime(1));
+  let p = await ed(() => window.spEditor.store.layerPlace(0, 1));
+  assert(Math.abs(p[0] - 1) < 0.05 && Math.abs(p[2] + 1) < 0.05, `linked: ${JSON.stringify(p)}`);
+  const line = await ed(() => window.spEditor.view.layerGroup.children.some((c) => c.type === 'Line' && c.visible && c.material.type === 'LineDashedMaterial' && c.material.dashSize === 0.15));
+  assert(line, 'no link line drawn');
+  p = await ed(() => window.spEditor.store.layerPlace(0, 5));
+  assert(Math.abs(p[0] - 1) < 0.05 && Math.abs(p[2] + 3) < 0.05, `free: ${JSON.stringify(p)}`);
+  await ed(() => window.spEditor.store.update((s) => { delete s.layers[0].link; s.listener.paths = []; }));
+  await ed(() => window.spEditor.store.setTime(0));
+});
+
 await check('Home (H) returns to the default 3D view with the scene in frame', async () => {
   await ed(() => { const vp = window.spEditor.vp; vp.persp.position.set(0.5, 0.5, 0.5); vp.controls.target.set(0, 0.5, 0); vp.controls.update(); });
   await page.keyboard.press('h');

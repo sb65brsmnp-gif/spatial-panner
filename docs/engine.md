@@ -320,6 +320,46 @@ CPU: 64 layers on their own paths cost 18 % more than standing still in a
 box room with 2nd-order reflections (mostly rebuilding the reflections as
 they move) and 13 % more in free field (table under Performance).
 
+### Layers linked to a leader
+
+A layer may follow a leader (`link.to`: `"listener"` or a layer index). While
+linked it keeps its place and bearing relative to the leader as the leader
+moves and turns with its direction of travel, so a layer 1 m to the
+listener's right stays on the right round a corner, and its own facing,
+stereo bar or sphere turn with it. Its own path, if any, is travelled in the
+leader's frame. Link state over time comes from `link.linked_at_start` and
+`link.keys` (`{time, linked}`, each setting the state from its time on).
+Unlinking leaves the layer where it is, its own path carrying on from there
+in the world frame; linking again takes hold from wherever it is then.
+
+The leader's frame is its position and the heading of its direction of
+travel (the listener's path tangent; a layer's own path direction, plus any
+turn it inherited from its own leader). A leader that stands still carries
+nothing. Chains (a layer following a layer that follows the listener) are
+evaluated leader first, to a depth of 8; a layer never leads itself.
+`PoseEvaluator::layerPlacement(i, t, controls, override)` is the one place
+this is worked out; the renderer evaluates it at retarded time like a path,
+and `analyzeScene` samples linked layers for the editor (a layer without a
+path gets one point, where it stands).
+
+### Straight through (`spatialize` off)
+
+A layer with `spatialize: false` plays unprocessed: no HRTF, distance,
+Doppler, air absorption, reflections or occlusion. A mono layer goes to both
+ears at −3 dB (a centre pan), or in Ambisonics to W alone; a stereo layer's
+left and right go to the left and right ear (or the nearest front pair of
+speakers); an Ambisonic layer is decoded from its centre, not turning with
+the head. Level, mute, fades and the plugin's controls still apply, and the
+layer keeps its place in the scene. With `room_send: true` it still feeds
+the late reverb (as if from 1 m) and, in a ray-traced room, the traced
+reflections. The switch glides over 40 ms (the processed path's tap gains
+fade out as the straight path fades in), so it can be automated while
+playing; once fully through, the taps and HRTF of that voice are skipped.
+
+Plugin only: a layer with `reference_only: true` has no audio and no voice;
+it is a leader carried into a track's scene so the link can be followed
+(`layerInputs` is 0 for it).
+
 ## For the standalone app and the plugin
 
 * Build the `Scene` from the editor's model; a `Renderer` takes an immutable
@@ -374,7 +414,11 @@ they move) and 13 % more in free field (table under Performance).
                "keys": [{"time": 2, "fraction": 0, "easing": "smooth"}, {"time": 9, "fraction": 1, "easing": "smooth"}],
                "fraction": 0, "end": "stop", "turn": false},
     // Level automation (fades), dB at absolute times; -80 is silence.
-    "level_keys": [{"time": 0, "level_db": -80, "easing": "linear"}, {"time": 2, "level_db": 0, "easing": "linear"}]
+    "level_keys": [{"time": 0, "level_db": -80, "easing": "linear"}, {"time": 2, "level_db": 0, "easing": "linear"}],
+    // Straight through (no spatialisation), optionally still feeding the room's reverb.
+    "spatialize": true, "room_send": false,
+    // Following the listener (or a layer index) from the start, letting go at 12 s.
+    "link": {"to": "listener", "linked_at_start": true, "keys": [{"time": 12, "linked": false}]}
   }],
   "room": {
     "type": "box" | "outdoor" | "mesh" | "none", "size": [w, h, d], "origin": [x, y, z],

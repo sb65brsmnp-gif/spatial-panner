@@ -163,6 +163,22 @@ drag like the listener's, and **Layer level** for fades (double-click to add
 a key; the bottom of the lane is silence). Esc deselects the layer and
 brings back the listener's lanes.
 
+**Spatialize** (Layers tab): off, the layer plays straight through, as it
+is: mono to both ears, stereo left to left and right to right, no distance,
+direction, Doppler or room. It stays a layer with its level, mute, fades and
+place in the scene, drawn as a see-through ball marked *direct*. *Room*
+sends it to the room's reverb anyway.
+
+**Link** (Layers tab): link a layer to the listener or to another layer and
+it keeps its place and bearing relative to that one as it moves and turns
+with its direction of travel (a dashed line joins them in the 3D view while
+linked). A linked layer with its own path travels it relative to its leader.
+The timeline gets a **Link** lane for the layer: double-click the bottom to
+unlink it at that time, the top to link it again; the selected key's bar
+says which. Unlinking leaves the layer where it is. *From the start* unticked
+leaves it free until the first linking key. A layer cannot follow one of its
+own followers.
+
 **Fit timing** (Path & head tab, shown once a layer has a path): tick the
 listener and the layers that should set off and arrive together, set the
 times and click *Fit*. Each speed curve is stretched or squeezed as a whole

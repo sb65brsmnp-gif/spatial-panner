@@ -193,6 +193,8 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Layer Sphere Rotation | ±180° | Ambisonic layers: added to the recording's yaw (turns the whole field). |
 | Layer Path Speed | 0 to 4 ×, default 1 | Layers with their own path, moving by speed: multiplies the layer's speed curve. 0 stops it where it is. |
 | Layer Path Position | 0 to 100 % | Layers with their own path set to "a point along the path": where along it the layer is. Moving the layer's Position slider in the editor moves this parameter too. |
+| Layer Spatialize | on, off, default on | Off plays the track straight through (left to left, right to right, mono to both at −3 dB), with no spatialisation or room. The layer's own Spatialize switch in the editor must be on for this parameter to turn it on. |
+| Layer Room Send | on, off, default off | A straight-through track still feeds the room's reverb (as if from 1 m). On here or in the editor. |
 
 Automation is evaluated every 32 samples (0.7 ms at 48 kHz), and the
 plug-in reports a latency of 32 samples, which Logic compensates.
@@ -241,6 +243,15 @@ moment it is at and needs no replay.
 The editor in the plug-in window draws moving layers where the scene's own
 timing puts them; Path Speed and Path Position automation are heard but not
 shown there.
+
+### Linked layers
+
+A layer linked to the listener or to another layer (Link on the Layers tab)
+follows it on every track, from any start point and in a bounce, because the
+link is part of the scene: each track's engine carries the layers its layer
+follows (a chain, if there is one) as position-only copies with no audio.
+Link and unlink keys live on the scene's timeline (the Link lane); there is
+no Logic lane for them.
 
 ## What each track does
 
