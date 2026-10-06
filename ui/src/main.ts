@@ -119,7 +119,8 @@ function refreshToolbar(): void {
   // Plugin: the scene is saved with the Logic project, so nothing is ever "unsaved".
   const title = `${name}${store.dirty && !plugin ? ' •' : ''}`;
   document.title = `${title} · Spatial Panner`;
-  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title });
+  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title,
+    layers: store.scene.layers.map((l, i) => l.name || `Layer ${i + 1}`) });
 }
 tools.onToolChange = refreshToolbar;
 
@@ -133,8 +134,14 @@ function updateHud(): void {
     + ` &nbsp; head ${Math.abs(yaw).toFixed(0)}° ${yaw >= 0 ? 'left' : 'right'}, ${Math.abs(pitch).toFixed(0)}° ${pitch >= 0 ? 'up' : 'down'}`
     + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '');
   const s = store.scene;
-  emptyHint.textContent = !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
-    : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
+  // While a drawing tool is out, say whose path it draws: the selected
+  // layer's, or the listener's ("for" in the toolbar changes it).
+  const target = tools.opts.tool !== 'select' ? s.layers[tools.opts.layerTarget] : undefined;
+  emptyHint.textContent = tools.opts.tool !== 'select'
+    ? (target ? `Drawing the path of ${target.name || `Layer ${tools.opts.layerTarget + 1}`} at its height. For the listener's path instead, choose Listener under "for" in the toolbar. Esc cancels.`
+      : s.layers.length ? 'Drawing the listener\'s path. For a layer\'s own path, choose it under "for" in the toolbar, or press Esc and select the layer first.' : '')
+    : !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
+      : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
   emptyHint.style.display = emptyHint.textContent ? '' : 'none';
 }
 
@@ -234,6 +241,7 @@ store.subscribe((kinds) => {
   if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
+  if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
 });
 

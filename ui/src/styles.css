@@ -26,6 +26,9 @@ button, select, input { font: inherit; color: inherit; }
 .tbtn:disabled { opacity: 0.4; cursor: default; }
 .tbtn.small { padding: 1px 6px; }
 .shape-select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 3px; }
+.target-select { max-width: 140px; }
+.target-select.active { border-color: var(--accent); color: var(--accent); }
+#toolbar .tlabel { color: var(--muted); padding: 0 4px; }
 
 /* main area */
 #main { display: grid; grid-template-columns: 1fr 330px; min-height: 0; }

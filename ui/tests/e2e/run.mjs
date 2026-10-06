@@ -66,6 +66,9 @@ await check('adding audio files creates layers around the listener', async () =>
 
 await ed(() => window.spEditor.setView('top'));
 await page.waitForTimeout(200);
+// Adding files selects the last layer; with a layer selected the drawing
+// tools would draw its path, so the listener's path is drawn unselected.
+await ed(() => window.spEditor.store.select({ kind: 'none' }));
 
 await check('freehand tool draws a smoothed Catmull-Rom path that the engine samples', async () => {
   await page.keyboard.press('f');
@@ -438,7 +441,7 @@ await check('layer path: Draw a path gives the selected layer its own path; the 
     st.setTime(0);
   });
   await page.click('.tab[data-tab="layers"]');
-  await page.click('text=Draw a path');
+  await page.click('button:has-text("Draw a path")');
   for (const p of [[2, 1.6, 2], [5, 1.6, 0], [2, 1.6, -3]]) await page.mouse.click(...(await screen(p)));
   await page.keyboard.press('Enter');
   await waitAnalysis();
@@ -519,6 +522,47 @@ await check('fit timing: the listener and a layer set off and arrive together', 
   const tr = r.a.layers.find((t) => t.layer === 0);
   const arrive = tr.samples.findIndex((x) => x[4] >= tr.length - 0.01) * tr.dt;
   assert(Math.abs(arrive - 14) < 0.15, `layer arrives ${arrive}`);
+});
+
+await check('layer path: a toolbar drawing tool draws for the selected layer; "for" shows and changes the target', async () => {
+  const n = await ed(() => window.spEditor.store.scene.layers.length);
+  assert(n >= 2, `layers ${n}`);
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[1].position = [-3, 1.6, 2]; s.layers[1].home = [-3, 1.6, 2]; });
+    st.select({ kind: 'layer', index: 1 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  // The C key with a layer selected: the curve tool, for that layer.
+  await page.keyboard.press('c');
+  let r = await ed(() => ({ tool: window.spEditor.tools.opts.tool, target: window.spEditor.tools.opts.layerTarget, shown: document.querySelector('.target-select').value }));
+  assert(r.tool === 'curve' && r.target === 1 && r.shown === '1', JSON.stringify(r));
+  for (const p of [[-3, 1.6, 2], [-6, 1.6, 0], [-3, 1.6, -3]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  await waitAnalysis();
+  r = await ed(() => { const s = window.spEditor.store; return { l: s.scene.layers[1], paths: s.scene.listener.paths.length, tool: window.spEditor.tools.opts.tool }; });
+  assert(r.l.motion && r.l.motion.path.segments.length === 1, JSON.stringify(r.l.motion));
+  assert(r.tool === 'select', `tool ${r.tool}`);
+  // "for" switched to the listener draws the listener's path even with the layer selected.
+  await page.selectOption('.target-select', '-1');
+  r = await ed(() => ({ tool: window.spEditor.tools.opts.tool, target: window.spEditor.tools.opts.layerTarget, sel: window.spEditor.store.selection }));
+  assert(r.tool === 'curve' && r.target === -1 && r.sel.kind === 'layer', JSON.stringify(r));
+  const before = await ed(() => window.spEditor.store.scene.listener.paths.length);
+  for (const p of [[6, 1.7, 6], [8, 1.7, 6]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  r = await ed(() => { const s = window.spEditor.store; return { paths: s.scene.listener.paths.length, segs: s.scene.layers[1].motion.path.segments.length }; });
+  assert(r.paths === before + 1 && r.segs === 1, JSON.stringify(r));
+  await ed(() => window.spEditor.store.update((s) => { s.listener.paths.pop(); s.listener.active_path = 0; }));
+  // Picking a layer in the Layers list while a tool is out retargets it.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await page.keyboard.press('l');
+  assert(await ed(() => window.spEditor.tools.opts.layerTarget) === -1, 'nothing selected should target the listener');
+  await ed(() => window.spEditor.store.select({ kind: 'layer', index: 0 }));
+  r = await ed(() => ({ target: window.spEditor.tools.opts.layerTarget, shown: document.querySelector('.target-select').value }));
+  assert(r.target === 0 && r.shown === '0', JSON.stringify(r));
+  await page.keyboard.press('Escape');
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
 });
 
 await check('Home (H) returns to the default 3D view with the scene in frame', async () => {

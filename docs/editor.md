@@ -71,7 +71,9 @@ CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
 layers, an Ambisonic sphere about four).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
-the path; drawing again appends to the current path's end.
+the path; drawing again appends to the current path's end. The tools draw
+the listener's path, or the selected layer's own (see *Layer paths* below;
+*for* in the toolbar shows which).
 
 | Tool | Use |
 | --- | --- |
@@ -137,9 +139,13 @@ is in the band. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
-**Layer paths**: select a layer and click *Draw a path* (Layers tab), then
-draw with the chosen tool (the curve tool when none is: click points, Enter
-to finish). The path is drawn at the layer's height and the layer moves to
+**Layer paths**: the drawing tools draw for whoever is selected. With a
+layer selected, picking a tool (toolbar or key) draws that layer's path; with
+nothing selected, the listener's. *for* in the toolbar shows which and
+changes it (choose *Listener* to draw the listener's path while a layer is
+selected), and a hint in the 3D view says whose path is being drawn.
+*Draw a path* on the Layers tab does the same with the curve tool (click
+points, Enter to finish). The path is drawn at the layer's height and the layer moves to
 where it begins; the line drawn is the line it travels. Dragging the layer
 moves its path with it; its points edit like the listener's (Option+click
 the line adds one, Delete removes one; dragging the first point moves the

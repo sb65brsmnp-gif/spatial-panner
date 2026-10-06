@@ -200,6 +200,8 @@ await check('a focused text field tells the plug-in, so typed keys stay in the p
 });
 
 await check('a path drawn while Logic stands at 12.5 s starts there', async () => {
+  // A layer is still selected from above; the tools would draw its path.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
   await page.keyboard.press('l');
   for (const p of [[-4, 1.7, -4], [4, 1.7, -4], [4, 1.7, 4]]) await page.mouse.click(...(await ed((p) => window.spEditor.project(p), p)));
   await page.keyboard.press('Enter');

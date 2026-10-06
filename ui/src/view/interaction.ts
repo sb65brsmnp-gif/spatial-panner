@@ -76,15 +76,44 @@ export class Interaction {
     el.addEventListener('dblclick', (e) => this.dblclick(e));
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', (e) => this.key(e));
+    // Selecting a layer (in the Layers list) while a drawing tool is out
+    // makes the next stroke that layer's path.
+    store.subscribe((kinds) => {
+      if (!kinds.has('selection') || this.opts.tool === 'select') return;
+      const i = this.selectedLayer();
+      if (i >= 0 && i !== this.opts.layerTarget) { this.opts.layerTarget = i; this.store.emit('tool'); }
+    });
     this.applyControls();
   }
 
+  // The layer the selection is on: the layer itself or a point of its path.
+  private selectedLayer(): number {
+    const sel = this.store.selection;
+    if (sel.kind === 'layer') return sel.index;
+    if (sel.kind === 'point') return layerOfPath(sel.path);
+    return -1;
+  }
+
+  // Picking a drawing tool while a layer is selected draws that layer's
+  // path; with nothing (or a listener path point) selected, the listener's.
+  // Switching between drawing tools keeps the target, so "Path for" in the
+  // toolbar can still choose the listener while a layer is selected.
   setTool(tool: ToolName, shape?: ShapeKind): void {
     this.cancelDrawing();
+    const from = this.opts.tool;
     this.opts.tool = tool;
     if (tool === 'select') this.opts.layerTarget = -1;
+    else if (from === 'select') this.opts.layerTarget = this.selectedLayer();
     if (shape) this.opts.shape = shape;
     this.applyControls();
+    this.onToolChange();
+    this.store.emit('tool');
+  }
+
+  // "Path for" in the toolbar: whose path the drawing tools draw.
+  setTarget(i: number): void {
+    if (this.opts.tool === 'select') this.setTool('curve');
+    this.opts.layerTarget = this.store.scene.layers[i] ? i : -1;
     this.onToolChange();
     this.store.emit('tool');
   }
@@ -107,6 +136,7 @@ export class Interaction {
   drawLayerPath(i: number, tool: ToolName = 'curve'): void {
     this.setTool(this.opts.tool === 'select' ? tool : this.opts.tool);
     this.opts.layerTarget = i;
+    this.onToolChange();
     this.store.emit('tool');
   }
 

@@ -371,7 +371,8 @@ export class Sidebar {
       rows.push(el('p', { class: 'hint' }, `Drawing ${l.name || `Layer ${i + 1}`}'s path at its height: draw in the 3D view with the ${toolName(this.tools.opts.tool)}. `
         + 'The layer moves to where the path begins. Esc cancels.'), el('div', { class: 'btn-row' }, cancel));
     } else if (!hasPath(l)) {
-      rows.push(el('p', { class: 'muted' }, 'Give the layer its own path and it travels along it: at its own speed, at the times you set, or held at a point you can automate.'),
+      rows.push(el('p', { class: 'muted' }, 'Give the layer its own path and it travels along it: at its own speed, at the times you set, or held at a point you can automate. '
+        + 'Click the button below, or pick any drawing tool in the toolbar while this layer is selected (the toolbar\'s "for" shows whose path you are drawing).'),
         el('div', { class: 'btn-row' }, draw));
     } else {
       const m = l.motion!;
