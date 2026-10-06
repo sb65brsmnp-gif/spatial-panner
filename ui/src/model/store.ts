@@ -2,6 +2,7 @@
 // analysis (engine-sampled paths and poses). Views subscribe to changes.
 import { completeScene, defaultScene, type SceneDoc } from './scene';
 import type { PointRef } from './geometry';
+import { pathOf } from './layerMotion';
 
 export interface Analysis {
   duration: number;
@@ -12,6 +13,9 @@ export interface Analysis {
   // [x, y, z, yaw, pitch, roll, distance, speed]
   poses: number[][];
   // A mesh room's triangles, for drawing.
+  // Layers with paths: [x, y, z, yaw, distance] at t = 0, dt, 2 dt ... (each
+  // layer's own dt).
+  layers?: { layer: number; length: number; points: [number, number, number][]; dt: number; samples: number[][] }[];
   room_mesh?: { vertices: [number, number, number][]; triangles: [number, number, number][] };
   revision?: number;
   error?: string;
@@ -174,9 +178,35 @@ export class Store {
     const s = this.selection;
     if (s.kind === 'layer' && s.index >= this.scene.layers.length) this.selection = { kind: 'none' };
     if (s.kind === 'point') {
-      const p = this.scene.listener.paths[s.path];
+      const p = pathOf(this.scene, s.path);
       if (!p || !p.segments[s.ref.seg] || !p.segments[s.ref.seg].points[s.ref.pt]) this.selection = { kind: 'none' };
     }
+  }
+
+  // Where layer i is drawn at time t: [x, y, z, yaw] of its centre, from the
+  // engine's analysis; its own position when it has no path or the analysis
+  // does not cover it yet.
+  layerPlace(i: number, t: number): [number, number, number, number] {
+    const l = this.scene.layers[i];
+    const own: [number, number, number, number] = [l.position[0], l.position[1], l.position[2], 0];
+    const tr = this.analysis?.layers?.find((x) => x.layer === i);
+    if (!l?.motion || !tr || !tr.samples.length) return own;
+    const f = t / tr.dt;
+    const a = Math.max(0, Math.min(tr.samples.length - 1, Math.floor(f)));
+    const b = Math.min(tr.samples.length - 1, a + 1);
+    const u = Math.max(0, Math.min(1, f - a));
+    const p = tr.samples[a], q = tr.samples[b];
+    // The analysis was taken with the layer where it stood then; a drag since
+    // moves the whole journey with it.
+    const s0 = tr.points[0];
+    const d = s0 ? [l.position[0] - s0[0], l.position[1] - s0[1], l.position[2] - s0[2]] : [0, 0, 0];
+    // A jump (loop restart) is not interpolated across.
+    const jump = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) > 2;
+    const w = jump ? (u < 0.5 ? 0 : 1) : u;
+    let dy = q[3] - p[3];
+    if (dy > 180) dy -= 360;
+    if (dy < -180) dy += 360;
+    return [p[0] + (q[0] - p[0]) * w + d[0], p[1] + (q[1] - p[1]) * w + d[1], p[2] + (q[2] - p[2]) * w + d[2], p[3] + dy * w];
   }
 
   // Pose at the playhead: the audio engine's while playing (always, when the

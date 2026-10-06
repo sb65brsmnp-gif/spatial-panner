@@ -430,6 +430,97 @@ await check('timeline: Cmd-drag selects a range; dragging it moves start, end, s
   await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
 });
 
+await check('layer path: Draw a path gives the selected layer its own path; the engine carries it along', async () => {
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[0].position = [2, 1.6, 2]; s.layers[0].home = [2, 1.6, 2]; s.duration = 20; });
+    st.select({ kind: 'layer', index: 0 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  await page.click('text=Draw a path');
+  for (const p of [[2, 1.6, 2], [5, 1.6, 0], [2, 1.6, -3]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  await waitAnalysis();
+  const r = await ed(() => { const s = window.spEditor.store; return { l: s.scene.layers[0], tool: window.spEditor.tools.opts.tool, tr: s.analysis.layers }; });
+  assert(r.l.motion && r.l.motion.path.segments.length === 1, JSON.stringify(r.l.motion));
+  assert(r.tool === 'select', `tool ${r.tool}`);
+  const first = r.l.motion.path.segments[0].points[0];
+  assert(Math.hypot(first[0] - r.l.position[0], first[2] - r.l.position[2]) < 1e-6 && Math.abs(first[1] - 1.6) < 1e-6, `path starts at the layer ${first} ${r.l.position}`);
+  const tr = r.tr.find((t) => t.layer === 0);
+  assert(tr && tr.length > 5, JSON.stringify(tr && tr.length));
+  // At 3 s it is 4.2 m along (1.4 m/s), and the 3D view shows it there.
+  await ed(() => window.spEditor.store.setTime(3));
+  await page.waitForTimeout(100);
+  const g = await ed(() => window.spEditor.view.layers[0].group.position.toArray());
+  const s3 = tr.samples[Math.round(3 / tr.dt)];
+  assert(Math.hypot(g[0] - s3[0], g[2] - s3[2]) < 0.05, `shown ${g} vs engine ${s3}`);
+  assert(Math.abs(s3[4] - 4.2) < 0.05, `distance ${s3[4]}`);
+});
+
+await check('layer path: dragging the moving layer moves it with its path; the timeline shows its lanes', async () => {
+  const before = await ed(() => ({ pos: window.spEditor.store.scene.layers[0].position, path: window.spEditor.store.scene.layers[0].motion.path.segments[0].points }));
+  const shown = await ed(() => window.spEditor.view.layers[0].group.position.toArray());
+  await page.mouse.move(...(await screen(shown)));
+  await page.mouse.down();
+  await page.mouse.move(...(await screen([shown[0] - 1, shown[1], shown[2]])), { steps: 6 });
+  await page.mouse.up();
+  const after = await ed(() => ({ pos: window.spEditor.store.scene.layers[0].position, path: window.spEditor.store.scene.layers[0].motion.path.segments[0].points }));
+  const dx = after.pos[0] - before.pos[0];
+  assert(Math.abs(dx + 1) < 0.15, `moved ${dx}`);
+  assert(Math.abs(after.path[1][0] - before.path[1][0] - dx) < 1e-6, 'path moved with it');
+  await waitAnalysis();
+  // Layer lanes: speed (with its start and end lines) and level.
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const lane = (box.height - 22) / 2;
+  const xAt = (t) => box.x + 96 + (t / 20) * (box.width - 96);
+  await page.mouse.dblclick(xAt(2), box.y + 22 + lane * 0.5);    // speed key at 2 s
+  await page.mouse.dblclick(xAt(1), box.y + 22 + lane + lane - 3);  // level key at 1 s, at the bottom: silent
+  await page.mouse.dblclick(xAt(4), box.y + 22 + lane + lane * 0.2);  // level key at 4 s, near 0 dB
+  await waitAnalysis();
+  const l = await ed(() => window.spEditor.store.scene.layers[0]);
+  assert(l.motion.speed.length === 2, JSON.stringify(l.motion.speed));
+  assert(l.level_keys.length === 2 && l.level_keys[0].level_db === -80 && l.level_keys[1].level_db > -6, JSON.stringify(l.level_keys));
+});
+
+await check('layer path: timed by keys, it is where the keys say; back and forth turns it round', async () => {
+  await ed(() => window.spEditor.store.update((s) => {
+    const m = s.layers[0].motion;
+    m.timing = 'keys';
+    m.keys = [{ time: 1, fraction: 0, easing: 'linear' }, { time: 5, fraction: 1, easing: 'linear' }];
+    m.end = 'ping_pong';
+    m.turn = true;
+  }));
+  await waitAnalysis();
+  const tr = await ed(() => window.spEditor.store.analysis.layers.find((t) => t.layer === 0));
+  const at = (t) => tr.samples[Math.round(t / tr.dt)];
+  assert(Math.abs(at(3)[4] - tr.length / 2) < 0.1, `half way at 3 s: ${at(3)[4]} of ${tr.length}`);
+  assert(Math.abs(at(5)[4] - tr.length) < 0.1 && Math.abs(at(7)[4] - tr.length / 2) < 0.1, 'back half way at 7 s');
+  // Going back it faces the other way: about 180 degrees from going out at the same point.
+  const d = Math.abs(((at(7)[3] - at(3)[3]) % 360 + 540) % 360 - 180);
+  assert(d > 150, `turned ${at(3)[3]} -> ${at(7)[3]}`);
+});
+
+await check('fit timing: the listener and a layer set off and arrive together', async () => {
+  await ed(() => window.spEditor.store.update((s) => { const m = s.layers[0].motion; m.timing = 'speed'; m.end = 'stop'; m.start_time = 1; }));
+  await waitAnalysis();
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await page.click('.tab[data-tab="path"]');
+  await page.waitForSelector('text=Fit timing');
+  const from = page.locator('.section:has-text("Fit timing") input[type=number]').nth(0);
+  const to = page.locator('.section:has-text("Fit timing") input[type=number]').nth(1);
+  await from.fill('2'); await from.press('Tab');
+  await to.fill('14'); await to.press('Tab');
+  await page.click('.section:has-text("Fit timing") button:has-text("Fit")');
+  await waitAnalysis();
+  const r = await ed(() => { const s = window.spEditor.store; return { a: s.analysis, start: s.scene.listener.path_start_time, ls: s.scene.layers[0].motion.start_time }; });
+  assert(r.start === 2 && r.ls === 2, `starts ${r.start} ${r.ls}`);
+  assert(Math.abs(r.a.arrival_time - 14) < 0.15, `listener arrives ${r.a.arrival_time}`);
+  const tr = r.a.layers.find((t) => t.layer === 0);
+  const arrive = tr.samples.findIndex((x) => x[4] >= tr.length - 0.01) * tr.dt;
+  assert(Math.abs(arrive - 14) < 0.15, `layer arrives ${arrive}`);
+});
+
 await check('Home (H) returns to the default 3D view with the scene in frame', async () => {
   await ed(() => { const vp = window.spEditor.vp; vp.persp.position.set(0.5, 0.5, 0.5); vp.controls.target.set(0, 0.5, 0); vp.controls.update(); });
   await page.keyboard.press('h');

@@ -68,6 +68,7 @@ function sceneBounds(): THREE.Box3 {
   }
   for (const l of s.layers) b.expandByPoint(new THREE.Vector3(...l.position));
   for (const p of store.analysis?.paths ?? []) for (const q of p.points) b.expandByPoint(new THREE.Vector3(...q));
+  for (const t of store.analysis?.layers ?? []) for (const q of t.points) b.expandByPoint(new THREE.Vector3(...q));
   b.expandByPoint(new THREE.Vector3(...s.listener.static_position));
   // Without a box room (outdoor, open, mesh) the ground around the origin is
   // part of the picture, and a scene of one layer is not a point: framing a
@@ -224,6 +225,9 @@ store.subscribe((kinds) => {
     if (kinds.has('selection')) { view.updateLayers(); view.rebuildPaths(); }
     if (kinds.has('analysis')) view.rebuildPaths();
   }
+  // Layers with paths move with the playhead.
+  if (!kinds.has('scene') && !kinds.has('selection') && (kinds.has('time') || kinds.has('analysis') || kinds.has('transport'))
+    && store.scene.layers.some((l) => l.motion)) view.updateLayers();
   // A mesh room is drawn from the analysis, which arrives after the scene.
   if (kinds.has('analysis') && store.scene.room.type === 'mesh') view.rebuildRoom();
   if (kinds.has('meters')) view.updateMeters();

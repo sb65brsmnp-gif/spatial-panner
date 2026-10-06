@@ -46,6 +46,10 @@ export interface LayerDoc {
   reflection_order: number;
   start_time: number;
   loop: boolean;
+  // Its own path and how it travels it (absent: the layer stands still), and
+  // level automation (fades). See MotionDoc.
+  motion?: MotionDoc;
+  level_keys?: LevelKey[];
   // editor-only
   color?: string;
   solo?: boolean;
@@ -70,6 +74,41 @@ export interface PathDoc {
 }
 
 export interface SpeedKey { time: number; speed: number; easing: Easing }
+
+// A layer travelling along its own path (engine: sp::LayerMotion). The path
+// is in world coordinates and starts where the layer stands; the editor keeps
+// it that way (moving the layer moves its path). Timing:
+//   'speed'    - its own speed curve; key times count from start_time
+//   'keys'     - "be here at this time": fraction of the path (0..1) at
+//                absolute times
+//   'position' - stays at `fraction` of the path (automate it in Logic)
+// At the end it stops, loops (a closed path runs on round; an open one jumps
+// back with a short fade) or goes back and forth. `turn`: the layer turns
+// with the direction it travels (its facing, stereo bar, sphere).
+export type LayerTiming = 'speed' | 'keys' | 'position';
+export type PathEnd = 'stop' | 'loop' | 'ping_pong';
+export interface PathKey { time: number; fraction: number; easing: Easing }
+export interface MotionDoc {
+  path: PathDoc;
+  timing: LayerTiming;
+  speed: SpeedKey[];
+  start_time: number;
+  keys: PathKey[];
+  fraction: number;
+  end: PathEnd;
+  turn: boolean;
+}
+// Level automation: dB at absolute times; SILENT_DB is silence.
+export interface LevelKey { time: number; level_db: number; easing: Easing }
+export const SILENT_DB = -80;
+
+export function defaultMotion(path: PathDoc): MotionDoc {
+  return { path, timing: 'speed', speed: [{ time: 0, speed: 1.4, easing: 'linear' }], start_time: 0, keys: [], fraction: 0, end: 'stop', turn: false };
+}
+
+export function hasPath(l: LayerDoc): boolean {
+  return !!l.motion && l.motion.path.segments.length > 0;
+}
 export interface HeadKey { time: number; yaw: number; pitch: number; roll: number; easing: Easing }
 
 export type HeadMode = 'along_path' | 'look_at' | 'keyframed';
@@ -324,7 +363,11 @@ export function completeScene(raw: Partial<SceneDoc>): SceneDoc {
   s.listener = { ...d.listener, ...(raw.listener ?? {}) } as ListenerDoc;
   s.listener.head = { ...d.listener.head, ...(raw.listener?.head ?? {}) };
   s.environment = { ...d.environment, ...(raw.environment ?? {}) };
-  s.layers = (raw.layers ?? []).map((l, i) => defaultLayer(i, l));
+  s.layers = (raw.layers ?? []).map((l, i) => {
+    const out = defaultLayer(i, l);
+    if (out.motion) out.motion = { ...defaultMotion(out.motion.path), ...out.motion };
+    return out;
+  });
   // A file from before "home" was kept: where things are now is home.
   for (const l of s.layers) if (!l.home) l.home = [...l.position] as V3;
   for (const p of s.listener.paths) { const f = firstPoint(p); if (!p.home && f) p.home = f; }
@@ -345,6 +388,7 @@ export function mergeEditorKeys(canonical: SceneDoc, raw: any): SceneDoc {
         if (r?.solo) l.solo = true;
         if (typeof r?.host_id === 'string') l.host_id = r.host_id;
         if (isV3(r?.home)) l.home = r.home;
+        if (l.motion && isV3(r?.motion?.path?.home)) l.motion.path.home = r.motion.path.home;
       });
     if (Array.isArray(raw.listener?.paths))
       s.listener.paths.forEach((p, i) => { const h = raw.listener.paths[i]?.home; if (isV3(h)) p.home = h; });
@@ -407,6 +451,60 @@ export function headKeyAt(keys: HeadKey[], t: number): { yaw: number; pitch: num
   const span = b.time - a.time;
   const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
   return { yaw: a.yaw + (b.yaw - a.yaw) * u, pitch: a.pitch + (b.pitch - a.pitch) * u, roll: a.roll + (b.roll - a.roll) * u };
+}
+
+// Same as the engine's PathKey evaluation (LayerMotionEvaluator::keyFraction)
+// over one pass: the fraction of the path at absolute time t.
+export function pathKeyAt(keys: PathKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].fraction;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.fraction;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  return a.fraction + (b.fraction - a.fraction) * applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+}
+
+// The level automation in dB at t (0 with no keys); a fade to or from
+// silence runs in gain, like the engine (levelKeysDb).
+export function levelAt(keys: LevelKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].level_db;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.level_db;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+  if (a.level_db > SILENT_DB && b.level_db > SILENT_DB) return a.level_db + (b.level_db - a.level_db) * u;
+  const ga = a.level_db <= SILENT_DB ? 0 : Math.pow(10, a.level_db / 20);
+  const gb = b.level_db <= SILENT_DB ? 0 : Math.pow(10, b.level_db / 20);
+  const g = ga + (gb - ga) * u;
+  return g <= Math.pow(10, SILENT_DB / 20) ? SILENT_DB : 20 * Math.log10(g);
+}
+
+// Metres covered by `t` seconds of a speed curve (its key times count from 0),
+// integrated like the engine's SampledSpeed table.
+export function speedTravel(keys: SpeedKey[], t: number, dt = 0.005): number {
+  let d = 0;
+  for (let u = 0; u < t; u += dt) d += speedAt(keys, u + Math.min(dt, t - u) / 2) * Math.min(dt, t - u);
+  return d;
+}
+
+// How long the speed curve takes to cover `length` metres; null when it never
+// does within `limit` seconds (it stops on the way).
+export function speedArrival(keys: SpeedKey[], length: number, limit = 7200, dt = 0.005): number | null {
+  if (length <= 0) return 0;
+  let d = 0;
+  for (let u = 0; u < limit; u += dt) {
+    const v = speedAt(keys, u + dt / 2);
+    if (d + v * dt >= length) return u + (v > 0 ? (length - d) / v : 0);
+    d += v * dt;
+  }
+  return null;
 }
 
 export function sortKeys<T extends { time: number }>(keys: T[]): void {

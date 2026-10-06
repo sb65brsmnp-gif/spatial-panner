@@ -8,7 +8,8 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { layerOfPath, layerPathIndex } from '../model/layerMotion';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
 
@@ -229,7 +230,11 @@ export class SceneView {
     const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
     s.layers.forEach((l, i) => {
       const o = this.layers[i];
-      o.group.position.set(l.position[0], l.position[1], l.position[2]);
+      // A layer with a path is drawn where it is at the playhead, turned with
+      // its direction of travel when it turns along the path.
+      const [px, py, pz, yaw] = this.store.layerPlace(i, this.store.time);
+      o.group.position.set(px, py, pz);
+      o.group.rotation.y = yaw * Math.PI / 180;
       const color = new THREE.Color(l.color ?? '#4f9cf9');
       const silent = l.mute || (anySolo && !l.solo);
       const mat = o.ball.material as THREE.MeshStandardMaterial;
@@ -244,7 +249,7 @@ export class SceneView {
       const st = l.stereo ?? defaultStereo();
       const spread = stereo && !st.mono;
       const d = spread ? stereoOffset(st) : [0, 0, 0];
-      const floor = floorY - l.position[1];  // group-local floor height
+      const floor = floorY - py;  // group-local floor height
       this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color, o.leftTag);
       o.ball.userData.end = stereo ? 'L' : 'centre';
       o.right.ball.visible = o.right.stem.visible = o.right.ring.visible = spread;
@@ -340,8 +345,32 @@ export class SceneView {
       }
     });
     if (!L.paths.length) this.buildStart(L.static_position);
+    this.buildLayerPaths();
     this.buildTimeMarkers();
     this.vp.invalidate();
+  }
+
+  // Each layer's own path in its colour, from where the layer stands; the
+  // selected layer's (or the one whose point is selected) with its points.
+  private buildLayerPaths(): void {
+    const s = this.store.scene;
+    const a = this.store.analysis;
+    const sel = this.store.selection;
+    const editing = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
+    s.layers.forEach((l, i) => {
+      if (!hasPath(l)) return;
+      const p = l.motion!.path;
+      const tr = a && a.revision === this.store.revision ? a.layers?.find((x) => x.layer === i) : undefined;
+      const pts = tr?.points.length ? tr.points : samplePath(p);
+      if (pts.length < 2) return;
+      const color = new THREE.Color(l.color ?? '#4f9cf9').getHex();
+      const selected = editing === i;
+      const line = this.fatLine(pts as V3[], color, selected ? 3 : 2, selected ? 1 : 0.65);
+      line.userData = { kind: 'layerpath', layer: i };
+      this.pathGroup.add(line);
+      if (!p.closed) this.pathGroup.add(endMarker(pts[pts.length - 1] as V3, color, 0.09));
+      if (selected) this.buildPointHandles(p, layerPathIndex(i));
+    });
   }
 
   // The start disc on the floor under `p`, with a stem up to it and a label.
@@ -519,8 +548,8 @@ function makeLabel(text: string, cls: string): CSS2DObject {
   return new CSS2DObject(div);
 }
 
-function endMarker(p: V3, color: number): THREE.Mesh {
-  const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.12), new THREE.MeshBasicMaterial({ color }));
+function endMarker(p: V3, color: number, size = 0.12): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(size), new THREE.MeshBasicMaterial({ color }));
   m.position.copy(v3(p));
   return m;
 }
