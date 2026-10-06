@@ -77,6 +77,8 @@ public:
     // Called with the document when the plugin changed it (a track was added
     // or renamed): the editor reloads it.
     std::function<void(const nlohmann::json&)> onSceneChanged;
+    // Forgets the automation recorded so far: the listener's (scene track)
+    // and this track's Path Speed.
     void clearAutomationHistory();
 
     struct HostTrack { std::string id, name; float meterDb = -120; };
@@ -155,6 +157,9 @@ private:
     std::atomic<bool> fileFed_{false};
     std::atomic<double> docStart_{0};
     std::atomic<bool> docLoop_{false};
+    // The layer's path position in the scene document as last applied (the
+    // editor's slider and the Path Position parameter are one control).
+    double docPathFraction_ = -1;
 
     // audio thread
     double sampleRate_ = 48000;
@@ -166,6 +171,7 @@ private:
     std::atomic<bool> lastPlaying_{false};
     std::atomic<juce::int64> lastBlockTicks_{0};
     std::atomic<float> cpu_{0};
+    float lastPathPosition_ = -1;   // Path Position at the end of the last block (0..1), -1 before the first
 
     std::atomic<float>* pSpeed_;
     std::atomic<float>* pPosition_;
@@ -185,6 +191,8 @@ private:
     std::atomic<float>* pX_;
     std::atomic<float>* pY_;
     std::atomic<float>* pZ_;
+    std::atomic<float>* pPathSpeed_;
+    std::atomic<float>* pPathPosition_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpatialPannerProcessor)
 };

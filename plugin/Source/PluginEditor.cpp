@@ -471,8 +471,9 @@ PluginEditor::PluginEditor(SpatialPannerProcessor& p) : AudioProcessorEditor(p),
     clearHistory_.onClick = [this] {
         proc_.clearAutomationHistory();
     };
-    clearHistory_.setTooltip("Forget the listener automation recorded so far. Speed automation moves the listener by "
-                             "what has been played; after editing it early in the song, play through once or clear this.");
+    clearHistory_.setTooltip("Forget the automation recorded so far: the listener's (on the scene track) and this track's "
+                             "Path Speed. Speed automation moves the listener, and a layer along its path, by what has been "
+                             "played; after editing it early in the song, play through once or clear this.");
     for (auto* l : {&status_, &outputLabel_}) {
         l->setColour(juce::Label::textColourId, kMuted);
         l->setFont(juce::FontOptions(13.0f));
@@ -526,7 +527,7 @@ void PluginEditor::refreshHeader() {
     output_.setSelectedId(proc_.stereoAsSpeakers() ? 2 : 1, juce::dontSendNotification);
     outputLabel_.setVisible(!stereo || pass);
     outputLabel_.setText(proc_.outputText(), juce::dontSendNotification);
-    clearHistory_.setVisible(r == SpatialPannerProcessor::Role::Scene);
+    clearHistory_.setVisible(true);
 }
 
 void PluginEditor::timerCallback() {

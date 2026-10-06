@@ -348,6 +348,30 @@ TEST_CASE("Layer instances on separate tracks sum to the engine rendering all la
         CHECK(r.errRms < r.refRms * 0.1);    // -20 dB
         CHECK(r.worstEnvelopeDb < 0.5);
     }
+    SECTION("layers travelling their own paths: the same sound") {
+        // By speed (the plugin integrates the track's Path Speed, here x1),
+        // by keys going back and forth and turning, and held at a point
+        // (the Path Position parameter picks up the scene's value).
+        d["listener"]["paths"] = json::array();
+        REQUIRE(d["layers"].size() >= 3);
+        auto line = [](json from, double dx, double dz) {
+            json to = {from[0].get<double>() + dx, from[1], from[2].get<double>() + dz};
+            return json{{"name", ""}, {"closed", false}, {"segments", json::array({json{{"type", "line"}, {"points", {from, to}}}})}};
+        };
+        auto& L = d["layers"];
+        L[0]["motion"] = {{"path", line(L[0]["position"], 6, 0)}, {"timing", "speed"},
+                          {"speed", json::array({json{{"time", 0}, {"speed", 1.5}, {"easing", "linear"}}})}, {"start_time", 1.0}, {"end", "loop"}};
+        L[1]["motion"] = {{"path", line(L[1]["position"], 0, -5)}, {"timing", "keys"}, {"end", "ping_pong"}, {"turn", true},
+                          {"keys", json::array({json{{"time", 0.5}, {"fraction", 0}, {"easing", "smooth"}}, json{{"time", 3}, {"fraction", 1}, {"easing", "smooth"}}})}};
+        L[2]["motion"] = {{"path", line(L[2]["position"], -4, 2)}, {"timing", "position"}, {"fraction", 0.4}};
+        L[2]["level_keys"] = json::array({json{{"time", 0}, {"level_db", -80}, {"easing", "linear"}}, json{{"time", 2}, {"level_db", 0}, {"easing", "linear"}}});
+        const auto r = renderBothWays(d, 8);
+        INFO("reference RMS " << r.refRms << ", difference RMS " << r.errRms << ", worst 20 ms level difference "
+                              << r.worstEnvelopeDb << " dB");
+        REQUIRE(r.refRms > 1e-3);
+        CHECK(r.errRms < r.refRms * 0.1);
+        CHECK(r.worstEnvelopeDb < 0.5);
+    }
 }
 
 namespace {
@@ -440,6 +464,74 @@ TEST_CASE("Speed automation on the scene track moves the listener the same way i
         buf.clear();
         a->processBlock(buf, midi);
         CHECK(std::abs(a->listenerPose()[2] + expectedDistance(poseTime(start))) < 0.015);
+    }
+}
+
+TEST_CASE("Path Speed automation moves a layer along its own path by what was played, and is saved with the track") {
+    FreshSession fs;
+    PlayHead ph;
+    juce::MemoryBlock state;
+    json d = straightDoc();
+    d["listener"]["paths"] = json::array();
+    d["layers"] = json::array({doc::defaultLayer(0, "", {0, 1.6f, -2})});
+    d["layers"][0]["motion"] = {{"path", {{"name", ""}, {"closed", false},
+                                          {"segments", json::array({json{{"type", "line"}, {"points", {{0, 1.6, -2}, {60, 1.6, -2}}}}})}}},
+                                {"timing", "speed"}, {"speed", json::array({json{{"time", 0}, {"speed", 1.0}, {"easing", "linear"}}})}};
+    juce::AudioBuffer<float> buf(2, kBlock);
+    juce::MidiBuffer midi;
+    const int total = static_cast<int>(6 * kRate);
+    const int last = ((total - 1) / kBlock) * kBlock;
+    {
+        auto inst = makeInstance(ph);
+        inst->setRole(SpatialPannerProcessor::Role::Scene, true);   // holds the scene and plays the layer
+        inst->tickForTesting();
+        d["layers"][0]["host_id"] = inst->layerId();
+        std::string error;
+        REQUIRE(inst->setSceneDoc(d, error));
+        tickAll({inst.get()}, 2);
+        waitEngines({inst.get()});
+        auto* speed = inst->parameters().getParameter("lpspeed");
+        for (int pos = 0; pos < total; pos += kBlock) {
+            ph.pos = pos;
+            speed->setValueNotifyingHost(speed->convertTo0to1(speedAt(pos / kRate)));
+            buf.clear();
+            inst->processBlock(buf, midi);
+        }
+        // The distance is the integral of the automated speed (50 ms bins:
+        // within a few centimetres of the exact integral on this ramp).
+        const double travelled = inst->engineForTesting().pathTravel();
+        INFO("travelled " << travelled << " expected " << expectedDistance(poseTime(last)));
+        CHECK(std::abs(travelled - expectedDistance(poseTime(last))) < 0.05);
+        // Located to 5 s with the transport stopped and the parameter at x1:
+        // the recording places it.
+        speed->setValueNotifyingHost(speed->convertTo0to1(1.0f));
+        ph.playing = false;
+        ph.pos = static_cast<juce::int64>(5 * kRate / kBlock) * kBlock;
+        buf.clear();
+        inst->processBlock(buf, midi);
+        CHECK(std::abs(inst->engineForTesting().pathTravel() - expectedDistance(poseTime(static_cast<int>(ph.pos)))) < 0.05);
+        inst->getStateInformation(state);
+
+        SECTION("Clear recorded automation forgets it") {
+            inst->clearAutomationHistory();
+            buf.clear();
+            inst->processBlock(buf, midi);
+            CHECK(std::abs(inst->engineForTesting().pathTravel() - poseTime(static_cast<int>(ph.pos))) < 0.05);
+        }
+    }
+    SECTION("a new Logic process restores it") {
+        SharedSession::detachAllForTesting();
+        auto again = makeInstance(ph);
+        again->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        tickAll({again.get()}, 2);
+        waitEngines({again.get()});
+        auto* speed = again->parameters().getParameter("lpspeed");
+        speed->setValueNotifyingHost(speed->convertTo0to1(1.0f));
+        ph.playing = false;
+        ph.pos = static_cast<juce::int64>(5 * kRate / kBlock) * kBlock;
+        buf.clear();
+        again->processBlock(buf, midi);
+        CHECK(std::abs(again->engineForTesting().pathTravel() - expectedDistance(poseTime(static_cast<int>(ph.pos)))) < 0.05);
     }
 }
 

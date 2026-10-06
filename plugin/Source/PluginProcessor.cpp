@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "SceneDoc.h"
@@ -150,6 +151,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpatialPannerProcessor::crea
                                                               String("Layer Offset ") + String(a).toUpperCase(),
                                                               NormalisableRange<float>(-20.0f, 20.0f, 0.01f), 0.0f,
                                                               AudioParameterFloatAttributes().withLabel("m")));
+    // A layer with its own path: its speed along it as a factor of the
+    // scene's speed curve, or where along it it is (position timing).
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"lpspeed", 1}, "Layer Path Speed",
+                                                          NormalisableRange<float>(0.0f, 4.0f, 0.001f, 0.5f), 1.0f,
+                                                          AudioParameterFloatAttributes().withLabel("x")));
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"lppos", 1}, "Layer Path Position",
+                                                          NormalisableRange<float>(0.0f, 100.0f, 0.01f), 0.0f,
+                                                          AudioParameterFloatAttributes().withLabel("%")));
     layout.add(std::move(listener), std::move(layer));
     return layout;
 }
@@ -183,6 +192,8 @@ SpatialPannerProcessor::SpatialPannerProcessor()
     pX_ = params_.getRawParameterValue("offx");
     pY_ = params_.getRawParameterValue("offy");
     pZ_ = params_.getRawParameterValue("offz");
+    pPathSpeed_ = params_.getRawParameterValue("lpspeed");
+    pPathPosition_ = params_.getRawParameterValue("lppos");
 
     layerId_ = newId();
     doc_ = doc::defaultScene();
@@ -282,6 +293,13 @@ void SpatialPannerProcessor::applyDocToEngine(const json& d) {
         docChannels_ = L.channels;
         docStart_ = L.startTime;
         docLoop_ = L.loop;
+        // The editor moved the layer's position along its path: the Path
+        // Position parameter follows (but a value restored with the track's
+        // saved state stands on its first load).
+        const double frac = L.motion.fraction;
+        if (docPathFraction_ >= 0 ? std::abs(frac - docPathFraction_) > 1e-6 : !stateRestored_)
+            if (auto* p = params_.getParameter("lppos")) p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(frac * 100.0)));
+        docPathFraction_ = frac;
         // An Ambisonic layer with a file plays the file (the track's own
         // audio is not used); without one it plays the track's channels.
         const bool fromFile = sp::isAmbisonic(L) && (!L.audioFile.empty() || !L.audioFiles.empty());
@@ -332,6 +350,7 @@ bool SpatialPannerProcessor::setSceneDoc(const json& d, std::string& error) {
 
 void SpatialPannerProcessor::clearAutomationHistory() {
     if (role_ == Role::Scene) session_->clearHistory();
+    engine_.pathHistory().clear();
 }
 
 std::vector<SpatialPannerProcessor::HostTrack> SpatialPannerProcessor::hostTracks() {
@@ -539,6 +558,8 @@ void SpatialPannerProcessor::getStateInformation(juce::MemoryBlock& dest) {
     }
     if (role_ == Role::Scene && session_->sceneOwner() == token_)
         root.createNewChildElement("History")->addTextElement(juce::String(session_->encodeHistory()));
+    if (auto text = engine_.pathHistory().encode(); !text.empty())
+        root.createNewChildElement("PathHistory")->addTextElement(juce::String(text));
     copyXmlToBinary(root, dest);
 }
 
@@ -564,6 +585,8 @@ void SpatialPannerProcessor::setStateInformation(const void* data, int size) {
         }
     }
     historyText_ = xml->getChildByName("History") ? xml->getChildByName("History")->getAllSubText().toStdString() : std::string();
+    if (auto* h = xml->getChildByName("PathHistory")) engine_.pathHistory().decode(h->getAllSubText().toStdString());
+    else engine_.pathHistory().clear();
     stateRestored_ = true;
     if (xml->getStringAttribute("role") == "scene") becomeScene(false);
     else becomeLayer();
@@ -650,6 +673,11 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     lc.ambisonicRadiusScale = pSphereRadius_->load() / 100.0f;
     lc.ambisonicYawOffsetDeg = pSphereRotation_->load();
     if (pMono_->load() > 0.5f) lc.mono = true;   // off: the scene's setting stands
+    const float pathSpeed = pPathSpeed_->load();
+    const float pathPosition = std::clamp(pPathPosition_->load() / 100.0f, 0.0f, 1.0f);
+    // Ramped over the block from where the last one ended (jumps are not ramped).
+    const float pathPositionFrom = lastPathPosition_ < 0 || jumped ? pathPosition : lastPathPosition_;
+    lastPathPosition_ = pathPosition;
     const float meterGain = lc.mute ? 0.0f : docLevelGain_.load() * sp::dbToGain(levelDb);
     const int slot = slotForAudio_.load(std::memory_order_relaxed);
     const int layerCh = std::max(1, std::min(LayerEngine::kMaxInputs, docChannels_.load(std::memory_order_relaxed)));
@@ -722,6 +750,9 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         b.session = session_.get();
         b.useHistory = useHistory;
         b.layer = lc;
+        b.pathSpeed = pathSpeed;
+        b.pathPositionFrom = pathPositionFrom + (pathPosition - pathPositionFrom) * static_cast<float>(off) / static_cast<float>(n);
+        b.pathPosition = pathPositionFrom + (pathPosition - pathPositionFrom) * static_cast<float>(off + k) / static_cast<float>(n);
         engine_.process(b);
     }
     for (int c = no; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);

@@ -33,6 +33,7 @@ juce_add_plugin(SpatialPannerPlugin
 set(SP_PLUGIN_SOURCES
   Source/SharedSession.cpp
   Source/ListenerTimeline.cpp
+  Source/LayerPathHistory.cpp
   Source/LayerEngine.cpp
   Source/SceneDoc.cpp
   Source/LayerFile.cpp
