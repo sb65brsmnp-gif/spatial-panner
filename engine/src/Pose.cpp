@@ -211,11 +211,201 @@ double SampledSpeed::distanceAt(double t) const {
     return distance_[i] + (distance_[i + 1] - distance_[i]) * u;
 }
 
+// --------------------------------------------------------- Layer motion
+
+namespace {
+
+// Heading of a direction about +Y, degrees: 0 = towards -Z, positive turns
+// left (towards -X), the head's yaw convention.
+float headingOf(const Vec3& d) { return radToDeg(std::atan2(-d.x, -d.z)); }
+
+float wrap180(float a) {
+    a = std::fmod(a + 180.0f, 360.0f);
+    if (a < 0) a += 360.0f;
+    return a - 180.0f;
+}
+
+// 0 at x <= 0, 1 at x >= 1, smooth between.
+float smoothUnit(float x) {
+    x = clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+// Jumping back to the start of an open loop would click: the layer fades
+// out over its last few millimetres (5 ms of travel) and in again after.
+constexpr double kLoopFadeSeconds = 0.005;
+
+}  // namespace
+
+LayerMotionEvaluator::LayerMotionEvaluator(const LayerMotion& motion) : m_(motion) {
+    if (!m_.hasPath()) return;
+    path_ = SampledPath(m_.path);
+    if (path_.empty() || path_.length() < 1e-4f) return;
+    active_ = true;
+    closed_ = m_.path.closed || (path_.positionAt(0) - path_.positionAt(path_.length())).length() < 0.01f;
+    // After the last key the speed stays at the last key's, which distanceAt
+    // extrapolates exactly, so the table only has to reach the last key.
+    const double lastKey = m_.speed.keys.empty() ? 0.0 : m_.speed.keys.back().time;
+    speed_ = SampledSpeed(m_.speed, std::max(lastKey, 0.0) + 1.0, 0.005);
+    std::sort(m_.keys.begin(), m_.keys.end(), [](const PathKey& a, const PathKey& b) { return a.time < b.time; });
+    startHeading_ = headingAt(0, true);
+}
+
+double LayerMotionEvaluator::travel(double t) const {
+    const double rel = t - m_.startTime;
+    return rel <= 0 ? 0.0 : speed_.distanceAt(rel);
+}
+
+float LayerMotionEvaluator::speedAt(double t) const {
+    const double rel = t - m_.startTime;
+    return rel < 0 ? 0.0f : speed_.speedAt(rel);
+}
+
+float LayerMotionEvaluator::headingAt(float s, bool forward) const {
+    Vec3 d = path_.tangentAt(s);
+    if (!forward) d = -d;
+    d.y = 0;
+    if (d.lengthSquared() < 1e-8f) return startHeading_;  // straight up or down: keep the start heading
+    return headingOf(d);
+}
+
+float LayerMotionEvaluator::keyFraction(double t) const {
+    const auto& k = m_.keys;
+    if (k.empty()) return 0;
+    if (t <= k.front().time) return clamp(k.front().fraction, 0.0f, 1.0f);
+    if (t >= k.back().time) return clamp(k.back().fraction, 0.0f, 1.0f);
+    size_t i = 0;
+    while (i + 1 < k.size() && k[i + 1].time <= t) ++i;
+    const auto& a = k[i];
+    const auto& b = k[i + 1];
+    const double span = b.time - a.time;
+    const float u = applyEasing(a.easing, span > 0 ? static_cast<float>((t - a.time) / span) : 1.0f);
+    return clamp(lerp(a.fraction, b.fraction, u), 0.0f, 1.0f);
+}
+
+// The direction of the key move under way at `t`, or of the last one before
+// it while the layer waits between moves (forward when it never moved).
+bool LayerMotionEvaluator::keyDirection(double t) const {
+    const auto& k = m_.keys;
+    size_t i = 0;
+    while (i + 1 < k.size() && k[i + 1].time <= t) ++i;
+    for (size_t j = std::min(i + 1, k.size() - 1); j >= 1; --j) {
+        const float d = k[j].fraction - k[j - 1].fraction;
+        if (std::fabs(d) > 1e-6f) return d > 0;
+    }
+    return true;
+}
+
+MotionState LayerMotionEvaluator::evaluate(double t, const MotionOverride& o) const {
+    MotionState st;
+    if (!active_) return st;
+    const float L = path_.length();
+    float s = 0;
+    bool forward = true;
+    switch (m_.timing) {
+        case LayerTiming::Position:
+            s = clamp(o.fraction.value_or(m_.fraction), 0.0f, 1.0f) * L;
+            break;
+        case LayerTiming::Speed: {
+            const double u = std::max(0.0, o.distance.value_or(travel(t)));
+            const float v = o.distance ? o.speed : speedAt(t);
+            switch (m_.end) {
+                case PathEnd::Stop:
+                    s = static_cast<float>(std::min(u, static_cast<double>(L)));
+                    break;
+                case PathEnd::Loop: {
+                    s = static_cast<float>(std::fmod(u, static_cast<double>(L)));
+                    if (!closed_) {
+                        const float wd = std::max(v * static_cast<float>(kLoopFadeSeconds), 0.002f);
+                        if (u >= L) st.gain = std::min(st.gain, smoothUnit(s / wd));
+                        st.gain = std::min(st.gain, smoothUnit((L - s) / wd));
+                    }
+                    break;
+                }
+                case PathEnd::PingPong: {
+                    const double m = std::fmod(u, 2.0 * L);
+                    forward = m <= L;
+                    s = static_cast<float>(forward ? m : 2.0 * L - m);
+                    break;
+                }
+            }
+            break;
+        }
+        case LayerTiming::Keys: {
+            const auto& k = m_.keys;
+            if (k.empty()) break;
+            const double t0 = k.front().time, tN = k.back().time, P = tN - t0;
+            double tt = t;
+            bool reversed = false;
+            if (t > tN && P > 0) {
+                if (m_.end == PathEnd::Loop) {
+                    tt = t0 + std::fmod(t - t0, P);
+                } else if (m_.end == PathEnd::PingPong) {
+                    const double q = std::fmod(t - t0, 2.0 * P);
+                    reversed = q > P;
+                    tt = reversed ? tN - (q - P) : t0 + q;
+                }
+            }
+            s = keyFraction(tt) * L;
+            forward = keyDirection(tt) != reversed;
+            if (m_.end == PathEnd::Loop && P > 0 && !closed_ && t >= t0 &&
+                std::fabs(k.front().fraction - k.back().fraction) * L > 0.01f) {
+                if (t > tN) st.gain = std::min(st.gain, smoothUnit(static_cast<float>((tt - t0) / kLoopFadeSeconds)));
+                st.gain = std::min(st.gain, smoothUnit(static_cast<float>((tN - tt) / kLoopFadeSeconds)));
+            }
+            break;
+        }
+    }
+    s = clamp(s, 0.0f, L);
+    st.distance = s;
+    st.forward = forward;
+    st.offset = path_.positionAt(s) - path_.positionAt(0);
+    if (m_.turnAlongPath) st.yawDeg = wrap180(headingAt(s, forward) - startHeading_);
+    return st;
+}
+
+float levelKeysDb(const std::vector<LevelKey>& k, double t) {
+    if (k.empty()) return 0;
+    if (t <= k.front().time) return k.front().levelDb;
+    if (t >= k.back().time) return k.back().levelDb;
+    size_t i = 0;
+    while (i + 1 < k.size() && k[i + 1].time <= t) ++i;
+    const auto& a = k[i];
+    const auto& b = k[i + 1];
+    const double span = b.time - a.time;
+    const float u = applyEasing(a.easing, span > 0 ? static_cast<float>((t - a.time) / span) : 1.0f);
+    // Fades towards silence run in gain, not dB, so they reach zero smoothly.
+    if (a.levelDb <= kSilentDb || b.levelDb <= kSilentDb) {
+        const float ga = a.levelDb <= kSilentDb ? 0.0f : dbToGain(a.levelDb);
+        const float gb = b.levelDb <= kSilentDb ? 0.0f : dbToGain(b.levelDb);
+        const float g = lerp(ga, gb, u);
+        return g <= dbToGain(kSilentDb) ? kSilentDb : gainToDb(g);
+    }
+    return lerp(a.levelDb, b.levelDb, u);
+}
+
+float levelKeysGain(const std::vector<LevelKey>& k, double t) {
+    const float db = levelKeysDb(k, t);
+    return db <= kSilentDb ? 0.0f : dbToGain(db);
+}
+
 // ---------------------------------------------------------- PoseEvaluator
 
 PoseEvaluator::PoseEvaluator(const Scene& scene, double duration) : scene_(scene), duration_(duration) {
     for (const auto& p : scene.listener.paths) paths_.emplace_back(p);
     speed_ = SampledSpeed(scene.listener.speed, std::max(duration, 1.0));
+    layers_.reserve(scene.layers.size());
+    for (const auto& l : scene.layers) layers_.emplace_back(l.motion);
+}
+
+const LayerMotionEvaluator& PoseEvaluator::layerMotion(int i) const {
+    static const LayerMotionEvaluator none;
+    return i >= 0 && i < static_cast<int>(layers_.size()) ? layers_[static_cast<size_t>(i)] : none;
+}
+
+Vec3 PoseEvaluator::layerPosition(int i, double time) const {
+    if (i < 0 || i >= static_cast<int>(scene_.layers.size())) return {};
+    return scene_.layers[static_cast<size_t>(i)].position + layerMotion(i).evaluate(time).offset;
 }
 
 const SampledPath* PoseEvaluator::activePath(const ListenerControls& controls) const {
@@ -280,7 +470,7 @@ Quat PoseEvaluator::orientationAt(double time, const Vec3& position, const Vec3&
         case HeadMode::LookAt: {
             Vec3 target = head.lookAtPoint;
             if (head.lookAtLayer >= 0 && head.lookAtLayer < static_cast<int>(scene_.layers.size()))
-                target = scene_.layers[head.lookAtLayer].position;
+                target = layerPosition(head.lookAtLayer, time);
             Vec3 fwd = target - position;
             if (fwd.lengthSquared() < 1e-8f) fwd = tangent.lengthSquared() > 1e-10f ? tangent : Vec3{0, 0, -1};
             base = Quat::lookRotation(fwd);

@@ -25,6 +25,21 @@ struct PoseSample {
     float speed = 0;              // m/s along the path
 };
 
+// A layer with a path: the curve its centre travels and where it is over time.
+struct LayerTrackSample {
+    Vec3 position;     // the layer's centre
+    float yawDeg = 0;  // its turn along the path
+    float distance = 0;  // metres along the path
+};
+
+struct LayerTrack {
+    int layer = -1;
+    float length = 0;
+    std::vector<Vec3> points;  // the curve, from the layer's place, every `pathStep` metres
+    double dt = 0;
+    std::vector<LayerTrackSample> samples;  // at t = 0, dt, 2 dt, ... duration
+};
+
 struct SceneAnalysis {
     double duration = 0;          // seconds covered by `poses`
     double dt = 0;                // spacing of `poses`
@@ -33,6 +48,7 @@ struct SceneAnalysis {
     std::vector<PoseSample> poses;       // at t = 0, dt, 2 dt, ... duration
     double arrivalTime = -1;      // when the listener reaches the end of the active path, -1 = never
     MeshGeometry roomMesh;        // a Mesh room's triangles (loaded from its OBJ), empty otherwise
+    std::vector<LayerTrack> layers;  // one per layer that has a path
 };
 
 // `duration` <= 0 uses scene.duration, or 60 s when that is 0 too.

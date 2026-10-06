@@ -94,6 +94,9 @@ struct LayerControls {
     // yaw added.
     float ambisonicRadiusScale = 1.0f;
     float ambisonicYawOffsetDeg = 0;
+    // Layers with a path: travel or place along it instead of the scene's
+    // own timing (the plugin's Path Speed and Path Position automation).
+    MotionOverride motion;
 };
 
 // A scene edit prepared off the audio thread by Renderer::prepareUpdate and

@@ -15,6 +15,98 @@
 
 namespace sp {
 
+// ------------------------------------------------------------------- Paths
+
+enum class SegmentType { Line, CubicBezier, CatmullRom, Arc };
+
+// One path segment. Interpretation of `points` by type:
+//   Line:        p0, p1
+//   CubicBezier: p0, c0, c1, p1
+//   CatmullRom:  control points (>= 2), the curve passes through all of them
+//   Arc:         centre, start point, end point (circular arc in the plane
+//                through the three, going the short way from start to end;
+//                `arcTurns` adds whole extra revolutions)
+struct PathSegment {
+    SegmentType type = SegmentType::Line;
+    std::vector<Vec3> points;
+    int arcTurns = 0;
+    bool arcClockwise = false;  // seen from +Y; only used when the arc spans > 180 degrees
+};
+
+struct Path {
+    std::string name;
+    std::vector<PathSegment> segments;
+    bool closed = false;  // joins the end back to the start with a line
+};
+
+// ------------------------------------------------------------------ Speed
+
+enum class Easing { Linear, SmoothStep, EaseIn, EaseOut, Hold };
+
+struct SpeedKey {
+    double time = 0;      // seconds
+    float speed = 1.4f;   // m/s at this key
+    Easing easing = Easing::Linear;  // interpolation towards the next key
+};
+
+struct SpeedCurve {
+    std::vector<SpeedKey> keys;  // sorted by time; empty = constant 1.4 m/s
+};
+
+// ------------------------------------------------------------ Layer motion
+
+// A layer travelling along its own path. The path is drawn in world
+// coordinates from where the layer stands; the layer is carried by the
+// path's shape, so it sits at `position + path(s) - path(0)` at distance s
+// along it (dragging the layer moves the path with it).
+//
+// Timing, one of:
+//   Speed:    it waits at the start until `startTime`, then travels at the
+//             speed curve (key times relative to startTime; no keys =
+//             1.4 m/s).
+//   Keys:     "be here at this time": each key puts it at a fraction of the
+//             path's length at a time on the timeline; between keys it moves
+//             with the key's easing; before the first key it waits there.
+//   Position: it stands at `fraction` of the way (0..1); the plugin's
+//             Path Position automation drives this.
+// At the end: stop there, loop (jump back to the start; a closed path just
+// carries on round) or go back and forth.
+// `turnAlongPath` turns the layer about the vertical with its direction of
+// travel: its directivity, a stereo pair's bar and an Ambisonic sphere's
+// recording keep the angle to the direction of travel they had at the start
+// of the path.
+enum class LayerTiming { Speed, Keys, Position };
+enum class PathEnd { Stop, Loop, PingPong };
+
+struct PathKey {
+    double time = 0;      // seconds on the timeline
+    float fraction = 0;   // 0..1 of the path's length
+    Easing easing = Easing::SmoothStep;  // interpolation towards the next key
+};
+
+struct LayerMotion {
+    Path path;                  // no segments = the layer stands still
+    LayerTiming timing = LayerTiming::Speed;
+    SpeedCurve speed;
+    double startTime = 0;
+    std::vector<PathKey> keys;  // sorted by time
+    float fraction = 0;
+    PathEnd end = PathEnd::Stop;
+    bool turnAlongPath = false;
+
+    bool hasPath() const { return !path.segments.empty(); }
+};
+
+// Volume automation built into the scene (fades in the app): the level at
+// a timeline time, on top of the layer's level. At or below kSilentDb the
+// layer is silent. No keys = 0 dB throughout.
+struct LevelKey {
+    double time = 0;
+    float levelDb = 0;
+    Easing easing = Easing::Linear;
+};
+constexpr float kSilentDb = -80.0f;
+
 // ------------------------------------------------------------------ Layers
 
 // Six octave bands used for materials: 125, 250, 500, 1k, 2k, 4k Hz.
@@ -79,6 +171,9 @@ struct Layer {
     // Tools and the app: one mono file per channel, in channel order, instead
     // of the channels of `audioFile` (four separate B-format tracks).
     std::vector<std::string> audioFiles;
+
+    LayerMotion motion;
+    std::vector<LevelKey> levelKeys;  // sorted by time
 };
 
 // Half-vector from a stereo layer's centre to its right end (left = -offset).
@@ -197,44 +292,6 @@ MeshGeometry roomGeometry(const Room& room);
 // `usemtl NAME` picks the material via `materialFor(NAME)`. Throws on I/O
 // or parse errors.
 MeshGeometry loadObjMesh(const std::string& path, const std::function<Material(const std::string&)>& materialFor);
-
-// ------------------------------------------------------------------- Paths
-
-enum class SegmentType { Line, CubicBezier, CatmullRom, Arc };
-
-// One path segment. Interpretation of `points` by type:
-//   Line:        p0, p1
-//   CubicBezier: p0, c0, c1, p1
-//   CatmullRom:  control points (>= 2), the curve passes through all of them
-//   Arc:         centre, start point, end point (circular arc in the plane
-//                through the three, going the short way from start to end;
-//                `arcTurns` adds whole extra revolutions)
-struct PathSegment {
-    SegmentType type = SegmentType::Line;
-    std::vector<Vec3> points;
-    int arcTurns = 0;
-    bool arcClockwise = false;  // seen from +Y; only used when the arc spans > 180 degrees
-};
-
-struct Path {
-    std::string name;
-    std::vector<PathSegment> segments;
-    bool closed = false;  // joins the end back to the start with a line
-};
-
-// ------------------------------------------------------------------ Speed
-
-enum class Easing { Linear, SmoothStep, EaseIn, EaseOut, Hold };
-
-struct SpeedKey {
-    double time = 0;      // seconds
-    float speed = 1.4f;   // m/s at this key
-    Easing easing = Easing::Linear;  // interpolation towards the next key
-};
-
-struct SpeedCurve {
-    std::vector<SpeedKey> keys;  // sorted by time; empty = constant 1.4 m/s
-};
 
 // ------------------------------------------------------------ Head control
 

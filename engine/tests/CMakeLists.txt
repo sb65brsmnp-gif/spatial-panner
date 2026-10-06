@@ -1,6 +1,7 @@
 add_executable(sp_tests
   test_math.cpp
   test_pose.cpp
+  test_layer_motion.cpp
   test_dsp.cpp
   test_renderer.cpp
   test_scene_json.cpp

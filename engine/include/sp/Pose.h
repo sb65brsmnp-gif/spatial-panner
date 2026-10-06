@@ -6,6 +6,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "sp/Math.h"
@@ -69,6 +70,64 @@ private:
     static float evalSpeed(const SpeedCurve& c, double t);
 };
 
+// ------------------------------------------------------------ Layer motion
+
+// Live overrides of a layer's travel (the plugin's per-track automation).
+struct MotionOverride {
+    // Speed timing: metres travelled since the start of the path (before the
+    // end rule folds it onto the path) and the speed there, instead of the
+    // layer's own speed curve.
+    std::optional<double> distance;
+    float speed = 0;
+    // Position timing: 0..1 along the path instead of LayerMotion::fraction.
+    std::optional<float> fraction;
+};
+
+struct MotionState {
+    Vec3 offset;        // from the layer's own position to where it is now
+    float yawDeg = 0;   // turn about +Y since the start of the path (turnAlongPath), else 0
+    float gain = 1;     // < 1 only around the jump back to the start of an open looping path
+    float distance = 0; // metres along the path (0..length)
+    bool forward = true;  // travelling in the path's direction
+};
+
+// A layer's path and timing, built once, queried per sub-block. Like the
+// listener's pose, a pure function of timeline time (and the overrides).
+class LayerMotionEvaluator {
+public:
+    LayerMotionEvaluator() = default;
+    explicit LayerMotionEvaluator(const LayerMotion& motion);
+
+    bool active() const { return active_; }
+    float length() const { return path_.length(); }
+    const LayerMotion& motion() const { return m_; }
+    const SampledPath& path() const { return path_; }
+
+    // Speed timing: metres travelled by time t (0 before the start time) and
+    // the speed there, from the layer's own speed curve.
+    double travel(double t) const;
+    float speedAt(double t) const;
+
+    MotionState evaluate(double t, const MotionOverride& o = {}) const;
+
+private:
+    LayerMotion m_;
+    SampledPath path_;
+    SampledSpeed speed_;
+    bool active_ = false;
+    bool closed_ = false;       // the path ends where it starts: looping does not jump
+    float startHeading_ = 0;    // degrees, the direction of travel at the start
+
+    float headingAt(float s, bool forward) const;
+    float keyFraction(double t) const;
+    bool keyDirection(double t) const;
+};
+
+// The level automation's value at `t` in dB (0 with no keys).
+float levelKeysDb(const std::vector<LevelKey>& keys, double t);
+// Linear gain of the level automation at `t` (0 at or below kSilentDb).
+float levelKeysGain(const std::vector<LevelKey>& keys, double t);
+
 // Precomputed tables for a scene's listener. Build once, query per block.
 class PoseEvaluator {
 public:
@@ -82,9 +141,15 @@ public:
     float distanceAlongPath(double time, const ListenerControls& controls = {}) const;
     const SampledPath* activePath(const ListenerControls& controls = {}) const;
 
+    // Layer i's path and timing (an inactive evaluator when it has no path).
+    const LayerMotionEvaluator& layerMotion(int i) const;
+    // Where layer i is at `time` (its own timing, no overrides).
+    Vec3 layerPosition(int i, double time) const;
+
 private:
     Scene scene_;  // copy: the evaluator owns its inputs
     std::vector<SampledPath> paths_;
+    std::vector<LayerMotionEvaluator> layers_;
     SampledSpeed speed_;
     double duration_ = 0;
 
