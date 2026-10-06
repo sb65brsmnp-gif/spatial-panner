@@ -6,6 +6,7 @@
 #include <objc/runtime.h>
 
 #include <atomic>
+#include <cstdio>
 #include <initializer_list>
 
 namespace spplug {
@@ -24,6 +25,21 @@ bool isTransportKey(NSEvent* e) {
 }
 
 bool passToHost(NSEvent* e) { return isTransportKey(e) && !textEditing.load(); }
+
+// ~/Library/Logs/Spatial Panner/keys.log: every key the web view receives
+// and where it went, for bug reports (Logic cannot be run where the plug-in
+// is developed). Small: one line per key press.
+void logKey(const char* what, NSEvent* e) {
+    static FILE* f = [] {
+        NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/Spatial Panner"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        return fopen([[dir stringByAppendingPathComponent:@"keys.log"] fileSystemRepresentation], "a");
+    }();
+    if (!f) return;
+    fprintf(f, "%.3f %s type=%s code=%d repeat=%d editing=%d\n", [e timestamp], what,
+            [e type] == NSEventTypeKeyDown ? "down" : "up", (int) [e keyCode], (int) [e isARepeat], (int) textEditing.load());
+    fflush(f);
+}
 
 using KeyFn = void (*)(struct objc_super*, SEL, NSEvent*);
 
@@ -46,8 +62,19 @@ void patchClass(Class cls) {
     [patched addObject:cls];
     for (SEL sel : {@selector(keyDown:), @selector(keyUp:)}) {
         id block = ^void (id self, NSEvent* e) {
-            if (passToHost(e)) callNSView(self, sel, e);
-            else callWebView(cls, self, sel, e);
+            if (passToHost(e)) {
+                // A held key repeats after macOS's repeat delay. Logic toggles
+                // play/stop on every Space it is handed, and a key handed back
+                // from a plug-in window skips its own repeat filter, so a
+                // slightly long press played and then stopped. Repeats are
+                // dropped here.
+                if ([e isARepeat]) { logKey("dropped repeat", e); return; }
+                logKey("to Logic", e);
+                callNSView(self, sel, e);
+            } else {
+                logKey("to page", e);
+                callWebView(cls, self, sel, e);
+            }
         };
         class_addMethod(cls, sel, imp_implementationWithBlock(block), "v@:@");
     }

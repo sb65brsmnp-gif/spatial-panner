@@ -141,7 +141,9 @@ function updateHud(): void {
     ? (target ? `Drawing the path of ${target.name || `Layer ${tools.opts.layerTarget + 1}`} at its height. For the listener's path instead, choose Listener under "for" in the toolbar. Esc cancels.`
       : s.layers.length ? 'Drawing the listener\'s path. For a layer\'s own path, choose it under "for" in the toolbar, or press Esc and select the layer first.' : '')
     : !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
-      : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
+      // Until anything has been drawn; a scene whose layers move while the
+      // listener stands still (common in Logic) is not waiting for a path.
+      : !s.listener.paths.length && !s.layers.some((l) => l.motion?.path.segments.length) ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
   emptyHint.style.display = emptyHint.textContent ? '' : 'none';
 }
 

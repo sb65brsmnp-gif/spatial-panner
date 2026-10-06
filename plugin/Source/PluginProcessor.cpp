@@ -525,7 +525,7 @@ juce::String SpatialPannerProcessor::statusText() const {
         case Role::Undecided: return "Starting";
         case Role::Scene: {
             int n = static_cast<int>(session_->liveLayers(5000, false).size());
-            return "Holds the scene · " + juce::String(n) + (n == 1 ? " layer track" : " layer tracks") +
+            return "Holds the scene" + juce::String(juce::CharPointer_UTF8(" \xc2\xb7 ")) + juce::String(n) + (n == 1 ? " layer track" : " layer tracks") +
                    (session_->isShared() ? "" : " (this process only)");
         }
         case Role::Layer:
