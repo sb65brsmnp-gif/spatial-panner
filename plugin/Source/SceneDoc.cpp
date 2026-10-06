@@ -164,6 +164,15 @@ json engineView(const json& doc) {
     return d;
 }
 
+// The layer a link leads to: -1 for the listener, an index, or -2 for none.
+int linkTarget(const json& layer) {
+    if (!layer.contains("link") || !layer["link"].is_object()) return sp::kLinkNone;
+    const json& to = layer["link"]["to"];
+    if (to.is_string() && to.get<std::string>() == "listener") return sp::kLinkListener;
+    if (to.is_number_integer() && to.get<int>() >= 0) return to.get<int>();
+    return sp::kLinkNone;
+}
+
 sp::Scene layerScene(const json& docIn, const std::string& hostId, bool* found) {
     json d = engineView(docIn);
     const int i = layerIndex(d, hostId);
@@ -178,7 +187,28 @@ sp::Scene layerScene(const json& docIn, const std::string& hostId, bool* found) 
         }
         h["look_at_layer"] = -1;
     }
-    d["layers"] = json::array({layer});
+    // The layer first, then the layers it follows (a chain), carried along
+    // for their positions only, with the links renumbered.
+    json layers = json::array({layer});
+    std::vector<int> kept{i};
+    const int n = static_cast<int>(d["layers"].size());
+    for (size_t k = 0; k < layers.size(); ++k) {
+        const int to = linkTarget(layers[k]);
+        if (to < 0 || to >= n) continue;
+        int at = -1;
+        for (size_t j = 0; j < kept.size(); ++j) if (kept[j] == to) at = static_cast<int>(j);
+        if (at < 0) {
+            json lead = d["layers"][static_cast<size_t>(to)];
+            lead["reference_only"] = true;
+            lead.erase("audio");
+            lead.erase("audio_files");
+            kept.push_back(to);
+            layers.push_back(std::move(lead));
+            at = static_cast<int>(kept.size()) - 1;
+        }
+        layers[k]["link"]["to"] = at;
+    }
+    d["layers"] = std::move(layers);
     return sp::sceneFromJson(d.dump());
 }
 

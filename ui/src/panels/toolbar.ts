@@ -28,6 +28,8 @@ export class Toolbar {
   private undoBtn: HTMLButtonElement;
   private redoBtn: HTMLButtonElement;
   private shapeSel: HTMLSelectElement;
+  private targetSel: HTMLSelectElement;
+  private targetNames: string[] = [];
   readonly title: HTMLElement;
 
   // `plugin`: the scene lives in the host's project, so files are only
@@ -74,6 +76,11 @@ export class Toolbar {
     this.shapeSel.value = tools.opts.shape;
     this.shapeSel.addEventListener('change', () => tools.setTool('shape', this.shapeSel.value as ShapeKind));
     toolGroup.append(shapeBtn, this.shapeSel);
+    // Whose path the drawing tools draw. Picking a tool with a layer
+    // selected targets that layer; this shows and changes it.
+    this.targetSel = el('select', { class: 'shape-select target-select', title: 'Whose path the drawing tools draw: the listener\'s, or a layer\'s own (a layer selected when you pick a tool is chosen for you)' });
+    this.targetSel.addEventListener('change', () => tools.setTarget(Number(this.targetSel.value)));
+    toolGroup.append(el('span', { class: 'tlabel' }, 'for'), this.targetSel);
 
     const viewGroup = el('div', { class: 'group' });
     const views: [ViewName, string, string][] = [['persp', '3D', 'Orbit view (1)'], ['top', 'Top', 'Top view (2)'], ['front', 'Front', 'Front view (3)'],
@@ -122,9 +129,16 @@ export class Toolbar {
     return wrap;
   }
 
-  refresh(state: { view: ViewName; follow: boolean; canUndo: boolean; canRedo: boolean; title: string }): void {
+  refresh(state: { view: ViewName; follow: boolean; canUndo: boolean; canRedo: boolean; title: string; layers: string[] }): void {
     for (const [t, x] of this.toolBtns) x.classList.toggle('active', t === this.tools.opts.tool);
     this.shapeSel.value = this.tools.opts.shape;
+    const names = ['Listener', ...state.layers];
+    if (names.length !== this.targetNames.length || names.some((n, i) => n !== this.targetNames[i])) {
+      this.targetNames = names;
+      this.targetSel.replaceChildren(...names.map((n, i) => el('option', { value: String(i - 1) }, n)));
+    }
+    this.targetSel.value = String(Math.min(this.tools.opts.layerTarget, state.layers.length - 1));
+    this.targetSel.classList.toggle('active', this.tools.opts.layerTarget >= 0 && this.tools.opts.tool !== 'select');
     for (const [v, x] of this.viewBtns) x.classList.toggle('active', v === state.view);
     this.followBtn.classList.toggle('active', state.follow);
     this.undoBtn.disabled = !state.canUndo;

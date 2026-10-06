@@ -35,6 +35,8 @@ SP_ENUM(Easing, {Easing::Linear, "linear"}, {Easing::SmoothStep, "smooth"}, {Eas
         {Easing::EaseOut, "ease_out"}, {Easing::Hold, "hold"})
 SP_ENUM(HeadMode, {HeadMode::AlongPath, "along_path"}, {HeadMode::LookAt, "look_at"}, {HeadMode::Keyframed, "keyframed"})
 SP_ENUM(PositionMode, {PositionMode::Speed, "speed"}, {PositionMode::AlongPath, "along_path"})
+SP_ENUM(LayerTiming, {LayerTiming::Speed, "speed"}, {LayerTiming::Keys, "keys"}, {LayerTiming::Position, "position"})
+SP_ENUM(PathEnd, {PathEnd::Stop, "stop"}, {PathEnd::Loop, "loop"}, {PathEnd::PingPong, "ping_pong"})
 
 template <typename E>
 std::string enumToString(E e) {
@@ -178,6 +180,64 @@ SceneObject objectFromJson(const json& j) {
 
 // ---- layers
 
+json pathToJson(const Path& p);
+Path pathFromJson(const json& j);
+
+json speedToJson(const SpeedCurve& c) {
+    json keys = json::array();
+    for (const auto& k : c.keys)
+        keys.push_back({{"time", k.time}, {"speed", k.speed}, {"easing", enumToString(k.easing)}});
+    return keys;
+}
+
+// A number (constant speed) or an array of {time, speed, easing}.
+SpeedCurve speedFromJson(const json& s) {
+    SpeedCurve c;
+    if (s.is_number()) {
+        c.keys = {{0.0, s.get<float>(), Easing::Linear}};
+    } else {
+        for (const auto& k : s) {
+            SpeedKey sk;
+            sk.time = k.value("time", 0.0);
+            sk.speed = k.value("speed", 1.4f);
+            sk.easing = getEnum(k, "easing", Easing::Linear);
+            c.keys.push_back(sk);
+        }
+        std::sort(c.keys.begin(), c.keys.end(), [](const SpeedKey& a, const SpeedKey& b) { return a.time < b.time; });
+    }
+    return c;
+}
+
+json motionToJson(const LayerMotion& m) {
+    json keys = json::array();
+    for (const auto& k : m.keys) keys.push_back({{"time", k.time}, {"fraction", k.fraction}, {"easing", enumToString(k.easing)}});
+    return {{"path", pathToJson(m.path)}, {"timing", enumToString(m.timing)}, {"speed", speedToJson(m.speed)},
+            {"start_time", m.startTime}, {"keys", keys}, {"fraction", m.fraction}, {"end", enumToString(m.end)},
+            {"turn", m.turnAlongPath}};
+}
+
+LayerMotion motionFromJson(const json& j) {
+    LayerMotion m;
+    if (j.contains("path") && j["path"].is_object()) m.path = pathFromJson(j["path"]);
+    m.timing = getEnum(j, "timing", m.timing);
+    if (j.contains("speed")) m.speed = speedFromJson(j["speed"]);
+    m.startTime = j.value("start_time", m.startTime);
+    if (j.contains("keys") && j["keys"].is_array()) {
+        for (const auto& k : j["keys"]) {
+            PathKey pk;
+            pk.time = k.value("time", 0.0);
+            pk.fraction = clamp(k.value("fraction", 0.0f), 0.0f, 1.0f);
+            pk.easing = getEnum(k, "easing", Easing::SmoothStep);
+            m.keys.push_back(pk);
+        }
+        std::sort(m.keys.begin(), m.keys.end(), [](const PathKey& a, const PathKey& b) { return a.time < b.time; });
+    }
+    m.fraction = clamp(j.value("fraction", m.fraction), 0.0f, 1.0f);
+    m.end = getEnum(j, "end", m.end);
+    m.turnAlongPath = j.value("turn", m.turnAlongPath);
+    return m;
+}
+
 json layerToJson(const Layer& l) {
     json j;
     j["name"] = l.name;
@@ -209,6 +269,21 @@ json layerToJson(const Layer& l) {
                               {"room_send", a.roomSend}};
     }
     if (!l.audioFiles.empty()) j["audio_files"] = l.audioFiles;
+    if (l.motion.hasPath()) j["motion"] = motionToJson(l.motion);
+    if (!l.levelKeys.empty()) {
+        json keys = json::array();
+        for (const auto& k : l.levelKeys) keys.push_back({{"time", k.time}, {"level_db", k.levelDb}, {"easing", enumToString(k.easing)}});
+        j["level_keys"] = keys;
+    }
+    if (!l.spatialize) j["spatialize"] = false;
+    if (l.roomSend) j["room_send"] = true;
+    if (l.link.active()) {
+        json keys = json::array();
+        for (const auto& k : l.link.keys) keys.push_back({{"time", k.time}, {"linked", k.linked}});
+        j["link"] = json{{"to", l.link.to == kLinkListener ? json("listener") : json(l.link.to)},
+                         {"linked_at_start", l.link.linkedAtStart}, {"keys", keys}};
+    }
+    if (l.referenceOnly) j["reference_only"] = true;
     return j;
 }
 
@@ -260,6 +335,35 @@ Layer layerFromJson(const json& j) {
     }
     if (j.contains("audio_files") && j["audio_files"].is_array())
         for (const auto& f : j["audio_files"]) l.audioFiles.push_back(f.get<std::string>());
+    if (j.contains("motion") && j["motion"].is_object()) l.motion = motionFromJson(j["motion"]);
+    if (j.contains("level_keys") && j["level_keys"].is_array()) {
+        for (const auto& k : j["level_keys"]) {
+            LevelKey lk;
+            lk.time = k.value("time", 0.0);
+            lk.levelDb = std::max(k.value("level_db", 0.0f), kSilentDb);
+            lk.easing = getEnum(k, "easing", Easing::Linear);
+            l.levelKeys.push_back(lk);
+        }
+        std::sort(l.levelKeys.begin(), l.levelKeys.end(), [](const LevelKey& a, const LevelKey& b) { return a.time < b.time; });
+    }
+    l.spatialize = j.value("spatialize", l.spatialize);
+    l.roomSend = j.value("room_send", l.roomSend);
+    if (j.contains("link") && j["link"].is_object()) {
+        const json& k = j["link"];
+        auto& ln = l.link;
+        if (k.contains("to")) {
+            const json& to = k["to"];
+            if (to.is_string() && to.get<std::string>() == "listener") ln.to = kLinkListener;
+            else if (to.is_number_integer() && to.get<int>() >= 0) ln.to = to.get<int>();
+            else ln.to = kLinkNone;
+        }
+        ln.linkedAtStart = k.value("linked_at_start", ln.linkedAtStart);
+        if (k.contains("keys") && k["keys"].is_array()) {
+            for (const auto& e : k["keys"]) ln.keys.push_back({e.value("time", 0.0), e.value("linked", true)});
+            std::sort(ln.keys.begin(), ln.keys.end(), [](const LinkKey& a, const LinkKey& b) { return a.time < b.time; });
+        }
+    }
+    l.referenceOnly = j.value("reference_only", l.referenceOnly);
     return l;
 }
 
@@ -437,10 +541,7 @@ json listenerToJson(const Listener& l) {
     j["paths"] = paths;
     j["active_path"] = l.activePath;
     j["position_mode"] = enumToString(l.positionMode);
-    json keys = json::array();
-    for (const auto& k : l.speed.keys)
-        keys.push_back({{"time", k.time}, {"speed", k.speed}, {"easing", enumToString(k.easing)}});
-    j["speed"] = keys;
+    j["speed"] = speedToJson(l.speed);
     j["path_start_time"] = l.pathStartTime;
     j["path_fraction"] = l.pathFraction;
     j["loop_path"] = l.loopPath;
@@ -470,22 +571,7 @@ Listener listenerFromJson(const json& j) {
     if (j.contains("path")) l.paths.push_back(pathFromJson(j.at("path")));
     l.activePath = j.value("active_path", 0);
     l.positionMode = getEnum(j, "position_mode", l.positionMode);
-    if (j.contains("speed")) {
-        const auto& s = j.at("speed");
-        if (s.is_number()) {
-            l.speed.keys = {{0.0, s.get<float>(), Easing::Linear}};
-        } else {
-            for (const auto& k : s) {
-                SpeedKey sk;
-                sk.time = k.value("time", 0.0);
-                sk.speed = k.value("speed", 1.4f);
-                sk.easing = getEnum(k, "easing", Easing::Linear);
-                l.speed.keys.push_back(sk);
-            }
-            std::sort(l.speed.keys.begin(), l.speed.keys.end(),
-                      [](const SpeedKey& a, const SpeedKey& b) { return a.time < b.time; });
-        }
-    }
+    if (j.contains("speed")) l.speed = speedFromJson(j.at("speed"));
     l.pathStartTime = j.value("path_start_time", 0.0);
     l.pathFraction = j.value("path_fraction", 0.0f);
     l.loopPath = j.value("loop_path", false);

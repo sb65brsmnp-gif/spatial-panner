@@ -11,7 +11,8 @@ import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
 import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint, layerHome, firstPoint,
-  defaultScene } from '../model/scene';
+  defaultScene, hasPath, removeLayerLinks } from '../model/scene';
+import { attachPath, layerOfPath, layerPathIndex, moveLayerTo, pathOf, removePath } from '../model/layerMotion';
 import {
   appendSegments, translatePath, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
   round3, samplePath, snap, spiral, getPoint, dist, type PointRef,
@@ -30,6 +31,7 @@ export interface ToolOptions {
   spiralTurns: number;
   helixTurns: number;
   helixRise: number;
+  layerTarget: number;   // the drawing tools draw this layer's path (-1: the listener's)
 }
 
 interface PenAnchor { p: V3; hin: V3; hout: V3 }
@@ -53,7 +55,7 @@ const vec = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
 type PathDocHost = { paths: PathDoc[]; active_path: number; static_position: V3 };
 
 export class Interaction {
-  opts: ToolOptions = { tool: 'select', shape: 'circle', grid: 0, append: false, spiralTurns: 3, helixTurns: 3, helixRise: 2 };
+  opts: ToolOptions = { tool: 'select', shape: 'circle', grid: 0, append: false, spiralTurns: 3, helixTurns: 3, helixRise: 2, layerTarget: -1 };
   private drag: Drag | null = null;
   private clicks: V3[] = [];            // polyline / curve points so far
   private pen: PenAnchor[] = [];
@@ -74,14 +76,44 @@ export class Interaction {
     el.addEventListener('dblclick', (e) => this.dblclick(e));
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', (e) => this.key(e));
+    // Selecting a layer (in the Layers list) while a drawing tool is out
+    // makes the next stroke that layer's path.
+    store.subscribe((kinds) => {
+      if (!kinds.has('selection') || this.opts.tool === 'select') return;
+      const i = this.selectedLayer();
+      if (i >= 0 && i !== this.opts.layerTarget) { this.opts.layerTarget = i; this.store.emit('tool'); }
+    });
     this.applyControls();
   }
 
+  // The layer the selection is on: the layer itself or a point of its path.
+  private selectedLayer(): number {
+    const sel = this.store.selection;
+    if (sel.kind === 'layer') return sel.index;
+    if (sel.kind === 'point') return layerOfPath(sel.path);
+    return -1;
+  }
+
+  // Picking a drawing tool while a layer is selected draws that layer's
+  // path; with nothing (or a listener path point) selected, the listener's.
+  // Switching between drawing tools keeps the target, so "Path for" in the
+  // toolbar can still choose the listener while a layer is selected.
   setTool(tool: ToolName, shape?: ShapeKind): void {
     this.cancelDrawing();
+    const from = this.opts.tool;
     this.opts.tool = tool;
+    if (tool === 'select') this.opts.layerTarget = -1;
+    else if (from === 'select') this.opts.layerTarget = this.selectedLayer();
     if (shape) this.opts.shape = shape;
     this.applyControls();
+    this.onToolChange();
+    this.store.emit('tool');
+  }
+
+  // "Path for" in the toolbar: whose path the drawing tools draw.
+  setTarget(i: number): void {
+    if (this.opts.tool === 'select') this.setTool('curve');
+    this.opts.layerTarget = this.store.scene.layers[i] ? i : -1;
     this.onToolChange();
     this.store.emit('tool');
   }
@@ -99,7 +131,21 @@ export class Interaction {
     this.vp.container.classList.toggle('drawing', drawing);
   }
 
-  private get drawHeight(): number { return this.store.scene.editor?.draw_height ?? 1.7; }
+  // Draws a path for layer i with `tool` (the curve tool by default); the
+  // path is the layer's when the stroke is finished.
+  drawLayerPath(i: number, tool: ToolName = 'curve'): void {
+    this.setTool(this.opts.tool === 'select' ? tool : this.opts.tool);
+    this.opts.layerTarget = i;
+    this.onToolChange();
+    this.store.emit('tool');
+  }
+
+  private get drawHeight(): number {
+    const i = this.opts.layerTarget;
+    const l = i >= 0 ? this.store.scene.layers[i] : undefined;
+    // A layer's path is drawn at the layer's height.
+    return l ? l.position[1] : this.store.scene.editor?.draw_height ?? 1.7;
+  }
 
   // Where the pointer meets the drawing plane (horizontal at the draw height,
   // or the view plane in front/side views).
@@ -202,7 +248,8 @@ export class Interaction {
       let end = (hits[0].object.userData.end as 'centre' | 'L' | 'R' | 'radius' | undefined) ?? 'centre';
       if (end === 'radius' ? !isAmbisonic(l) : !isStereo(l) || l.stereo?.mono) end = 'centre';
       const [left, right] = stereoEnds(l);
-      const pos = new THREE.Vector3(...(end === 'L' ? left : end === 'R' ? right : end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : l.position));
+      const local: V3 = end === 'L' ? left : end === 'R' ? right : end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : l.position;
+      const pos = new THREE.Vector3(...this.toShown(index, local));
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
       this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit), moved: false, x: e.clientX, y: e.clientY };
@@ -211,15 +258,25 @@ export class Interaction {
       return;
     }
     if (e.altKey) {
+      // Onto the selected layer's path, or the listener's active path.
       const L = this.store.scene.listener;
-      const path = L.paths[L.active_path];
+      const sel = this.store.selection;
+      const li = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
+      const idx = li >= 0 && hasPath(this.store.scene.layers[li]) ? layerPathIndex(li) : L.active_path;
+      const path = pathOf(this.store.scene, idx);
       const p = this.drawPoint(e, false);
       if (path && p) {
         let ref: PointRef | null = null;
-        this.store.update((s) => { ref = insertPoint(s.listener.paths[s.listener.active_path], this.nearestHeight(path, p)); });
-        if (ref) this.store.select({ kind: 'point', path: L.active_path, ref });
+        this.store.update((s) => { const q = pathOf(s, idx); if (q) ref = insertPoint(q, this.nearestHeight(path, p)); });
+        if (ref) this.store.select({ kind: 'point', path: idx, ref });
         return;
       }
+    }
+    // Clicking a layer's path selects the layer.
+    const layerLine = rc.intersectObjects(this.view.pathGroup.children, false).find((h) => h.object.userData.kind === 'layerpath');
+    if (layerLine) {
+      this.store.select({ kind: 'layer', index: layerLine.object.userData.layer as number });
+      return;
     }
     // Clicking a path line makes it the active path.
     const lineHits = rc.intersectObjects(this.view.pathGroup.children, false).filter((h) => h.object.userData.kind === 'path');
@@ -273,12 +330,18 @@ export class Interaction {
         if (!hit) return;
         let p = vec(hit.add(d.offset));
         p = this.snapEdit(p, d.plane);
+        // The layer is shown where it is on its path; the drag moves where
+        // it stands (and its path with it) by as much.
+        const shown = (local: V3) => this.toShown(d.index, local);
         this.store.update((s) => {
           const l = s.layers[d.index];
           if (d.end === 'centre') {
-            l.position = this.keepAxes(l.position, p, d.plane);
+            const c = shown(l.position);
+            const to = this.keepAxes(c, p, d.plane);
+            moveLayerTo(l, [l.position[0] + to[0] - c[0], l.position[1] + to[1] - c[1], l.position[2] + to[2] - c[2]]);
             return;
           }
+          p = this.fromShown(d.index, this.keepAxes(shown(d.end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : stereoEnds(l)[d.end === 'L' ? 0 : 1]), p, d.plane));
           if (d.end === 'radius') {
             // The handle's distance from the centre is the sphere's radius.
             const c = l.position;
@@ -290,7 +353,7 @@ export class Interaction {
           // about the centre with Alt); centre, width, rotation and elevation
           // follow from where the two ends are.
           const [left, right] = stereoEnds(l);
-          const moved = this.keepAxes(d.end === 'L' ? left : right, p, d.plane);
+          const moved = p;
           const c = l.position;
           const mirrored: V3 = [2 * c[0] - moved[0], 2 * c[1] - moved[1], 2 * c[2] - moved[2]];
           const other = d.mirror ? mirrored : (d.end === 'L' ? right : left);
@@ -306,9 +369,18 @@ export class Interaction {
         let p = vec(hit.add(d.offset));
         p = this.snapEdit(p, d.plane);
         this.store.update((s) => {
-          const path = s.listener.paths[d.path];
-          const cur = getPoint(path, d.ref);
-          if (cur) movePoint(path, d.ref, this.keepAxes(cur, p, d.plane));
+          const path = pathOf(s, d.path);
+          const cur = path && getPoint(path, d.ref);
+          if (!path || !cur) return;
+          const to = this.keepAxes(cur, p, d.plane);
+          // A layer's path starts at the layer: its first point moves both.
+          const li = layerOfPath(d.path);
+          const f = firstPoint(path);
+          if (li >= 0 && f && Math.hypot(cur[0] - f[0], cur[1] - f[1], cur[2] - f[2]) < 1e-6 && !d.ref.seg && d.ref.pt === (path.segments[0].type === 'arc' ? 1 : 0)) {
+            moveLayerTo(s.layers[li], to);
+            return;
+          }
+          movePoint(path, d.ref, to);
         }, `point-move-${d.path}-${d.ref.seg}-${d.ref.pt}`);
         break;
       }
@@ -428,7 +500,7 @@ export class Interaction {
       if (!l) return;
       if (end === 'radius') l.ambisonic = { ...(l.ambisonic ?? defaultAmbisonic()), radius: defaultAmbisonic().radius };
       else if (end === 'L' || end === 'R') l.stereo = { ...defaultStereo(), mono: l.stereo?.mono ?? false };
-      else l.position = layerHome(l);
+      else moveLayerTo(l, layerHome(l));
     });
   }
 
@@ -436,6 +508,12 @@ export class Interaction {
     const sel = this.store.selection;
     if (sel.kind === 'point') {
       this.store.update((s) => {
+        const li = layerOfPath(sel.path);
+        if (li >= 0) {
+          const path = pathOf(s, sel.path);
+          if (path && !deletePoint(path, sel.ref)) removePath(s.layers[li]);
+          return;
+        }
         const path = s.listener.paths[sel.path];
         if (path && !deletePoint(path, sel.ref)) {
           // Last segment of the path: remove the whole path.
@@ -447,6 +525,7 @@ export class Interaction {
     } else if (sel.kind === 'layer') {
       this.store.update((s) => {
         s.layers.splice(sel.index, 1);
+        removeLayerLinks(s.layers, sel.index);
         if (s.listener.head.look_at_layer === sel.index) s.listener.head.look_at_layer = -1;
         else if (s.listener.head.look_at_layer > sel.index) s.listener.head.look_at_layer--;
       });
@@ -529,6 +608,14 @@ export class Interaction {
   // active. A new path starts at the playhead: the listener waits at its
   // first point until then (in the plugin, the playhead is Logic's).
   private commit(segs: SegmentDoc[], closed: boolean): void {
+    const li = this.opts.layerTarget;
+    if (li >= 0 && this.store.scene.layers[li]) {
+      // A layer's path: it sets off from the playhead (speed timing).
+      this.store.update((s) => attachPath(s.layers[li], segs, closed, this.opts.append, Math.max(0, Math.round(this.store.time * 100) / 100)));
+      this.setTool('select');
+      this.store.select({ kind: 'layer', index: li });
+      return;
+    }
     this.store.update((s) => {
       const L = s.listener;
       const active = L.paths[L.active_path];
@@ -549,6 +636,21 @@ export class Interaction {
 
   // --------------------------------------------------------- helpers
 
+  // A point of layer i (where it stands, unmoved) as it is shown at the
+  // playhead (carried along its path and turned with it), and back.
+  private toShown(i: number, p: V3): V3 {
+    const l = this.store.scene.layers[i];
+    const [x, y, z, yaw] = this.store.layerPlace(i, this.store.time);
+    const r = rotY([p[0] - l.position[0], p[1] - l.position[1], p[2] - l.position[2]], yaw);
+    return [x + r[0], y + r[1], z + r[2]];
+  }
+  private fromShown(i: number, p: V3): V3 {
+    const l = this.store.scene.layers[i];
+    const [x, y, z, yaw] = this.store.layerPlace(i, this.store.time);
+    const r = rotY([p[0] - x, p[1] - y, p[2] - z], -yaw);
+    return round3([l.position[0] + r[0], l.position[1] + r[1], l.position[2] + r[2]]);
+  }
+
   private snapEdit(p: V3, plane: THREE.Plane): V3 {
     if (this.opts.grid <= 0) return round3(p);
     const vertical = Math.abs(plane.normal.y) < 0.5;
@@ -564,6 +666,13 @@ export class Interaction {
     // Camera-facing vertical plane (Shift+drag): height only.
     return round3([cur[0], p[1], cur[2]]);
   }
+}
+
+// Turns v about +Y by `deg` (positive: to the left seen from above, the
+// engine's rotateYaw).
+function rotY(v: V3, deg: number): V3 {
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
 }
 
 function penSegments(anchors: PenAnchor[]): SegmentDoc[] {

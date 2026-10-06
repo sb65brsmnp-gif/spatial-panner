@@ -25,7 +25,14 @@ bool sameLayout(const sp::SpeakerLayout& a, const sp::SpeakerLayout& b) {
 float headroomDistance(const sp::Scene& s) {
     float r = 5.0f;
     auto grow = [&](const sp::Vec3& p) { r = std::max(r, p.length()); };
-    for (const auto& l : s.layers) grow(l.position);
+    for (const auto& l : s.layers) {
+        grow(l.position);
+        // A layer's path carries it from its place by the path's shape.
+        if (!l.motion.hasPath() || l.motion.path.segments.front().points.empty()) continue;
+        const sp::Vec3 p0 = l.motion.path.segments.front().points.front();
+        for (const auto& seg : l.motion.path.segments)
+            for (const auto& q : seg.points) grow(l.position + (q - p0));
+    }
     for (const auto& p : s.listener.paths)
         for (const auto& seg : p.segments)
             for (const auto& q : seg.points) grow(q);
@@ -102,6 +109,7 @@ struct LayerEngine::Program {
     std::vector<float*> outPtrs;
     sp::ListenerControls lastControls;
     double lastTime = 0;
+    sp::LayerMotionEvaluator motion;   // the layer's path and timing
     bool usesSteam = false;
     float tail = 3.0f;   // seconds of output after the input stops
 };
@@ -110,6 +118,7 @@ struct LayerEngine::Patch {
     Program* target = nullptr;
     std::unique_ptr<sp::SceneUpdate> update;
     ListenerTimeline timeline;
+    sp::LayerMotionEvaluator motion;
 };
 
 struct LayerEngine::Inbox {
@@ -224,6 +233,7 @@ void LayerEngine::update() {
             patch->target = pub;
             patch->update = std::move(u);
             patch->timeline = ListenerTimeline(scene_);
+            if (!scene_.layers.empty()) patch->motion = sp::LayerMotionEvaluator(scene_.layers.front().motion);
             std::lock_guard<std::mutex> il(inbox_->m);
             if (inbox_->push({nullptr, patch})) {
                 inbox_->publishedRevision = revision_;
@@ -250,6 +260,7 @@ void LayerEngine::startBuildLocked() {
             p = std::make_unique<Program>();
             p->cfg = cfg;
             p->timeline = ListenerTimeline(scene);
+            if (!scene.layers.empty()) p->motion = sp::LayerMotionEvaluator(scene.layers.front().motion);
             if (cfg.render) {
                 sp::RenderConfig rc;
                 rc.sampleRate = cfg.sampleRate;
@@ -336,6 +347,7 @@ void LayerEngine::handleInbox(bool blocking) {
                 fadePos_ = 0;
             }
             hasProgram_ = true;
+            history_.curveChanged();
             if (current_->renderer) tail_ = current_->tail;
             usesSteam_ = current_->usesSteam;
             offlineProgram_ = current_->cfg.offline;
@@ -344,6 +356,8 @@ void LayerEngine::handleInbox(bool blocking) {
             if (p.target && p.target == current_) {
                 if (p.update && current_->renderer) current_->renderer->applyUpdate(*p.update);
                 std::swap(current_->timeline, p.timeline);
+                std::swap(current_->motion, p.motion);
+                history_.curveChanged();
             }
             if (!inbox_->garbage.push({nullptr, m.patch})) { /* leak */ }
         }
@@ -352,7 +366,7 @@ void LayerEngine::handleInbox(bool blocking) {
 
 void LayerEngine::drainInboxBlocking() { handleInbox(true); }
 
-void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
+void LayerEngine::renderProgram(Program& p, const Block& b, int numOut, bool primary) {
     const double sr = p.cfg.sampleRate;
     const SharedSession& s = *b.session;
     p.timeline.refresh(s, b.useHistory);
@@ -361,7 +375,12 @@ void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
         p.lastTime = b.time;
         return;
     }
-    p.renderer->setLayerControls(0, b.layer);
+    // A layer with a path: this track's Path Speed (integrated over what was
+    // played, so it is evaluated per sub-block) or Path Position.
+    const bool bySpeed = p.motion.active() && p.motion.motion().timing == sp::LayerTiming::Speed;
+    const bool byPosition = p.motion.active() && p.motion.motion().timing == sp::LayerTiming::Position;
+    sp::LayerControls lc = b.layer;
+    if (!bySpeed || !primary) p.renderer->setLayerControls(0, lc);
     const float* in[kMaxInputs] = {};
     float* out[kMaxOutputs];
     int done = 0;
@@ -374,6 +393,16 @@ void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
             p.lastControls = p.timeline.evaluate(s, t, b.playing, b.useHistory);
             p.lastTime = t;
             p.renderer->setListenerControls(p.lastControls);
+            if (bySpeed && primary) {
+                lc.motion.distance = history_.distanceAt(p.motion, t, b.pathSpeed);
+                lc.motion.speed = history_.speedAt(p.motion, t, b.pathSpeed);
+                pathTravel_.store(*lc.motion.distance, std::memory_order_relaxed);
+                p.renderer->setLayerControls(0, lc);
+            } else if (byPosition) {
+                const float u = static_cast<float>(done) / static_cast<float>(b.numFrames);
+                lc.motion.fraction = b.pathPositionFrom + (b.pathPosition - b.pathPositionFrom) * u;
+                p.renderer->setLayerControls(0, lc);
+            }
         }
         for (int c = 0; c < kMaxInputs; ++c) in[c] = c < b.numInputs && b.inputs[c] ? b.inputs[c] + done : nullptr;
         for (int c = 0; c < p.numOut; ++c) out[c] = p.out[static_cast<size_t>(c)].data() + done;
@@ -386,6 +415,8 @@ void LayerEngine::renderProgram(Program& p, const Block& b, int numOut) {
 
 void LayerEngine::process(const Block& b) {
     handleInbox(false);
+    history_.beginBlock();
+    if (b.playing && current_) history_.record(b.time, b.time + b.numFrames / current_->cfg.sampleRate, b.pathSpeed);
     for (int c = 0; c < b.numOutputs; ++c)
         if (b.outputs[c]) std::fill(b.outputs[c], b.outputs[c] + b.numFrames, 0.0f);
     if (!current_ || !b.session) return;
@@ -403,10 +434,13 @@ void LayerEngine::process(const Block& b) {
         sub.numFrames = std::min(maxBlock, b.numFrames - off);
         for (int c = 0; c < kMaxInputs; ++c) sub.inputs[c] = b.inputs[c] ? b.inputs[c] + off : nullptr;
         sub.time = b.time + off / current_->cfg.sampleRate;
-        renderProgram(*current_, sub, b.numOutputs);
+        const auto ramp = [&](int at) { return b.pathPositionFrom + (b.pathPosition - b.pathPositionFrom) * static_cast<float>(at) / static_cast<float>(b.numFrames); };
+        sub.pathPositionFrom = ramp(off);
+        sub.pathPosition = ramp(off + sub.numFrames);
+        renderProgram(*current_, sub, b.numOutputs, true);
         const int nc = std::min(b.numOutputs, current_->numOut);
         if (fading_ && fading_->renderer && maxBlock <= std::max(64, fading_->cfg.maxBlock)) {
-            renderProgram(*fading_, sub, b.numOutputs);
+            renderProgram(*fading_, sub, b.numOutputs, false);
             const int fadeLen = std::max(1, static_cast<int>(kFadeSeconds * current_->cfg.sampleRate));
             const int nf = std::min(b.numOutputs, fading_->numOut);
             for (int k = 0; k < sub.numFrames; ++k) {

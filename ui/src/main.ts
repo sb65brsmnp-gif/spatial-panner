@@ -68,6 +68,7 @@ function sceneBounds(): THREE.Box3 {
   }
   for (const l of s.layers) b.expandByPoint(new THREE.Vector3(...l.position));
   for (const p of store.analysis?.paths ?? []) for (const q of p.points) b.expandByPoint(new THREE.Vector3(...q));
+  for (const t of store.analysis?.layers ?? []) for (const q of t.points) b.expandByPoint(new THREE.Vector3(...q));
   b.expandByPoint(new THREE.Vector3(...s.listener.static_position));
   // Without a box room (outdoor, open, mesh) the ground around the origin is
   // part of the picture, and a scene of one layer is not a point: framing a
@@ -118,7 +119,8 @@ function refreshToolbar(): void {
   // Plugin: the scene is saved with the Logic project, so nothing is ever "unsaved".
   const title = `${name}${store.dirty && !plugin ? ' •' : ''}`;
   document.title = `${title} · Spatial Panner`;
-  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title });
+  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title,
+    layers: store.scene.layers.map((l, i) => l.name || `Layer ${i + 1}`) });
 }
 tools.onToolChange = refreshToolbar;
 
@@ -132,8 +134,16 @@ function updateHud(): void {
     + ` &nbsp; head ${Math.abs(yaw).toFixed(0)}° ${yaw >= 0 ? 'left' : 'right'}, ${Math.abs(pitch).toFixed(0)}° ${pitch >= 0 ? 'up' : 'down'}`
     + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '');
   const s = store.scene;
-  emptyHint.textContent = !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
-    : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
+  // While a drawing tool is out, say whose path it draws: the selected
+  // layer's, or the listener's ("for" in the toolbar changes it).
+  const target = tools.opts.tool !== 'select' ? s.layers[tools.opts.layerTarget] : undefined;
+  emptyHint.textContent = tools.opts.tool !== 'select'
+    ? (target ? `Drawing the path of ${target.name || `Layer ${tools.opts.layerTarget + 1}`} at its height. For the listener's path instead, choose Listener under "for" in the toolbar. Esc cancels.`
+      : s.layers.length ? 'Drawing the listener\'s path. For a layer\'s own path, choose it under "for" in the toolbar, or press Esc and select the layer first.' : '')
+    : !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
+      // Until anything has been drawn; a scene whose layers move while the
+      // listener stands still (common in Logic) is not waiting for a path.
+      : !s.listener.paths.length && !s.layers.some((l) => l.motion?.path.segments.length) ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
   emptyHint.style.display = emptyHint.textContent ? '' : 'none';
 }
 
@@ -224,12 +234,16 @@ store.subscribe((kinds) => {
     if (kinds.has('selection')) { view.updateLayers(); view.rebuildPaths(); }
     if (kinds.has('analysis')) view.rebuildPaths();
   }
+  // Layers with paths move with the playhead.
+  if (!kinds.has('scene') && !kinds.has('selection') && (kinds.has('time') || kinds.has('analysis') || kinds.has('transport'))
+    && store.scene.layers.some((l) => l.motion)) view.updateLayers();
   // A mesh room is drawn from the analysis, which arrives after the scene.
   if (kinds.has('analysis') && store.scene.room.type === 'mesh') view.rebuildRoom();
   if (kinds.has('meters')) view.updateMeters();
   if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
+  if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
 });
 
@@ -404,6 +418,29 @@ if (plugin) {
   };
   document.addEventListener('focusin', (e) => { if (editable(e.target)) backend.editing(true).catch(() => { /* no native side */ }); });
   document.addEventListener('focusout', (e) => { if (editable(e.target)) backend.editing(false).catch(() => { /* no native side */ }); });
+
+  // The window's resize grip. JUCE's own corner resizer is painted under
+  // the web view, so the page draws one and asks the plug-in for the size.
+  const grip = el('div', { class: 'resize-grip', title: 'Drag to resize the window' });
+  document.body.append(grip);
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const start = { x: e.clientX, y: e.clientY, w: window.innerWidth, h: window.innerHeight };
+    let want: [number, number] | null = null;
+    let sending = false;
+    const send = () => {
+      if (sending || !want) return;
+      sending = true;
+      const [w, h] = want;
+      want = null;
+      backend.resize(w, h).catch(() => { /* no native side */ }).finally(() => { sending = false; send(); });
+    };
+    const move = (ev: PointerEvent) => { want = [start.w + ev.clientX - start.x, start.h + ev.clientY - start.y]; send(); };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
 }
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });
@@ -426,4 +463,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project, dropAudio, openRecent };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, timeline, setView, project, dropAudio, openRecent };

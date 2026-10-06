@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "SceneDoc.h"
@@ -150,6 +151,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpatialPannerProcessor::crea
                                                               String("Layer Offset ") + String(a).toUpperCase(),
                                                               NormalisableRange<float>(-20.0f, 20.0f, 0.01f), 0.0f,
                                                               AudioParameterFloatAttributes().withLabel("m")));
+    // A layer with its own path: its speed along it as a factor of the
+    // scene's speed curve, or where along it it is (position timing).
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"lpspeed", 1}, "Layer Path Speed",
+                                                          NormalisableRange<float>(0.0f, 4.0f, 0.001f, 0.5f), 1.0f,
+                                                          AudioParameterFloatAttributes().withLabel("x")));
+    layer->addChild(std::make_unique<AudioParameterFloat>(ParameterID{"lppos", 1}, "Layer Path Position",
+                                                          NormalisableRange<float>(0.0f, 100.0f, 0.01f), 0.0f,
+                                                          AudioParameterFloatAttributes().withLabel("%")));
+    // Off: the track plays straight through, unprocessed (the scene's own
+    // Spatialize switch must be on for this to spatialise). Room Send keeps
+    // a straight-through track feeding the room's reverb.
+    layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"spatial", 1}, "Layer Spatialize", true));
+    layer->addChild(std::make_unique<AudioParameterBool>(ParameterID{"rsend", 1}, "Layer Room Send", false));
     layout.add(std::move(listener), std::move(layer));
     return layout;
 }
@@ -183,6 +197,10 @@ SpatialPannerProcessor::SpatialPannerProcessor()
     pX_ = params_.getRawParameterValue("offx");
     pY_ = params_.getRawParameterValue("offy");
     pZ_ = params_.getRawParameterValue("offz");
+    pPathSpeed_ = params_.getRawParameterValue("lpspeed");
+    pPathPosition_ = params_.getRawParameterValue("lppos");
+    pSpatialize_ = params_.getRawParameterValue("spatial");
+    pRoomSend_ = params_.getRawParameterValue("rsend");
 
     layerId_ = newId();
     doc_ = doc::defaultScene();
@@ -282,6 +300,13 @@ void SpatialPannerProcessor::applyDocToEngine(const json& d) {
         docChannels_ = L.channels;
         docStart_ = L.startTime;
         docLoop_ = L.loop;
+        // The editor moved the layer's position along its path: the Path
+        // Position parameter follows (but a value restored with the track's
+        // saved state stands on its first load).
+        const double frac = L.motion.fraction;
+        if (docPathFraction_ >= 0 ? std::abs(frac - docPathFraction_) > 1e-6 : !stateRestored_)
+            if (auto* p = params_.getParameter("lppos")) p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(frac * 100.0)));
+        docPathFraction_ = frac;
         // An Ambisonic layer with a file plays the file (the track's own
         // audio is not used); without one it plays the track's channels.
         const bool fromFile = sp::isAmbisonic(L) && (!L.audioFile.empty() || !L.audioFiles.empty());
@@ -322,7 +347,7 @@ bool SpatialPannerProcessor::setSceneDoc(const json& d, std::string& error) {
         if (std::abs(f - fractionOf(doc_)) > 1e-6)
             if (auto* p = params_.getParameter("position")) p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(f * 100.0)));
         doc_ = d;
-        changedByPlugin = doc::reconcile(doc_, session_->liveLayers(5000, false));
+        changedByPlugin = doc::reconcile(doc_, adoptableLayers());
         copy = doc_;
     }
     publish();
@@ -332,6 +357,7 @@ bool SpatialPannerProcessor::setSceneDoc(const json& d, std::string& error) {
 
 void SpatialPannerProcessor::clearAutomationHistory() {
     if (role_ == Role::Scene) session_->clearHistory();
+    engine_.pathHistory().clear();
 }
 
 std::vector<SpatialPannerProcessor::HostTrack> SpatialPannerProcessor::hostTracks() {
@@ -406,6 +432,10 @@ void SpatialPannerProcessor::decideRole() {
 }
 
 void SpatialPannerProcessor::manageSlot() {
+    // Nothing is claimed until the role is known: a new instance only learns
+    // its saved layer id when the host restores its state, and a slot claimed
+    // before that (under a random id) would become a stray layer in the scene.
+    if (role_ == Role::Undecided) return;
     const bool want = role_ != Role::Scene || sceneIsLayer_;
     if (!want) {
         if (slot_ >= 0) session_->releaseSlot(slot_, token_);
@@ -436,6 +466,36 @@ void SpatialPannerProcessor::manageSlot() {
         slotChannels_ = ch;
     }
     slotForAudio_ = slot_;
+}
+
+namespace {
+int gAdoptNamedMs = 1000, gAdoptUnnamedMs = 5000;
+}
+
+void SpatialPannerProcessor::setAdoptDelaysForTesting(int namedMs, int unnamedMs) {
+    gAdoptNamedMs = namedMs;
+    gAdoptUnnamedMs = unnamedMs;
+}
+
+// The live layer slots the scene may turn into layers (docLock_ held). A
+// slot has to have been alive for a while first: Logic creates short-lived
+// instances while it loads a project (each claims a slot and goes away), and
+// a slot adopted in that moment stayed in the scene for good as an unnamed
+// "Layer N". A named slot (Logic names the track at once) waits 1 s, an
+// unnamed one 5 s; a slot whose layer the scene already has is always kept.
+std::vector<SharedSession::LayerInfo> SpatialPannerProcessor::adoptableLayers() {
+    const uint32_t now = juce::Time::getMillisecondCounter();
+    std::map<std::string, uint32_t> seen;
+    std::vector<SharedSession::LayerInfo> out;
+    for (auto& l : session_->liveLayers(5000, false)) {
+        const auto it = seenSince_.find(l.id);
+        const uint32_t since = it == seenSince_.end() ? now : it->second;
+        seen[l.id] = since;
+        const int wait = l.name.empty() ? gAdoptUnnamedMs : gAdoptNamedMs;
+        if (static_cast<int>(now - since) >= wait || doc::layerIndex(doc_, l.id) >= 0) out.push_back(std::move(l));
+    }
+    seenSince_ = std::move(seen);
+    return out;
 }
 
 void SpatialPannerProcessor::updateTrackProperties(const TrackProperties& p) {
@@ -486,7 +546,7 @@ void SpatialPannerProcessor::timerCallback() {
         json copy;
         {
             const juce::ScopedLock l(docLock_);
-            changed = doc::reconcile(doc_, session_->liveLayers(5000, false));
+            changed = doc::reconcile(doc_, adoptableLayers());
             if (changed) copy = doc_;
         }
         if (changed) needsPublish_ = true;
@@ -506,7 +566,7 @@ juce::String SpatialPannerProcessor::statusText() const {
         case Role::Undecided: return "Starting";
         case Role::Scene: {
             int n = static_cast<int>(session_->liveLayers(5000, false).size());
-            return "Holds the scene · " + juce::String(n) + (n == 1 ? " layer track" : " layer tracks") +
+            return "Holds the scene" + juce::String(juce::CharPointer_UTF8(" \xc2\xb7 ")) + juce::String(n) + (n == 1 ? " layer track" : " layer tracks") +
                    (session_->isShared() ? "" : " (this process only)");
         }
         case Role::Layer:
@@ -539,6 +599,8 @@ void SpatialPannerProcessor::getStateInformation(juce::MemoryBlock& dest) {
     }
     if (role_ == Role::Scene && session_->sceneOwner() == token_)
         root.createNewChildElement("History")->addTextElement(juce::String(session_->encodeHistory()));
+    if (auto text = engine_.pathHistory().encode(); !text.empty())
+        root.createNewChildElement("PathHistory")->addTextElement(juce::String(text));
     copyXmlToBinary(root, dest);
 }
 
@@ -564,6 +626,8 @@ void SpatialPannerProcessor::setStateInformation(const void* data, int size) {
         }
     }
     historyText_ = xml->getChildByName("History") ? xml->getChildByName("History")->getAllSubText().toStdString() : std::string();
+    if (auto* h = xml->getChildByName("PathHistory")) engine_.pathHistory().decode(h->getAllSubText().toStdString());
+    else engine_.pathHistory().clear();
     stateRestored_ = true;
     if (xml->getStringAttribute("role") == "scene") becomeScene(false);
     else becomeLayer();
@@ -650,6 +714,13 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     lc.ambisonicRadiusScale = pSphereRadius_->load() / 100.0f;
     lc.ambisonicYawOffsetDeg = pSphereRotation_->load();
     if (pMono_->load() > 0.5f) lc.mono = true;   // off: the scene's setting stands
+    lc.spatialize = pSpatialize_->load() > 0.5f;
+    lc.roomSend = pRoomSend_->load() > 0.5f;
+    const float pathSpeed = pPathSpeed_->load();
+    const float pathPosition = std::clamp(pPathPosition_->load() / 100.0f, 0.0f, 1.0f);
+    // Ramped over the block from where the last one ended (jumps are not ramped).
+    const float pathPositionFrom = lastPathPosition_ < 0 || jumped ? pathPosition : lastPathPosition_;
+    lastPathPosition_ = pathPosition;
     const float meterGain = lc.mute ? 0.0f : docLevelGain_.load() * sp::dbToGain(levelDb);
     const int slot = slotForAudio_.load(std::memory_order_relaxed);
     const int layerCh = std::max(1, std::min(LayerEngine::kMaxInputs, docChannels_.load(std::memory_order_relaxed)));
@@ -722,6 +793,9 @@ void SpatialPannerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         b.session = session_.get();
         b.useHistory = useHistory;
         b.layer = lc;
+        b.pathSpeed = pathSpeed;
+        b.pathPositionFrom = pathPositionFrom + (pathPosition - pathPositionFrom) * static_cast<float>(off) / static_cast<float>(n);
+        b.pathPosition = pathPositionFrom + (pathPosition - pathPositionFrom) * static_cast<float>(off + k) / static_cast<float>(n);
         engine_.process(b);
     }
     for (int c = no; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);

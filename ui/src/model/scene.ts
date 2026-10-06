@@ -46,6 +46,18 @@ export interface LayerDoc {
   reflection_order: number;
   start_time: number;
   loop: boolean;
+  // Its own path and how it travels it (absent: the layer stands still), and
+  // level automation (fades). See MotionDoc.
+  motion?: MotionDoc;
+  level_keys?: LevelKey[];
+  // Off: the layer plays straight through (mono to both ears, stereo left to
+  // left and right to right), unprocessed; still a layer with its level,
+  // mute, fades and place in the scene. `room_send` keeps it feeding the
+  // room's reverb. Absent: on / off.
+  spatialize?: boolean;
+  room_send?: boolean;
+  // Linked to the listener or another layer: see LinkDoc. Absent: not linked.
+  link?: LinkDoc;
   // editor-only
   color?: string;
   solo?: boolean;
@@ -70,6 +82,82 @@ export interface PathDoc {
 }
 
 export interface SpeedKey { time: number; speed: number; easing: Easing }
+
+// A layer travelling along its own path (engine: sp::LayerMotion). The path
+// is in world coordinates and starts where the layer stands; the editor keeps
+// it that way (moving the layer moves its path). Timing:
+//   'speed'    - its own speed curve; key times count from start_time
+//   'keys'     - "be here at this time": fraction of the path (0..1) at
+//                absolute times
+//   'position' - stays at `fraction` of the path (automate it in Logic)
+// At the end it stops, loops (a closed path runs on round; an open one jumps
+// back with a short fade) or goes back and forth. `turn`: the layer turns
+// with the direction it travels (its facing, stereo bar, sphere).
+export type LayerTiming = 'speed' | 'keys' | 'position';
+export type PathEnd = 'stop' | 'loop' | 'ping_pong';
+export interface PathKey { time: number; fraction: number; easing: Easing }
+export interface MotionDoc {
+  path: PathDoc;
+  timing: LayerTiming;
+  speed: SpeedKey[];
+  start_time: number;
+  keys: PathKey[];
+  fraction: number;
+  end: PathEnd;
+  turn: boolean;
+}
+// Level automation: dB at absolute times; SILENT_DB is silence.
+export interface LevelKey { time: number; level_db: number; easing: Easing }
+export const SILENT_DB = -80;
+
+// A layer linked to the listener ('listener') or to another layer (its
+// index) keeps its place and bearing relative to that leader while linked,
+// as the leader moves and turns with its direction of travel; its own path,
+// if any, is travelled in the leader's frame. `keys` link and unlink it at
+// times (each sets the state from its time on; `linked_at_start` before the
+// first). Unlinking leaves it where it is; linking again takes hold there.
+export interface LinkKey { time: number; linked: boolean }
+export interface LinkDoc { to: 'listener' | number; linked_at_start: boolean; keys: LinkKey[] }
+
+export function defaultLink(to: 'listener' | number): LinkDoc {
+  return { to, linked_at_start: true, keys: [] };
+}
+export function isSpatialized(l: LayerDoc): boolean { return l.spatialize !== false; }
+export function isLinked(l: LayerDoc): boolean { return !!l.link && (l.link.to === 'listener' || (typeof l.link.to === 'number' && l.link.to >= 0)); }
+// Linked at time t?
+export function linkedAt(link: LinkDoc, t: number): boolean {
+  let on = link.linked_at_start;
+  for (const k of link.keys) { if (k.time <= t) on = k.linked; else break; }
+  return on;
+}
+// Does layer `i` lead (directly or through others) to layer `j`? Used to
+// keep a layer from following one of its own followers.
+export function leadsTo(layers: LayerDoc[], i: number, j: number): boolean {
+  for (let n = 0, k = i; n < layers.length; n++) {
+    const to = layers[k]?.link?.to;
+    if (typeof to !== 'number' || to < 0) return false;
+    if (to === j) return true;
+    k = to;
+  }
+  return false;
+}
+// A layer removed: links to it go, links past it move down.
+export function removeLayerLinks(layers: LayerDoc[], removed: number): void {
+  for (const l of layers) {
+    const to = l.link?.to;
+    if (typeof to !== 'number') continue;
+    if (to === removed) delete l.link;
+    else if (to > removed) l.link!.to = to - 1;
+  }
+}
+
+export function defaultMotion(path: PathDoc): MotionDoc {
+  return { path, timing: 'speed', speed: [{ time: 0, speed: 1.4, easing: 'linear' }], start_time: 0, keys: [], fraction: 0, end: 'stop', turn: false };
+}
+
+export function hasPath(l: LayerDoc): boolean {
+  return !!l.motion && l.motion.path.segments.length > 0;
+}
 export interface HeadKey { time: number; yaw: number; pitch: number; roll: number; easing: Easing }
 
 export type HeadMode = 'along_path' | 'look_at' | 'keyframed';
@@ -324,7 +412,11 @@ export function completeScene(raw: Partial<SceneDoc>): SceneDoc {
   s.listener = { ...d.listener, ...(raw.listener ?? {}) } as ListenerDoc;
   s.listener.head = { ...d.listener.head, ...(raw.listener?.head ?? {}) };
   s.environment = { ...d.environment, ...(raw.environment ?? {}) };
-  s.layers = (raw.layers ?? []).map((l, i) => defaultLayer(i, l));
+  s.layers = (raw.layers ?? []).map((l, i) => {
+    const out = defaultLayer(i, l);
+    if (out.motion) out.motion = { ...defaultMotion(out.motion.path), ...out.motion };
+    return out;
+  });
   // A file from before "home" was kept: where things are now is home.
   for (const l of s.layers) if (!l.home) l.home = [...l.position] as V3;
   for (const p of s.listener.paths) { const f = firstPoint(p); if (!p.home && f) p.home = f; }
@@ -345,6 +437,7 @@ export function mergeEditorKeys(canonical: SceneDoc, raw: any): SceneDoc {
         if (r?.solo) l.solo = true;
         if (typeof r?.host_id === 'string') l.host_id = r.host_id;
         if (isV3(r?.home)) l.home = r.home;
+        if (l.motion && isV3(r?.motion?.path?.home)) l.motion.path.home = r.motion.path.home;
       });
     if (Array.isArray(raw.listener?.paths))
       s.listener.paths.forEach((p, i) => { const h = raw.listener.paths[i]?.home; if (isV3(h)) p.home = h; });
@@ -407,6 +500,60 @@ export function headKeyAt(keys: HeadKey[], t: number): { yaw: number; pitch: num
   const span = b.time - a.time;
   const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
   return { yaw: a.yaw + (b.yaw - a.yaw) * u, pitch: a.pitch + (b.pitch - a.pitch) * u, roll: a.roll + (b.roll - a.roll) * u };
+}
+
+// Same as the engine's PathKey evaluation (LayerMotionEvaluator::keyFraction)
+// over one pass: the fraction of the path at absolute time t.
+export function pathKeyAt(keys: PathKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].fraction;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.fraction;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  return a.fraction + (b.fraction - a.fraction) * applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+}
+
+// The level automation in dB at t (0 with no keys); a fade to or from
+// silence runs in gain, like the engine (levelKeysDb).
+export function levelAt(keys: LevelKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].level_db;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.level_db;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+  if (a.level_db > SILENT_DB && b.level_db > SILENT_DB) return a.level_db + (b.level_db - a.level_db) * u;
+  const ga = a.level_db <= SILENT_DB ? 0 : Math.pow(10, a.level_db / 20);
+  const gb = b.level_db <= SILENT_DB ? 0 : Math.pow(10, b.level_db / 20);
+  const g = ga + (gb - ga) * u;
+  return g <= Math.pow(10, SILENT_DB / 20) ? SILENT_DB : 20 * Math.log10(g);
+}
+
+// Metres covered by `t` seconds of a speed curve (its key times count from 0),
+// integrated like the engine's SampledSpeed table.
+export function speedTravel(keys: SpeedKey[], t: number, dt = 0.005): number {
+  let d = 0;
+  for (let u = 0; u < t; u += dt) d += speedAt(keys, u + Math.min(dt, t - u) / 2) * Math.min(dt, t - u);
+  return d;
+}
+
+// How long the speed curve takes to cover `length` metres; null when it never
+// does within `limit` seconds (it stops on the way).
+export function speedArrival(keys: SpeedKey[], length: number, limit = 7200, dt = 0.005): number | null {
+  if (length <= 0) return 0;
+  let d = 0;
+  for (let u = 0; u < limit; u += dt) {
+    const v = speedAt(keys, u + dt / 2);
+    if (d + v * dt >= length) return u + (v > 0 ? (length - d) / v : 0);
+    d += v * dt;
+  }
+  return null;
 }
 
 export function sortKeys<T extends { time: number }>(keys: T[]): void {

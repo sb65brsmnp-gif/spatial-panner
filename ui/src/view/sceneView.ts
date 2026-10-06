@@ -8,7 +8,8 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { layerOfPath, layerPathIndex } from '../model/layerMotion';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
 
@@ -29,7 +30,7 @@ export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number
 // front and a handle on its surface that sets the radius.
 interface LayerEnd { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; tag: CSS2DObject }
 interface Sphere { group: THREE.Group; shell: THREE.Mesh; wire: THREE.LineSegments; equator: THREE.Line; front: THREE.ArrowHelper; handle: THREE.Mesh }
-interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; leftTag: CSS2DObject; right: LayerEnd; bar: THREE.Mesh; hub: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; leftTag: CSS2DObject; right: LayerEnd; bar: THREE.Mesh; hub: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement; link: THREE.Line }
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
@@ -147,7 +148,7 @@ export class SceneView {
   }
 
   private makeEnd(group: THREE.Group, index: number, end: 'L' | 'R' | 'centre'): LayerEnd {
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4 }));
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4, transparent: true, opacity: 1 }));
     ball.userData = { kind: 'layer', index, end };
     group.add(ball);
     const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -1, 0)]),
@@ -207,7 +208,12 @@ export class SceneView {
     label.position.set(0, LAYER_RADIUS + 0.25, 0);
     group.add(label);
     this.layerGroup.add(group);
-    return { group, ball, stem, ring, leftTag: left.tag, right, bar, hub, arrow, sphere, label, meter, name };
+    // A dashed line to what the layer is linked to (world coordinates).
+    const link = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineDashedMaterial({ color: 0xf2994a, dashSize: 0.15, gapSize: 0.1, transparent: true, opacity: 0.8 }));
+    link.visible = false;
+    this.layerGroup.add(link);
+    return { group, ball, stem, ring, leftTag: left.tag, right, bar, hub, arrow, sphere, label, meter, name, link };
   }
 
   // Places a ball and its stem and floor ring at `p` (group-local).
@@ -229,11 +235,31 @@ export class SceneView {
     const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
     s.layers.forEach((l, i) => {
       const o = this.layers[i];
-      o.group.position.set(l.position[0], l.position[1], l.position[2]);
+      // A layer with a path is drawn where it is at the playhead, turned with
+      // its direction of travel when it turns along the path.
+      const [px, py, pz, yaw] = this.store.layerPlace(i, this.store.time);
+      o.group.position.set(px, py, pz);
+      o.group.rotation.y = yaw * Math.PI / 180;
       const color = new THREE.Color(l.color ?? '#4f9cf9');
       const silent = l.mute || (anySolo && !l.solo);
       const mat = o.ball.material as THREE.MeshStandardMaterial;
       mat.color.copy(silent ? color.clone().multiplyScalar(0.35) : color);
+      // Straight through: a see-through ball, since its place is not heard.
+      const spatial = isSpatialized(l);
+      mat.opacity = spatial ? 1 : 0.4;
+      (o.right.ball.material as THREE.MeshStandardMaterial).opacity = mat.opacity;
+      // Linked and following at the playhead: a dashed line to its leader.
+      const t = this.store.time;
+      const following = isLinked(l) && linkedAt(l.link!, t);
+      o.link.visible = following;
+      if (following) {
+        const to = l.link!.to;
+        const lp: V3 = to === 'listener' ? [this.listener.position.x, this.listener.position.y, this.listener.position.z]
+          : s.layers[to] ? (this.store.layerPlace(to, t).slice(0, 3) as V3) : [px, py, pz];
+        (o.link.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(px, py, pz), new THREE.Vector3(lp[0], lp[1], lp[2])]);
+        o.link.computeLineDistances();
+        (o.link.material as THREE.LineDashedMaterial).color.copy(color);
+      }
       const selected = sel.kind === 'layer' && sel.index === i;
       mat.emissive.copy(selected ? color : new THREE.Color(0));
       mat.emissiveIntensity = selected ? 0.6 : 0;
@@ -244,7 +270,7 @@ export class SceneView {
       const st = l.stereo ?? defaultStereo();
       const spread = stereo && !st.mono;
       const d = spread ? stereoOffset(st) : [0, 0, 0];
-      const floor = floorY - l.position[1];  // group-local floor height
+      const floor = floorY - py;  // group-local floor height
       this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color, o.leftTag);
       o.ball.userData.end = stereo ? 'L' : 'centre';
       o.right.ball.visible = o.right.stem.visible = o.right.ring.visible = spread;
@@ -292,7 +318,7 @@ export class SceneView {
       const f = v3(l.directivity_forward);
       if (f.lengthSq() > 1e-9) o.arrow.setDirection(f.normalize());
       o.arrow.setColor(color);
-      o.name.textContent = l.name || `Layer ${i + 1}`;
+      o.name.textContent = (l.name || `Layer ${i + 1}`) + (spatial ? '' : ' · direct') + (following ? ' · linked' : '');
       o.label.element.classList.toggle('selected', selected);
       o.label.element.classList.toggle('silent', silent);
     });
@@ -340,8 +366,32 @@ export class SceneView {
       }
     });
     if (!L.paths.length) this.buildStart(L.static_position);
+    this.buildLayerPaths();
     this.buildTimeMarkers();
     this.vp.invalidate();
+  }
+
+  // Each layer's own path in its colour, from where the layer stands; the
+  // selected layer's (or the one whose point is selected) with its points.
+  private buildLayerPaths(): void {
+    const s = this.store.scene;
+    const a = this.store.analysis;
+    const sel = this.store.selection;
+    const editing = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
+    s.layers.forEach((l, i) => {
+      if (!hasPath(l)) return;
+      const p = l.motion!.path;
+      const tr = a && a.revision === this.store.revision ? a.layers?.find((x) => x.layer === i) : undefined;
+      const pts = tr?.points.length ? tr.points : samplePath(p);
+      if (pts.length < 2) return;
+      const color = new THREE.Color(l.color ?? '#4f9cf9').getHex();
+      const selected = editing === i;
+      const line = this.fatLine(pts as V3[], color, selected ? 3 : 2, selected ? 1 : 0.65);
+      line.userData = { kind: 'layerpath', layer: i };
+      this.pathGroup.add(line);
+      if (!p.closed) this.pathGroup.add(endMarker(pts[pts.length - 1] as V3, color, 0.09));
+      if (selected) this.buildPointHandles(p, layerPathIndex(i));
+    });
   }
 
   // The start disc on the floor under `p`, with a stem up to it and a label.
@@ -519,8 +569,8 @@ function makeLabel(text: string, cls: string): CSS2DObject {
   return new CSS2DObject(div);
 }
 
-function endMarker(p: V3, color: number): THREE.Mesh {
-  const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.12), new THREE.MeshBasicMaterial({ color }));
+function endMarker(p: V3, color: number, size = 0.12): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(size), new THREE.MeshBasicMaterial({ color }));
   m.position.copy(v3(p));
   return m;
 }

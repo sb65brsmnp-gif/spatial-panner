@@ -71,7 +71,9 @@ CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
 layers, an Ambisonic sphere about four).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
-the path; drawing again appends to the current path's end.
+the path; drawing again appends to the current path's end. The tools draw
+the listener's path, or the selected layer's own (see *Layer paths* below;
+*for* in the toolbar shows which).
 
 | Tool | Use |
 | --- | --- |
@@ -136,6 +138,52 @@ is in the band. In the default
 *along path* head mode the yaw and pitch keys turn and tilt the head on top
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
+
+**Layer paths**: the drawing tools draw for whoever is selected. With a
+layer selected, picking a tool (toolbar or key) draws that layer's path; with
+nothing selected, the listener's. *for* in the toolbar shows which and
+changes it (choose *Listener* to draw the listener's path while a layer is
+selected), and a hint in the 3D view says whose path is being drawn.
+*Draw a path* on the Layers tab does the same with the curve tool (click
+points, Enter to finish). The path is drawn at the layer's height and the layer moves to
+where it begins; the line drawn is the line it travels. Dragging the layer
+moves its path with it; its points edit like the listener's (Option+click
+the line adds one, Delete removes one; dragging the first point moves the
+layer). *Moves by* picks the timing: *its speed* (a speed curve on the
+timeline, setting off at *Sets off at*), *times to be at* (keys on a Path %
+lane: where along the path it is at that time) or *a point along the path*
+(a slider, and the Path Position parameter in Logic). *At the end* it stops,
+starts again or goes back and forth; *Turn* turns it with its direction of
+travel (facing, stereo bar, sphere). During playback and scrubbing the 3D
+view shows each layer where the engine has it.
+
+With a layer selected the timeline shows that layer's lanes: **Layer speed**
+(or **Path %**) with its own green *sets off* and red *arrives* lines, which
+drag like the listener's, and **Layer level** for fades (double-click to add
+a key; the bottom of the lane is silence). Esc deselects the layer and
+brings back the listener's lanes.
+
+**Spatialize** (Layers tab): off, the layer plays straight through, as it
+is: mono to both ears, stereo left to left and right to right, no distance,
+direction, Doppler or room. It stays a layer with its level, mute, fades and
+place in the scene, drawn as a see-through ball marked *direct*. *Room*
+sends it to the room's reverb anyway.
+
+**Link** (Layers tab): link a layer to the listener or to another layer and
+it keeps its place and bearing relative to that one as it moves and turns
+with its direction of travel (a dashed line joins them in the 3D view while
+linked). A linked layer with its own path travels it relative to its leader.
+The timeline gets a **Link** lane for the layer: double-click the bottom to
+unlink it at that time, the top to link it again; the selected key's bar
+says which. Unlinking leaves the layer where it is. *From the start* unticked
+leaves it free until the first linking key. A layer cannot follow one of its
+own followers.
+
+**Fit timing** (Path & head tab, shown once a layer has a path): tick the
+listener and the layers that should set off and arrive together, set the
+times and click *Fit*. Each speed curve is stretched or squeezed as a whole
+(the shape of the journey stays); a layer timed by keys has its keys spread
+over the same span.
 
 **Room**: a new scene is outdoors (ground only: one reflection off the
 ground, no walls, no reverb tail). *Type* on the Room tab switches to a box

@@ -89,6 +89,9 @@ struct Voice {
     DelayLine delay;
     std::vector<Tap> taps;  // taps[0] is the direct path
     Vec3 imagesForPosition{1e9f, 1e9f, 1e9f};
+    Vec3 lastSrc;                   // where the emitter was in the previous sub-block
+    double retard = 0;              // seconds the sound now arriving took on the direct path
+    float yawCur = 0;               // the layer's turn along its path, slewed (degrees)
 
     float levelCur = 0, levelTarget = 0;
     float sendCur = 0, sendTarget = 0;
@@ -105,6 +108,12 @@ struct Voice {
 
     // Loudspeaker direct path
     std::vector<float> spkCur, spkTarget;
+
+    // Not spatialised (Layer::spatialize off): the share of the layer that
+    // plays straight through, slewed, and where it goes.
+    float directCur = 0, directTarget = 0;
+    std::vector<float> spkDirect;                     // Speakers: the front pair
+    std::array<float, kMaxAmbiChannels> shDirect{};   // Ambisonics: W (mono) or a side
 };
 
 // An Ambisonic layer: the recording's channels, delayed by the distance to
@@ -131,6 +140,9 @@ struct FieldVoice {
     Vec3 lastOffset;
     Quat lastRot;
     float lastRadius = 0;
+    Vec3 lastCentre;
+    float yawCur = 0;
+    double retard = 0;
     std::vector<float> work;        // nIn x B
 };
 
@@ -143,7 +155,25 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
     float maxD = 1.0f;
     const int ord = scene.room.type == RoomType::Box ? std::max(scene.room.reflectionOrder, 0) : 1;
     std::vector<std::vector<ImageSource>> images;
-    for (const auto& l : scene.layers) {
+    std::vector<float> reach;   // how far each emitter's path carries it from its place (mirrors keep distances)
+    for (size_t li = 0; li < scene.layers.size(); ++li) {
+        const Layer& l = scene.layers[li];
+        if (l.referenceOnly) continue;
+        float r = 0;
+        const LayerMotionEvaluator& m = poses.layerMotion(static_cast<int>(li));
+        if (m.active()) {
+            const Vec3 p0 = m.path().positionAt(0);
+            const int n = std::min(2000, static_cast<int>(m.length() / 0.25f) + 2);
+            for (int i = 0; i < n; ++i) r = std::max(r, (m.path().positionAt(m.length() * i / (n - 1)) - p0).length());
+        }
+        if (l.link.active()) {
+            // Carried by its leader: where that takes it over the timeline.
+            const int n = std::min(steps, 400);
+            for (int i = 0; i < n; ++i)
+                r = std::max(r, poses.layerPlacement(static_cast<int>(li), dur * i / std::max(n - 1, 1), controls).offset.length());
+        }
+        reach.push_back(r);
+        if (l.channels == 2) reach.push_back(r);
         const int lo = isAmbisonic(l) ? 0 : l.reflectionOrder >= 0 ? l.reflectionOrder : ord;
         if (l.channels == 2) {
             const Vec3 d = stereoOffset(l.stereo.width, l.stereo.rotationDeg, l.stereo.elevationDeg);
@@ -155,8 +185,8 @@ float estimateMaxDistance(const Scene& scene, const PoseEvaluator& poses, double
     }
     for (int i = 0; i < steps; ++i) {
         const Pose p = poses.evaluate(dur * i / std::max(steps - 1, 1), controls);
-        for (const auto& imgs : images)
-            for (const auto& img : imgs) maxD = std::max(maxD, (img.position - p.position).length());
+        for (size_t e = 0; e < images.size(); ++e)
+            for (const auto& img : images[e]) maxD = std::max(maxD, (img.position - p.position).length() + reach[e]);
     }
     return std::min(maxD * 1.15f + 2.0f, 3000.0f);
 }
@@ -201,7 +231,7 @@ bool sameRoom(const Room& a, const Room& b) {
 bool sameLayerLayout(const Scene& a, const Scene& b) {
     if (a.layers.size() != b.layers.size()) return false;
     for (size_t i = 0; i < a.layers.size(); ++i)
-        if (a.layers[i].channels != b.layers[i].channels) return false;
+        if (a.layers[i].channels != b.layers[i].channels || a.layers[i].referenceOnly != b.layers[i].referenceOnly) return false;
     return true;
 }
 
@@ -279,6 +309,7 @@ struct Renderer::Impl {
     // Work buffers (sized at init)
     std::vector<float> bus;        // nSh * B
     std::vector<float> directBuf;  // B
+    std::vector<float> passBuf;    // B: the unspatialised share of a voice
     std::vector<float> revIn;      // B
     std::vector<float> earBuf[2];  // B each
     std::vector<float> tmpBlock;   // B
@@ -295,13 +326,26 @@ struct Renderer::Impl {
 
     Impl(const Scene& s, const RenderConfig& c, double dur);
     void initVoices();
-    Vec3 emitterTarget(const Voice& v) const;
+    Vec3 emitterTarget(const Voice& v, float yawDeg = 0) const;
+    Placement retardedMotion(int layer, const LayerControls& c, const Vec3& base, const Vec3& listener,
+                             double time, double& retard) const;
+    // A layer turning along its path turns at most this fast (a key that
+    // reverses it, the far end of a back-and-forth path), so a stereo pair's
+    // ends swing round instead of jumping.
+    float slewYaw(float cur, float target) const {
+        if (first) return target;
+        const float a = 1.0f - std::exp(-static_cast<float>(B) / (0.15f * fs));
+        float d = std::fmod(target - cur + 540.0f, 360.0f) - 180.0f;
+        float next = cur + d * a;
+        if (std::fabs(target - next) < 1e-3f) next = target;
+        return std::fmod(next + 540.0f, 360.0f) - 180.0f;
+    }
     void initRoom();
     void initBackend();
     float estimateIrSeconds() const;
     float meanFreePath() const;
     void computeTargets(Voice& v, const Pose& pose, double time);
-    void computeFieldTargets(FieldVoice& f, const Pose& pose);
+    void computeFieldTargets(FieldVoice& f, const Pose& pose, double time);
     void renderField(FieldVoice& f);
     void rebuildTaps(Voice& v, const Vec3& srcPos);
     void updateHrtf(Voice& v, const Vec3& rel, float dist);
@@ -386,6 +430,7 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
     steamAmbiPtrs.resize(nSh);
     for (int c = 0; c < nSh; ++c) steamAmbiPtrs[c] = steamAmbi.data() + static_cast<size_t>(c) * B;
     directBuf.assign(B, 0.0f);
+    passBuf.assign(B, 0.0f);
     revIn.assign(B, 0.0f);
     earBuf[0].assign(B, 0.0f);
     earBuf[1].assign(B, 0.0f);
@@ -539,13 +584,13 @@ void Renderer::Impl::initBackend() {
 
 // Where a voice should sit: the layer position, or a stereo layer's left or
 // right end (both at the centre when the layer is folded to mono).
-Vec3 Renderer::Impl::emitterTarget(const Voice& v) const {
+Vec3 Renderer::Impl::emitterTarget(const Voice& v, float yawDeg) const {
     const Layer& L = *v.layer;
     if (L.channels != 2) return L.position;
     const bool mono = v.controls.mono.value_or(L.stereo.mono);
     if (mono) return L.position;
     const Vec3 d = stereoOffset(L.stereo.width * std::max(v.controls.stereoWidthScale, 0.0f),
-                                L.stereo.rotationDeg + v.controls.stereoRotationOffsetDeg, L.stereo.elevationDeg);
+                                L.stereo.rotationDeg + v.controls.stereoRotationOffsetDeg + yawDeg, L.stereo.elevationDeg);
     return v.channel == 0 ? L.position - d : L.position + d;
 }
 
@@ -556,6 +601,7 @@ void Renderer::Impl::initVoices() {
     int input = 0;
     for (size_t li = 0; li < scene.layers.size(); ++li) {
         const Layer& L = scene.layers[li];
+        if (L.referenceOnly) continue;   // a leader carried along for its position only
         if (isAmbisonic(L)) {
             FieldVoice f;
             f.layer = &L;
@@ -604,6 +650,34 @@ void Renderer::Impl::initVoices() {
         } else if (cfg.mode == OutputMode::Speakers) {
             v.spkCur.assign(nOut, 0.0f);
             v.spkTarget.assign(nOut, 0.0f);
+        }
+        // Straight through: a mono layer to the front pair at -3 dB each (a
+        // centre pan), a stereo layer's ends to their own side.
+        const bool stereo = v.layer->channels == 2;
+        if (cfg.mode == OutputMode::Speakers) {
+            v.spkDirect.assign(nOut, 0.0f);
+            auto nearest = [&](float az) {
+                int best = -1;
+                float bestD = 1e9f;
+                for (int c = 0; c < nOut; ++c) {
+                    const Speaker& sp = cfg.layout.speakers[static_cast<size_t>(c)];
+                    if (sp.lfe) continue;
+                    const float d = std::fabs(sp.azimuthDeg - az) + std::fabs(sp.elevationDeg);
+                    if (d < bestD) { bestD = d; best = c; }
+                }
+                return best;
+            };
+            const int left = nearest(30.0f), right = nearest(-30.0f);
+            if (stereo) {
+                const int own = v.channel == 0 ? left : right;
+                if (own >= 0) v.spkDirect[static_cast<size_t>(own)] = 1.0f;
+            } else {
+                if (left >= 0) v.spkDirect[static_cast<size_t>(left)] += 0.70710678f;
+                if (right >= 0 && right != left) v.spkDirect[static_cast<size_t>(right)] += 0.70710678f;
+            }
+        } else if (cfg.mode == OutputMode::Ambisonics) {
+            if (stereo) encodeDirection({v.channel == 0 ? -1.0f : 1.0f, 0, 0}, order, v.shDirect.data());
+            else v.shDirect[0] = 1.0f;   // W only: the same everywhere
         }
     }
 }
@@ -676,13 +750,60 @@ void Renderer::Impl::rebuildTaps(Voice& v, const Vec3& srcPos) {
     v.imagesForPosition = srcPos;
 }
 
-void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/) {
+// Where a travelling layer was when it sent the sound that arrives now: the
+// sound takes `retard` seconds to cross the distance from there, so its
+// Doppler shift is a moving source's (f c / (c - v)), not a moving
+// listener's. `retard` carries over from the previous sub-block, which is
+// all but exact (it changes by v / c per second); the first sub-block
+// solves it.
+Placement Renderer::Impl::retardedMotion(int layer, const LayerControls& c, const Vec3& base, const Vec3& listener,
+                                         double time, double& retard) const {
+    const LayerMotionEvaluator& m = poses.layerMotion(layer);
+    if (!poses.layerMoves(layer)) {
+        retard = 0;
+        return {};
+    }
+    MotionOverride o = c.motion;
+    auto at = [&](double r) {
+        MotionOverride q = o;
+        if (q.distance) q.distance = std::max(0.0, *q.distance - static_cast<double>(q.speed) * r);
+        return poses.layerPlacement(layer, time - r, listenerControls, q);
+    };
+    Placement st = at(retard);
+    for (int i = 0; i < (first ? 4 : 1); ++i) {
+        retard = (base + st.offset - listener).length() / speedOfSound;
+        st = at(retard);
+    }
+    // A loop's fade belongs to the sound sent now (it is applied as the
+    // layer's audio enters the delay line), not to what arrives.
+    if (m.active() && m.motion().end == PathEnd::Loop) st.gain = m.evaluate(time, o).gain;
+    return st;
+}
+
+void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double time) {
     const Layer& L = *v.layer;
+    // Travel along the layer's own path: exact at every sub-block, outside
+    // the glide below, so its Doppler is the real one.
+    const Placement motion = retardedMotion(v.layerIndex, v.controls, v.position + v.controls.positionOffset,
+                                            pose.position, time, v.retard);
+    v.yawCur = slewYaw(v.yawCur, motion.yawDeg);
+    // Spatialised, or straight through: the switch glides (40 ms) so the
+    // direct path fades over as the processed one fades out.
+    const bool spatial = L.spatialize && v.controls.spatialize;
+    const bool roomSend = L.roomSend || v.controls.roomSend;
+    {
+        const float want = spatial ? 0.0f : 1.0f;
+        if (first) v.directTarget = want;
+        else v.directTarget += (want - v.directTarget) * (1.0f - std::exp(-static_cast<float>(B) / (0.04f * fs)));
+        if (std::fabs(v.directTarget - want) < 1e-3f) v.directTarget = want;
+    }
+    const float processed = 1.0f - v.directTarget;
     // A layer moved by a live scene update (or a stereo end moved by its
-    // width/rotation/mono controls) glides to its new position (time constant
-    // 40 ms) instead of jumping, so dragging it in the editor does not produce
-    // a burst of Doppler shift. Static scenes never move.
-    const Vec3 target = emitterTarget(v);
+    // width/rotation/mono controls, or turned along its path) glides to its
+    // new position (time constant 40 ms) instead of jumping, so dragging it
+    // in the editor does not produce a burst of Doppler shift. Static scenes
+    // never move.
+    const Vec3 target = emitterTarget(v, v.yawCur);
     if (first) {
         v.position = target;
     } else if ((target - v.position).lengthSquared() > 1e-8f) {
@@ -691,15 +812,21 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
     } else {
         v.position = target;
     }
-    const Vec3 srcPos = v.position + v.controls.positionOffset;
+    const Vec3 srcPos = v.position + motion.offset + v.controls.positionOffset;
+    // A jump (looping back to the start of an open path, a key that holds
+    // then jumps) is taken at once rather than swept through: the loop fades
+    // the layer out around it.
+    const bool jump = !first && (srcPos - v.lastSrc).lengthSquared() > 1.0f;
+    v.lastSrc = srcPos;
     v.monoTarget = (L.channels == 2 && v.controls.mono.value_or(L.stereo.mono)) ? 1.0f : 0.0f;
 
     // (Re)build the image set when the source moved.
     if ((srcPos - v.imagesForPosition).lengthSquared() > 1e-10f) rebuildTaps(v, srcPos);
 
     const bool muted = L.mute || v.controls.mute;
-    v.levelTarget = muted ? 0.0f : dbToGain(L.levelDb + v.controls.levelOffsetDb);
+    v.levelTarget = muted ? 0.0f : dbToGain(L.levelDb + v.controls.levelOffsetDb) * motion.gain * levelKeysGain(L.levelKeys, time);
     const float dopplerAmount = clamp(v.controls.dopplerAmount.value_or(L.dopplerAmount), 0.0f, 1.0f);
+    const Vec3 facing = rotateYaw(L.directivityForward, v.yawCur).normalized();
     const float refGain = std::pow(std::max(L.referenceDistance, 0.01f), L.rolloff);
 
     float imageEnergy = 0;
@@ -722,7 +849,7 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
         if (L.directivity > 0) {
             const Vec3 listenerImage = t.isDirect ? pose.position : mirrorPoint(scene.room, pose.position, t.image.index);
             const Vec3 away = (listenerImage - srcPos).normalized();
-            const float cosTheta = L.directivityForward.normalized().dot(away);
+            const float cosTheta = facing.dot(away);
             const float k = clamp(L.directivity, 0.0f, 1.0f);
             g *= (1.0f - 0.5f * k) + 0.5f * k * cosTheta;
         }
@@ -734,7 +861,7 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
             const float midRefl = bandAverage(t.image.reflectance, 2, 3);
             imageEnergy += (g * midRefl) * (g * midRefl);
         }
-        t.gainTarget = g;
+        t.gainTarget = g * processed;
         if (t.isDirect) {
             air.apply(dist, t.air);
         } else {
@@ -760,7 +887,10 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
     if (lateReverb && !muted) {
         const float totalE = reverbTotalEnergy * refGain * refGain;
         const float lateE = std::max(totalE - imageEnergy, 0.15f * totalE);
-        v.sendTarget = std::sqrt(lateE) * dbToGain(L.reverbSendDb) * reverbTrim;
+        // Straight through, the layer feeds the room only when asked, as if
+        // from 1 m (no images to take energy from the diffuse field).
+        const float passSend = roomSend ? std::sqrt(reverbTotalEnergy) * dbToGain(L.reverbSendDb) * reverbTrim : 0.0f;
+        v.sendTarget = std::sqrt(lateE) * dbToGain(L.reverbSendDb) * reverbTrim * processed + passSend * v.directTarget;
     } else {
         v.sendTarget = 0;
     }
@@ -768,10 +898,10 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
     // Ray-traced reflections: the traced IR is relative to a unit source at
     // 1 m, so the feed carries the reference-distance gain and the trims.
     v.steamFeedTarget = (useSteam && scene.room.reflectionsEnabled && !muted)
-        ? refGain * reflGain * reverbTrim * dbToGain(L.reverbSendDb) : 0.0f;
+        ? refGain * reflGain * reverbTrim * dbToGain(L.reverbSendDb) * (roomSend ? 1.0f : processed) : 0.0f;
 #ifdef SP_HAVE_STEAM_AUDIO
     if (useSteam && steam) {
-        steam->setSource(static_cast<int>(&v - voices.data()), srcPos, L.directivityForward,
+        steam->setSource(static_cast<int>(&v - voices.data()), srcPos, facing,
                          0.5f * clamp(L.directivity, 0.0f, 1.0f), L.occlusion, L.occlusionRadius);
     }
 #endif
@@ -781,14 +911,17 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double /*time*/)
         v.sendCur = v.sendTarget;
         v.steamFeedCur = v.steamFeedTarget;
         v.monoCur = v.monoTarget;
+        v.directCur = v.directTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
         if (!v.spkCur.empty()) v.spkCur = v.spkTarget;
+    } else if (jump) {
+        for (auto& t : v.taps) t.delayCur = t.delayTarget;
     }
 }
 
 // Where the listener is relative to the sphere, in the recording's frame,
 // and the matrix, delay, level and air that follow from it.
-void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose) {
+void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose, double time) {
     const Layer& L = *f.layer;
     const Layer::Ambisonic& A = L.ambisonic;
     // Input channels -> ACN/N3D: ambiX is ACN/SN3D; FuMa is W X Y Z with W
@@ -804,13 +937,21 @@ void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose) {
         f.inGain[0] = 1.4142135f;
     }
 
-    const Vec3 centre = L.position + f.controls.positionOffset;
+    const Placement motion = retardedMotion(f.layerIndex, f.controls, L.position + f.controls.positionOffset,
+                                            pose.position, time, f.retard);
+    f.yawCur = slewYaw(f.yawCur, motion.yawDeg);
+    const Vec3 centre = L.position + motion.offset + f.controls.positionOffset;
+    const bool jump = !first && (centre - f.lastCentre).lengthSquared() > 1.0f;
+    f.lastCentre = centre;
     const float radius = std::max(A.radius * std::max(f.controls.ambisonicRadiusScale, 0.0f), 0.05f);
-    const Quat rec = ambisonicOrientation(A, f.controls.ambisonicYawOffsetDeg);
-    const Vec3 offsetWorld = pose.position - centre;
+    const Quat rec = ambisonicOrientation(A, f.controls.ambisonicYawOffsetDeg + f.yawCur);
+    // Straight through: the recording as it is, heard from its centre and
+    // not turning with the head.
+    const bool spatial = L.spatialize && f.controls.spatialize;
+    const Vec3 offsetWorld = spatial ? pose.position - centre : Vec3{};
     const Vec3 offset = rec.inverseRotate(offsetWorld);
     // Recording frame -> world (rec) -> head (inverse of the head's orientation).
-    const Quat recToHead = (pose.orientation.conjugate() * rec).normalized();
+    const Quat recToHead = spatial ? (pose.orientation.conjugate() * rec).normalized() : Quat{};
     const float dist = offsetWorld.length();
 
     // The sphere's surface is where the sounds were: the field arrives from
@@ -822,14 +963,14 @@ void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose) {
     f.delayTarget = (dopplerAmount * path + (1 - dopplerAmount) * f.distRef) / speedOfSound * fs;
 
     const bool muted = L.mute || f.controls.mute;
-    f.levelTarget = muted ? 0.0f : dbToGain(L.levelDb + f.controls.levelOffsetDb);
+    f.levelTarget = muted ? 0.0f : dbToGain(L.levelDb + f.controls.levelOffsetDb) * motion.gain * levelKeysGain(L.levelKeys, time);
     // Air absorption over the way from the sphere; the recording carries its own.
     const float excess = std::max(dist - radius, 0.0f);
     for (auto& c : f.colour) c.set(airBandGain[0](excess), airBandGain[1](excess), airBandGain[2](excess), fs);
 
     // W feeds the late reverb when asked (the field already holds its own room).
     const float outsideGain = std::pow(radius / path, std::max(L.rolloff, 0.0f));
-    f.sendTarget = (A.roomSend && lateReverb && !muted)
+    f.sendTarget = ((A.roomSend || (!spatial && (L.roomSend || f.controls.roomSend))) && lateReverb && !muted)
         ? std::sqrt(reverbTotalEnergy) * dbToGain(L.reverbSendDb) * reverbTrim * outsideGain : 0.0f;
 
     // The matrix is re-derived at the HRTF update rate and only when the
@@ -854,6 +995,8 @@ void Renderer::Impl::computeFieldTargets(FieldVoice& f, const Pose& pose) {
         f.levelCur = f.levelTarget;
         f.sendCur = f.sendTarget;
         f.matCur = f.matTarget;
+    } else if (jump) {
+        f.delayCur = f.delayTarget;
     }
 }
 
@@ -866,7 +1009,7 @@ void Renderer::Impl::renderField(FieldVoice& f) {
         const float* in = inFifo.data() + static_cast<size_t>(f.inputIndex + f.inSource[static_cast<size_t>(c)]) * B;
         const float g = f.inGain[static_cast<size_t>(c)];
         DelayLine& dl = f.delay[static_cast<size_t>(c)];
-        float level = f.levelCur, d = f.delayCur, send = f.sendCur;
+        float level = f.levelCur, send = f.sendCur;
         for (int i = 0; i < B; ++i) {
             level += dLevel;
             dl.write(in[i] * level * g);
@@ -874,7 +1017,7 @@ void Renderer::Impl::renderField(FieldVoice& f) {
         float* w = f.work.data() + static_cast<size_t>(c) * B;
         ShelfPair& colour = f.colour[static_cast<size_t>(c)];
         for (int i = 0; i < B; ++i) {
-            d += dDelay;
+            const float d = f.delayCur + dDelay * static_cast<float>(i + 1);   // not accumulated (see the voices)
             w[i] = colour.process(dl.read(d + static_cast<float>(B - 1 - i)));
             if (c == 0) {
                 send += dSend;
@@ -917,7 +1060,7 @@ void Renderer::Impl::renderSubBlock(double time) {
     std::fill(earBuf[1].begin(), earBuf[1].end(), 0.0f);
 
     for (auto& v : voices) computeTargets(v, pose, time);
-    for (auto& f : fields) computeFieldTargets(f, pose);
+    for (auto& f : fields) computeFieldTargets(f, pose, time);
 
 #ifdef SP_HAVE_STEAM_AUDIO
     if (useSteam && steam) {
@@ -946,7 +1089,17 @@ void Renderer::Impl::renderSubBlock(double time) {
         const float dLevel = (v.levelTarget - v.levelCur) * invB;
         const float dSend = (v.sendTarget - v.sendCur) * invB;
         const float dFeed = (v.steamFeedTarget - v.steamFeedCur) * invB;
-        float level = v.levelCur, send = v.sendCur, feed = v.steamFeedCur;
+        const float dDirect = (v.directTarget - v.directCur) * invB;
+        float level = v.levelCur, send = v.sendCur, feed = v.steamFeedCur, direct = v.directCur;
+        // Straight through: a stereo end at its own side as it is (folded to
+        // mono, each end carries (L + R) / 4 and is raised to (L + R) / 2 at
+        // -3 dB); a mono layer to both ears or the front pair at -3 dB (a
+        // centre pan), or W alone in Ambisonics.
+        const bool stereo = other != nullptr;
+        const bool anyDirect = v.directCur > 0 || v.directTarget > 0;
+        // Fully through, with nothing to take from the processed path: the
+        // taps and the HRTF are left alone (their gains are at zero).
+        const bool skipProcessed = v.directCur >= 1.0f && v.directTarget >= 1.0f && v.steamFeedTarget == 0 && v.steamFeedCur == 0;
 
         std::fill(directBuf.begin(), directBuf.end(), 0.0f);
 
@@ -955,30 +1108,38 @@ void Renderer::Impl::renderSubBlock(double time) {
             level += dLevel;
             send += dSend;
             feed += dFeed;
+            direct += dDirect;
             float smpIn = in[i];
+            float fold = 1.0f;
             if (other) {
                 mono += dMono;
                 smpIn = smpIn * (1.0f - mono) + 0.25f * (smpIn + other[i]) * mono;
+                fold = 1.0f + 0.41421356f * mono;
             }
             const float x = smpIn * level;
             v.delay.write(x);
             revIn[i] += x * send;
             steamIn[i] = feed;  // gain ramp; the signal is taken at the direct tap below
+            passBuf[i] = anyDirect ? x * direct * fold : 0.0f;
         }
         // The delay line now holds this block; reading `delay + (B - 1 - i)`
         // behind the newest sample is the same as reading `delay` behind
         // sample i, so each tap can run as its own contiguous pass.
         for (auto& t : v.taps) {
+            if (skipProcessed) break;
             float* tb = t.isDirect ? directBuf.data() : tapBuf.data();
             const float dStep = (t.delayTarget - t.delayCur) * invB;
             const float gStep = (t.gainTarget - t.gainCur) * invB;
-            float d = t.delayCur, g = t.gainCur;
+            float g = t.gainCur;
             // The traced reflection IR is relative to the direct arrival, so
             // its feed is the signal at the direct tap: propagation delay and
             // Doppler included, distance gain and air absorption not.
             const bool feedsSteam = t.isDirect && useSteam;
             for (int i = 0; i < B; ++i) {
-                d += dStep;
+                // Not accumulated: at tens of thousands of samples a float's
+                // step is ~0.002 samples, and summing 32 rounded steps bent the
+                // Doppler shift by up to half a percent.
+                const float d = t.delayCur + dStep * static_cast<float>(i + 1);
                 g += gStep;
                 const float raw = v.delay.read(d + static_cast<float>(B - 1 - i));
                 if (feedsSteam) steamIn[i] *= v.steamColour.process(raw);
@@ -1004,10 +1165,34 @@ void Renderer::Impl::renderSubBlock(double time) {
         v.sendCur = v.sendTarget;
         v.steamFeedCur = v.steamFeedTarget;
         v.monoCur = v.monoTarget;
+        v.directCur = v.directTarget;
         for (auto& t : v.taps) { t.delayCur = t.delayTarget; t.gainCur = t.gainTarget; t.shCur = t.shTarget; }
 #ifdef SP_HAVE_STEAM_AUDIO
         if (useSteam && steam) steam->pushDry(static_cast<int>(li), steamIn.data());
 #endif
+
+        // The unspatialised share, straight to the output.
+        if (anyDirect) {
+            if (cfg.mode == OutputMode::Binaural) {
+                if (stereo) for (int i = 0; i < B; ++i) ear[v.channel][i] += passBuf[i];
+                else for (int i = 0; i < B; ++i) { const float x = passBuf[i] * 0.70710678f; ear[0][i] += x; ear[1][i] += x; }
+            } else if (cfg.mode == OutputMode::Speakers) {
+                for (int ch = 0; ch < nOut; ++ch) {
+                    const float g = v.spkDirect[static_cast<size_t>(ch)];
+                    if (g == 0) continue;
+                    float* o = outBlock.data() + static_cast<size_t>(ch) * B;
+                    for (int i = 0; i < B; ++i) o[i] += passBuf[i] * g;
+                }
+            } else {
+                for (int c = 0; c < nSh; ++c) {
+                    const float g = v.shDirect[static_cast<size_t>(c)];
+                    if (g == 0) continue;
+                    float* b = bus.data() + static_cast<size_t>(c) * B;
+                    for (int i = 0; i < B; ++i) b[i] += passBuf[i] * g;
+                }
+            }
+        }
+        if (skipProcessed) continue;
 
         // Direct path output.
         if (cfg.mode == OutputMode::Binaural) {

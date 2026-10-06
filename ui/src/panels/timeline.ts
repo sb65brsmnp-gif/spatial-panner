@@ -4,6 +4,10 @@
 // Keys: drag to move, double-click a lane to add, Delete to remove, the key
 // bar edits the selected key's exact values and easing.
 //
+// With a layer selected the lanes are the layer's: its speed along its own
+// path (or Path %, when it is timed by keys) with its own start and end
+// lines, and its level (fades).
+//
 // The green "path start" line (when the listener sets off) and the red "path
 // end" line (when it arrives) drag: the start takes the walk with it, the end
 // stretches the speed curve. Cmd-drag over a time range selects the start,
@@ -13,12 +17,29 @@
 // holding scrubs at 4x), stop, play/pause (Space), end of path; , and . step
 // the playhead 1 s (0.1 s with Shift).
 import type { Analysis, Store } from '../model/store';
-import { EASINGS, headKeyAt, sortKeys, speedAt, type Easing, type HeadKey, type SceneDoc, type SpeedKey } from '../model/scene';
+import { EASINGS, headKeyAt, sortKeys, speedAt, pathKeyAt, levelAt, hasPath, isLinked, linkedAt, SILENT_DB, type Easing, type HeadKey, type LayerDoc, type SceneDoc, type SpeedKey } from '../model/scene';
+import { layerArrival, layerOfPath, layerPathLength, stretchSpeed } from '../model/layerMotion';
 import type { Backend } from '../bridge/backend';
 import { el, fmtTime, numberInput, select } from './dom';
 
-type LaneId = 'speed' | 'yaw' | 'pitch';
-interface Lane { id: LaneId; label: string; y: number; h: number; min: number; max: number; unit: string }
+type LaneId = 'speed' | 'yaw' | 'pitch' | 'lmove' | 'llevel' | 'llink';
+interface AnyKey { time: number; easing?: Easing; level_db?: number; fraction?: number; linked?: boolean }
+// How a lane's keys are read and written: absolute time and shown value.
+interface KeyAccess {
+  keys: AnyKey[];
+  abs(k: AnyKey): number;
+  setAbs(k: AnyKey, t: number): void;
+  val(k: AnyKey): number;
+  setVal(k: AnyKey, v: number): void;
+  make(t: number, v: number): AnyKey;
+  def: number;             // Option-click puts the value back to this
+  curve(t: number): number;
+}
+// The walk a start and end line belong to: the listener's, or the selected
+// layer's (speed timing).
+interface Walk { start: number; end: number | null; setStart(s: SceneDoc, t: number): void; stretch(s: SceneDoc, from: number, to: number): void }
+const LEVEL_MIN = -60;  // the bottom of the level lane: silence
+interface Lane { id: LaneId; label: string; y: number; h: number; min: number; max: number; unit: string; marks?: [string, string] }
 interface KeySel { lane: LaneId; index: number }
 
 const GUTTER = 96;
@@ -150,6 +171,7 @@ export class Timeline {
   private t1 = 30;
   private userZoomed = false;
   private selKey: KeySel | null = null;
+  private lanesOf = -1;  // whose lanes are shown: a layer's index, or -1 for the listener
   // A Cmd-dragged time range: the start, end and keys inside it move together.
   private range: TimeSelection | null = null;
   private drag:
@@ -220,14 +242,42 @@ export class Timeline {
     this.canvas.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
     window.addEventListener('pointerdown', (e) => { this.focused = this.root.contains(e.target as Node); }, { capture: true });
     window.addEventListener('keydown', (e) => this.key(e));
-    store.subscribe(() => { this.refreshBar(); this.draw(); });
+    store.subscribe(() => {
+      // Another layer (or the listener) selected: its lanes, nothing selected in them.
+      const li = this.layerIndex();
+      if (li !== this.lanesOf) { this.lanesOf = li; this.selKey = null; this.range = null; }
+      this.refreshBar();
+      this.draw();
+    });
     this.refreshBar();
   }
 
   // ------------------------------------------------------------ layout
 
+  // The selected layer (its point selected counts), or -1.
+  private layerIndex(): number {
+    const sel = this.store.selection;
+    const i = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
+    return this.store.scene.layers[i] ? i : -1;
+  }
+  private get layer(): LayerDoc | null { const i = this.layerIndex(); return i >= 0 ? this.store.scene.layers[i] : null; }
+
   private lanes(): Lane[] {
     const h = this.canvas.clientHeight - RULER;
+    const l = this.layer;
+    if (l) {
+      // A linked layer gets a third, step lane: linked (1) or not (0).
+      const linked = isLinked(l);
+      const kh = linked ? Math.max(26, Math.floor(h / 4)) : 0;
+      const lh = Math.max(30, Math.floor((h - kh) / 2));
+      const m = l.motion;
+      const move: Lane = m?.timing === 'keys'
+        ? { id: 'lmove', label: 'Path %', y: RULER, h: lh, min: 0, max: 100, unit: '%' }
+        : { id: 'lmove', label: 'Layer speed', y: RULER, h: lh, min: 0, max: Math.ceil(Math.max(3, ...(m?.speed ?? []).map((k) => k.speed * 1.2))), unit: 'm/s' };
+      const lanes: Lane[] = [move, { id: 'llevel', label: 'Layer level', y: RULER + lh, h: h - lh - kh, min: LEVEL_MIN, max: 12, unit: 'dB' }];
+      if (linked) lanes.push({ id: 'llink', label: 'Link', y: RULER + (h - kh), h: kh, min: 0, max: 1, unit: '', marks: ['free', 'linked'] });
+      return lanes;
+    }
     const lh = Math.max(30, Math.floor(h / 3));
     const keys = this.store.scene.listener.speed;
     const maxSpeed = Math.max(3, ...keys.map((k) => k.speed * 1.2));
@@ -255,9 +305,78 @@ export class Timeline {
   }
 
   private keysFor(lane: LaneId): { t: number; v: number }[] {
-    const L = this.store.scene.listener;
-    if (lane === 'speed') return L.speed.map((k) => ({ t: speedKeyAbsolute(this.store.scene, k.time), v: k.speed }));
-    return L.head.keys.map((k) => ({ t: k.time, v: lane === 'yaw' ? k.yaw : k.pitch }));
+    const a = this.access(lane);
+    return a ? a.keys.map((k) => ({ t: a.abs(k), v: a.val(k) })) : [];
+  }
+
+  // Reading and writing a lane's keys (null: the lane has none to edit).
+  private access(lane: LaneId, scene: SceneDoc = this.store.scene): KeyAccess | null {
+    const L = scene.listener;
+    const r = (v: number, q: number) => Math.round(v * q) / q;
+    if (lane === 'speed') {
+      if (L.position_mode === 'along_path') return null;
+      return { keys: L.speed, abs: (k) => speedKeyAbsolute(scene, k.time), setAbs: (k, t) => { k.time = speedKeyTime(scene, t); },
+        val: (k) => (k as SpeedKey).speed, setVal: (k, v) => { (k as SpeedKey).speed = Math.max(0, r(v, 20)); },
+        make: (t, v) => ({ time: speedKeyTime(scene, t), speed: Math.max(0, r(v, 20)), easing: L.speed.length ? L.speed[0].easing : 'linear' }) as SpeedKey,
+        def: 1.4, curve: (t) => speedAt(L.speed, t - pathStartTime(scene)) };
+    }
+    if (lane === 'yaw' || lane === 'pitch') {
+      const f = lane;
+      return { keys: L.head.keys, abs: (k) => k.time, setAbs: (k, t) => { k.time = t; },
+        val: (k) => (k as HeadKey)[f], setVal: (k, v) => { (k as HeadKey)[f] = Math.round(v); },
+        make: (t, v) => { const c = headKeyAt(L.head.keys, t); return { time: t, yaw: f === 'yaw' ? Math.round(v) : Math.round(c.yaw), pitch: f === 'pitch' ? Math.round(v) : Math.round(c.pitch), roll: c.roll, easing: 'smooth' } as HeadKey; },
+        def: 0, curve: (t) => { if (!L.head.keys.length) return 0; const h = headKeyAt(L.head.keys, t); return h[f]; } };
+    }
+    const l = scene.layers[this.layerIndex()];
+    if (!l) return null;
+    if (lane === 'llink') {
+      if (!isLinked(l)) return null;
+      const link = l.link!;
+      return { keys: link.keys, abs: (k) => k.time, setAbs: (k, t) => { k.time = t; },
+        val: (k) => (k.linked ? 1 : 0), setVal: (k, v) => { k.linked = v >= 0.5; },
+        make: (t, v) => ({ time: t, linked: v >= 0.5 }) as AnyKey,
+        def: 1, curve: (t) => (linkedAt(link, t) ? 1 : 0) };
+    }
+    if (lane === 'llevel') {
+      const keys = l.level_keys ?? [];
+      const lv = (v: number) => (v <= LEVEL_MIN + 0.5 ? SILENT_DB : Math.min(12, r(v, 2)));
+      return { keys, abs: (k) => k.time, setAbs: (k, t) => { k.time = t; },
+        val: (k) => Math.max(LEVEL_MIN, (k as { level_db: number }).level_db), setVal: (k, v) => { (k as { level_db: number }).level_db = lv(v); },
+        make: (t, v) => ({ time: t, level_db: lv(v), easing: 'linear' }) as AnyKey,
+        def: 0, curve: (t) => (keys.length ? Math.max(LEVEL_MIN, levelAt(keys as never, t)) : 0) };
+    }
+    const m = l.motion;
+    if (!m || !hasPath(l) || m.timing === 'position') return null;
+    if (m.timing === 'keys') {
+      return { keys: m.keys, abs: (k) => k.time, setAbs: (k, t) => { k.time = t; },
+        val: (k) => (k as { fraction: number }).fraction * 100, setVal: (k, v) => { (k as { fraction: number }).fraction = Math.max(0, Math.min(1, r(v, 10) / 100)); },
+        make: (t, v) => ({ time: t, fraction: Math.max(0, Math.min(1, r(v, 10) / 100)), easing: 'smooth' }) as AnyKey,
+        def: 0, curve: (t) => (m.keys.length ? pathKeyAt(m.keys, t) * 100 : 0) };
+    }
+    const rel = (t: number) => Math.max(0, r(t - m.start_time, 20));
+    return { keys: m.speed, abs: (k) => m.start_time + k.time, setAbs: (k, t) => { k.time = rel(t); },
+      val: (k) => (k as SpeedKey).speed, setVal: (k, v) => { (k as SpeedKey).speed = Math.max(0, r(v, 20)); },
+      make: (t, v) => ({ time: rel(t), speed: Math.max(0, r(v, 20)), easing: m.speed.length ? m.speed[0].easing : 'linear' }) as SpeedKey,
+      def: 1.4, curve: (t) => (t < m.start_time ? 0 : speedAt(m.speed, t - m.start_time)) };
+  }
+
+  // The start and end lines: the selected layer's (speed timing), else the
+  // listener's walk.
+  private walk(): Walk | null {
+    const l = this.layer;
+    if (l) {
+      const m = l.motion;
+      if (!m || !hasPath(l) || m.timing !== 'speed') return null;
+      const i = this.layerIndex();
+      const length = layerPathLength(this.store.scene, this.store.analysis, i);
+      return { start: m.start_time, end: layerArrival(l, length),
+        setStart: (s, t) => { s.layers[i].motion!.start_time = t; },
+        stretch: (s, from, to) => { const mm = s.layers[i].motion!; stretchSpeed(mm.speed, (to - mm.start_time) / (from - mm.start_time)); } };
+    }
+    if (!this.hasWalk()) return null;
+    const a = this.store.analysis;
+    return { start: pathStartTime(this.store.scene), end: a && a.arrival_time > 0 ? a.arrival_time : null,
+      setStart: (s, t) => { s.listener.path_start_time = t; }, stretch: (s, from, to) => stretchPathEnd(s, from, to) };
   }
 
   // ------------------------------------------------------------ drawing
@@ -303,9 +422,13 @@ export class Timeline {
       ctx.fillStyle = '#c9d1dc';
       ctx.fillText(lane.label, 8, lane.y + 16);
       ctx.fillStyle = '#6f7889';
-      ctx.fillText(`${lane.max}${lane.unit}`, 8, lane.y + 30);
-      ctx.fillText(`${lane.min}${lane.unit}`, 8, lane.y + lane.h - 6);
-      if (lane.id !== 'speed') {
+      if (lane.marks) {
+        ctx.fillText(lane.marks[1], 8, lane.y + lane.h - 6 - (lane.h - 12) * 0.5 + 4);
+      } else {
+        ctx.fillText(`${lane.max}${lane.unit}`, 8, lane.y + 30);
+        ctx.fillText(`${lane.min}${lane.unit}`, 8, lane.y + lane.h - 6);
+      }
+      if (lane.id !== 'speed' && lane.id !== 'llink') {
         const zy = this.y(lane, 0);
         ctx.strokeStyle = '#323844';
         ctx.setLineDash([3, 3]);
@@ -318,12 +441,21 @@ export class Timeline {
       ctx.restore();
     }
 
-    if (L.position_mode === 'along_path') {
+    const layer = this.layer;
+    const cover = layer ? (!hasPath(layer) ? `${layer.name || 'This layer'} has no path: draw one in the Layers tab to move it.`
+      : layer.motion!.timing === 'position' ? 'This layer stays at a point along its path (Layers tab, "Position").' : null)
+      : L.position_mode === 'along_path' ? 'Position is set by "Position along path" (Path tab), not by speed.' : null;
+    if (cover) {
       const lane = this.lanes()[0];
       ctx.fillStyle = 'rgba(24,27,33,0.8)';
       ctx.fillRect(GUTTER, lane.y + 1, w - GUTTER, lane.h - 1);
       ctx.fillStyle = '#9aa3b2';
-      ctx.fillText('Position is set by "Position along path" (Path tab), not by speed.', GUTTER + 10, lane.y + lane.h / 2);
+      ctx.fillText(cover, GUTTER + 10, lane.y + lane.h / 2);
+    }
+    // Whose lanes these are.
+    if (layer) {
+      ctx.fillStyle = layer.color ?? '#4f9cf9';
+      ctx.fillText((layer.name || `Layer ${this.layerIndex() + 1}`).slice(0, 14), 8, 14);
     }
 
     // The Cmd-dragged range: what is inside moves together.
@@ -338,21 +470,22 @@ export class Timeline {
 
     // The listener waits at the start of the path until path_start_time:
     // the green line (drag it to move the walk, speed keys and end with it).
-    const start = pathStartTime(this.store.scene);
-    if (this.hasWalk()) {
+    const walk = this.walk();
+    if (walk) {
+      const start = walk.start;
       const lane = this.lanes()[0];
       const sx = Math.min(w, this.x(start));
       if (sx > GUTTER) {
         ctx.fillStyle = 'rgba(24,27,33,0.6)';
         ctx.fillRect(GUTTER, lane.y + 1, sx - GUTTER, lane.h - 1);
       }
-      this.marker(sx, '#5fd38d', 'path start', !!range?.start);
+      this.marker(sx, '#5fd38d', layer ? 'layer sets off' : 'path start', !!range?.start);
     }
 
     // Arrival at the end of the path: the red line (drag it to make the walk
     // faster or slower).
     const end = this.endMarker();
-    if (end !== null) this.marker(this.x(end), '#eb5757', 'path end', !!range?.end);
+    if (end !== null) this.marker(this.x(end), '#eb5757', layer ? 'layer arrives' : 'path end', !!range?.end);
 
 
     // Playhead.
@@ -388,27 +521,26 @@ export class Timeline {
     const d = this.drag;
     if (d?.kind === 'marker' && d.which === 'end') return d.end;
     if (d?.kind === 'group' && d.end !== null && this.range?.end) return d.end;
-    const a = this.store.analysis;
-    return this.hasWalk() && a && a.arrival_time > 0 ? a.arrival_time : null;
+    return this.walk()?.end ?? null;
   }
 
   // The start or end line under `x`, if any.
   private markerAt(x: number): 'start' | 'end' | null {
-    if (!this.hasWalk()) return null;
+    const walk = this.walk();
+    if (!walk) return null;
     const end = this.endMarker();
     if (end !== null && Math.abs(this.x(end) - x) < 6) return 'end';
-    if (Math.abs(this.x(pathStartTime(this.store.scene)) - x) < 6) return 'start';
+    if (Math.abs(this.x(walk.start) - x) < 6) return 'start';
     return null;
   }
 
   private drawLaneCurves(lane: Lane): void {
     const ctx = this.ctx;
     const w = this.canvas.clientWidth;
-    const L = this.store.scene.listener;
     const a = this.store.analysis;
     // Resulting head angle from the engine (faint), so relative keys can be
     // read against where the head actually points.
-    if (lane.id !== 'speed' && a && a.poses.length) {
+    if ((lane.id === 'yaw' || lane.id === 'pitch') && a && a.poses.length) {
       ctx.strokeStyle = 'rgba(255, 200, 87, 0.35)';
       ctx.beginPath();
       let prev: number | null = null;
@@ -425,18 +557,15 @@ export class Timeline {
       ctx.stroke();
     }
     // The key curve.
-    const color = lane.id === 'speed' ? '#5fd38d' : lane.id === 'yaw' ? '#56ccf2' : '#bb6bd9';
+    const acc = this.access(lane.id);
+    if (!acc) return;
+    const head = lane.id === 'yaw' || lane.id === 'pitch';
+    const color = lane.id === 'speed' || lane.id === 'lmove' ? '#5fd38d' : lane.id === 'yaw' ? '#56ccf2' : lane.id === 'llevel' ? '#f2c94c' : lane.id === 'llink' ? '#f2994a' : '#bb6bd9';
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (let x = GUTTER; x <= w; x += 2) {
-      const t = this.t(x);
-      let v: number;
-      if (lane.id === 'speed') v = speedAt(L.speed, t - pathStartTime(this.store.scene));
-      else {
-        if (!L.head.keys.length) { v = 0; }
-        else { const h = headKeyAt(L.head.keys, t); v = lane.id === 'yaw' ? h.yaw : h.pitch; }
-      }
+      const v = acc.curve(this.t(x));
       const y = this.y(lane, Math.max(lane.min, Math.min(lane.max, v)));
       if (x === GUTTER) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
@@ -445,8 +574,9 @@ export class Timeline {
     // Keys.
     this.keysFor(lane.id).forEach((k, i) => {
       const x = this.x(k.t), y = this.y(lane, Math.max(lane.min, Math.min(lane.max, k.v)));
-      const sel = (this.selKey && this.selKey.index === i && (this.selKey.lane === lane.id || (lane.id !== 'speed' && this.selKey.lane !== 'speed')))
-        || (this.range && (lane.id === 'speed' ? this.range.speed : this.range.head).includes(i));
+      const sk = this.selKey;
+      const sel = (sk && sk.index === i && (sk.lane === lane.id || (head && (sk.lane === 'yaw' || sk.lane === 'pitch'))))
+        || (this.range && (lane.id === 'speed' ? this.range.speed : head ? this.range.head : []).includes(i));
       ctx.fillStyle = sel ? '#ffffff' : color;
       ctx.beginPath();
       ctx.moveTo(x, y - 5); ctx.lineTo(x + 5, y); ctx.lineTo(x, y + 5); ctx.lineTo(x - 5, y); ctx.closePath();
@@ -467,8 +597,8 @@ export class Timeline {
 
   private renderKeyBar(): void {
     const s = this.selKey;
-    const L = this.store.scene.listener;
-    const key = s ? (s.lane === 'speed' ? L.speed[s.index] : L.head.keys[s.index]) : null;
+    const acc = s ? this.access(s.lane) : null;
+    const key = s && acc ? acc.keys[s.index] ?? null : null;
     const r = this.range;
     const sig = key ? JSON.stringify([s, key]) : r ? JSON.stringify(['range', r.start, r.end, r.speed.length, r.head.length]) : '';
     if (this.keyBar.dataset.sig === sig) return;
@@ -486,17 +616,33 @@ export class Timeline {
       return;
     }
     if (!s || !key) {
-      this.keyBar.append(el('span', { class: 'hint' }, this.hasWalk()
+      this.keyBar.append(el('span', { class: 'hint' }, this.layer
+        ? `Lanes of the selected layer: double-click to add a key${this.walk() ? ', drag its start and end lines' : ''}; Esc deselects the layer to edit the listener's lanes`
+        : this.hasWalk()
         ? 'Double-click a lane to add a key; drag the start and end lines; Cmd-drag a range to move everything in it'
         : 'Double-click a lane to add a key'));
       return;
     }
     const upd = (fn: () => void) => this.store.update(() => { fn(); this.resortSelected(); }, `key-edit-${s.lane}-${s.index}`);
-    const fromStart = s.lane === 'speed' && pathStartTime(this.store.scene) > 0;
+    const fromStart = (s.lane === 'speed' && pathStartTime(this.store.scene) > 0)
+      || (s.lane === 'lmove' && this.layer?.motion?.timing === 'speed' && this.layer.motion.start_time > 0);
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'Key at'),
       numberInput(key.time, (v) => upd(() => { key.time = Math.max(0, v); }), { step: 0.1, width: 56 }),
-      el('span', { class: 'tl-unit' }, fromStart ? 's after the path starts' : 's'));
-    if (s.lane === 'speed') {
+      el('span', { class: 'tl-unit' }, fromStart ? (s.lane === 'lmove' ? 's after the layer sets off' : 's after the path starts') : 's'));
+    if (s.lane === 'llink') {
+      this.keyBar.append(select(['linked', 'free'], key.linked ? 'linked' : 'free', (v) => upd(() => { key.linked = v === 'linked'; }), { linked: 'links it', free: 'unlinks it' }, 'linked'));
+      const del = el('button', { class: 'tbtn small', title: 'Delete key (Delete)' }, '✕');
+      del.addEventListener('click', () => this.deleteKey());
+      this.keyBar.append(del);
+      return;
+    }
+    if (s.lane === 'lmove' || s.lane === 'llevel') {
+      const a = acc!;
+      const unit = s.lane === 'llevel' ? 'dB' : this.layer?.motion?.timing === 'keys' ? '% of the path' : 'm/s';
+      const shown = s.lane === 'llevel' && (key.level_db ?? 0) <= SILENT_DB ? LEVEL_MIN : a.val(key);
+      this.keyBar.append(numberInput(Math.round(shown * 100) / 100, (v) => upd(() => a.setVal(key, v)), { step: s.lane === 'llevel' ? 0.5 : 0.1, width: 56, def: a.def }),
+        el('span', { class: 'tl-unit' }, s.lane === 'llevel' && shown <= LEVEL_MIN ? 'dB (silent)' : unit));
+    } else if (s.lane === 'speed') {
       const k = key as SpeedKey;
       this.keyBar.append(numberInput(k.speed, (v) => upd(() => { k.speed = Math.max(0, v); }), { step: 0.1, width: 52, def: 1.4 }),
         el('span', { class: 'tl-unit' }, 'm/s'));
@@ -506,7 +652,7 @@ export class Timeline {
         el('span', { class: 'tl-sep' }, 'Pitch'), numberInput(k.pitch, (v) => upd(() => { k.pitch = Math.max(-90, Math.min(90, v)); }), { step: 1, width: 52, def: 0 }));
     }
     this.keyBar.append(el('span', { class: 'tl-sep' }, 'then'),
-      select(EASINGS, key.easing, (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }, 'linear'));
+      select(EASINGS, key.easing ?? 'linear', (v) => upd(() => { key.easing = v as Easing; }), { linear: 'linear', smooth: 'smooth', ease_in: 'ease in', ease_out: 'ease out', hold: 'hold' }, 'linear'));
     const del = el('button', { class: 'tbtn small', title: 'Delete key (Delete)' }, '✕');
     del.addEventListener('click', () => this.deleteKey());
     this.keyBar.append(del);
@@ -515,8 +661,8 @@ export class Timeline {
   private resortSelected(): void {
     const s = this.selKey;
     if (!s) return;
-    const L = this.store.scene.listener;
-    const arr: { time: number }[] = s.lane === 'speed' ? L.speed : L.head.keys;
+    const arr = this.access(s.lane)?.keys;
+    if (!arr) return;
     const obj = arr[s.index];
     sortKeys(arr);
     s.index = arr.indexOf(obj);
@@ -656,7 +802,7 @@ export class Timeline {
     const [x, y] = this.local(e);
     if (x < GUTTER) return;
     const t = this.t(x);
-    if (e.metaKey || e.ctrlKey) {
+    if ((e.metaKey || e.ctrlKey) && !this.layer) {
       // Cmd-drag: a time range; the start, end and keys inside it move together.
       this.selKey = null;
       this.range = selectRange(this.store.scene, this.endMarker(), t, t);
@@ -685,16 +831,11 @@ export class Timeline {
       this.scrubTo(t);
       return;
     }
-    if (hit && !(hit.lane === 'speed' && this.store.scene.listener.position_mode === 'along_path')) {
+    if (hit && this.access(hit.lane)) {
       this.selKey = hit;
       if (e.altKey) {
         // Option-click: the key's value back to its default (time stays).
-        const L = this.store.scene.listener;
-        this.store.update(() => {
-          if (hit.lane === 'speed') L.speed[hit.index].speed = 1.4;
-          else if (hit.lane === 'yaw') L.head.keys[hit.index].yaw = 0;
-          else L.head.keys[hit.index].pitch = 0;
-        });
+        this.store.update((sc) => { const a = this.access(hit.lane, sc); if (a?.keys[hit.index]) a.setVal(a.keys[hit.index], a.def); });
         this.refreshBar();
         this.draw();
         return;
@@ -735,31 +876,29 @@ export class Timeline {
     }
     if (d.kind === 'marker') {
       const t = this.snap(this.t(x));
+      const walk = this.walk();
+      if (!walk) return;
       if (d.which === 'start') {
-        this.store.update((s) => { s.listener.path_start_time = t; }, 'marker-start');
+        this.store.update((s) => walk.setStart(s, t), 'marker-start');
       } else {
-        const to = Math.max(pathStartTime(this.store.scene) + MIN_WALK, t);
+        const to = Math.max(walk.start + MIN_WALK, t);
         if (to === d.end) return;
         const from = d.end;
-        this.store.update((s) => stretchPathEnd(s, from, to), 'marker-end');
+        this.store.update((s) => walk.stretch(s, from, to), 'marker-end');
         d.end = to;
       }
       return;
     }
-    const lane = this.lanes().find((l) => l.id === d.sel.lane)!;
+    const lane = this.lanes().find((l) => l.id === d.sel.lane);
+    if (!lane) return;
     const t = this.snap(this.t(x));
     const v = Math.max(lane.min, Math.min(lane.max, this.v(lane, y)));
-    const L = this.store.scene.listener;
-    this.store.update(() => {
-      if (lane.id === 'speed') {
-        const k = L.speed[d.sel.index];
-        k.time = speedKeyTime(this.store.scene, t);
-        k.speed = Math.round(v * 20) / 20;
-      } else {
-        const k = L.head.keys[d.sel.index];
-        k.time = t;
-        if (lane.id === 'yaw') k.yaw = Math.round(v); else k.pitch = Math.round(v);
-      }
+    this.store.update((sc) => {
+      const a = this.access(lane.id, sc);
+      const k = a?.keys[d.sel.index];
+      if (!a || !k) return;
+      a.setAbs(k, t);
+      a.setVal(k, v);
       this.resortSelected();
       d.sel.index = this.selKey!.index;
     }, `key-drag-${lane.id}`);
@@ -794,26 +933,17 @@ export class Timeline {
   private dblclick(e: MouseEvent): void {
     const [x, y] = this.local(e);
     const lane = this.laneAt(y);
-    if (!lane || x < GUTTER || this.hitKey(x, y)) return;
-    const L = this.store.scene.listener;
-    if (lane.id === 'speed' && L.position_mode === 'along_path') return;
+    if (!lane || x < GUTTER || this.hitKey(x, y) || !this.access(lane.id)) return;
     const t = Math.max(0, Math.round(this.t(x) * 20) / 20);
-    const v = this.v(lane, y);
-    this.store.update(() => {
-      if (lane.id === 'speed') {
-        const easing: Easing = L.speed.length ? L.speed[0].easing : 'linear';
-        const k: SpeedKey = { time: speedKeyTime(this.store.scene, t), speed: Math.max(0, Math.round(v * 20) / 20), easing };
-        L.speed.push(k);
-        sortKeys(L.speed);
-        this.selKey = { lane: 'speed', index: L.speed.indexOf(k) };
-      } else {
-        const cur = headKeyAt(L.head.keys, t);
-        const k: HeadKey = { time: t, yaw: lane.id === 'yaw' ? Math.round(v) : Math.round(cur.yaw),
-          pitch: lane.id === 'pitch' ? Math.round(v) : Math.round(cur.pitch), roll: cur.roll, easing: 'smooth' };
-        L.head.keys.push(k);
-        sortKeys(L.head.keys);
-        this.selKey = { lane: lane.id, index: L.head.keys.indexOf(k) };
-      }
+    const v = Math.max(lane.min, Math.min(lane.max, this.v(lane, y)));
+    const li = this.layerIndex();
+    this.store.update((sc) => {
+      if (lane.id === 'llevel' && !sc.layers[li].level_keys) sc.layers[li].level_keys = [];
+      const a = this.access(lane.id, sc)!;
+      const k = a.make(t, v);
+      a.keys.push(k);
+      sortKeys(a.keys);
+      this.selKey = { lane: lane.id, index: a.keys.indexOf(k) };
     });
   }
 
@@ -821,8 +951,9 @@ export class Timeline {
     const s = this.selKey;
     if (!s) return;
     this.store.update((sc) => {
-      if (s.lane === 'speed') sc.listener.speed.splice(s.index, 1);
-      else sc.listener.head.keys.splice(s.index, 1);
+      this.access(s.lane, sc)?.keys.splice(s.index, 1);
+      const l = sc.layers[this.layerIndex()];
+      if (s.lane === 'llevel' && l?.level_keys && !l.level_keys.length) delete l.level_keys;
     });
     this.selKey = null;
   }

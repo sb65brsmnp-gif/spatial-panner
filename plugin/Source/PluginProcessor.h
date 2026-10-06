@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 
@@ -77,6 +78,8 @@ public:
     // Called with the document when the plugin changed it (a track was added
     // or renamed): the editor reloads it.
     std::function<void(const nlohmann::json&)> onSceneChanged;
+    // Forgets the automation recorded so far: the listener's (scene track)
+    // and this track's Path Speed.
     void clearAutomationHistory();
 
     struct HostTrack { std::string id, name; float meterDb = -120; };
@@ -98,6 +101,9 @@ public:
 
     // ---- tests
     static void setSessionPathForTesting(const std::string& path);
+    // How long a live layer slot must have existed before the scene turns it
+    // into a layer (named / unnamed), in ms; the defaults are 1000 and 5000.
+    static void setAdoptDelaysForTesting(int namedMs, int unnamedMs);
     void tickForTesting() { timerCallback(); }
     LayerEngine& engineForTesting() { return engine_; }
     juce::AudioProcessorValueTreeState& parametersForTesting() { return params_; }
@@ -109,6 +115,7 @@ private:
     void becomeScene(bool force);
     void becomeLayer();
     void manageSlot();
+    std::vector<SharedSession::LayerInfo> adoptableLayers();
     void adoptPublishedScene();
     void applyDocToEngine(const nlohmann::json& doc);
     void publish();
@@ -134,6 +141,7 @@ private:
     std::string historyText_;         // restored automation history, written on becoming the scene
     uint64_t seenRevision_ = 0;
     uint32_t seenGeneration_ = 0;
+    std::map<std::string, uint32_t> seenSince_;   // scene: live layer ids and when each was first seen
     bool needsPublish_ = false;
     juce::String status_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);   // for callAsync from host threads
@@ -155,6 +163,9 @@ private:
     std::atomic<bool> fileFed_{false};
     std::atomic<double> docStart_{0};
     std::atomic<bool> docLoop_{false};
+    // The layer's path position in the scene document as last applied (the
+    // editor's slider and the Path Position parameter are one control).
+    double docPathFraction_ = -1;
 
     // audio thread
     double sampleRate_ = 48000;
@@ -166,6 +177,7 @@ private:
     std::atomic<bool> lastPlaying_{false};
     std::atomic<juce::int64> lastBlockTicks_{0};
     std::atomic<float> cpu_{0};
+    float lastPathPosition_ = -1;   // Path Position at the end of the last block (0..1), -1 before the first
 
     std::atomic<float>* pSpeed_;
     std::atomic<float>* pPosition_;
@@ -185,6 +197,10 @@ private:
     std::atomic<float>* pX_;
     std::atomic<float>* pY_;
     std::atomic<float>* pZ_;
+    std::atomic<float>* pPathSpeed_;
+    std::atomic<float>* pPathPosition_;
+    std::atomic<float>* pSpatialize_;
+    std::atomic<float>* pRoomSend_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpatialPannerProcessor)
 };

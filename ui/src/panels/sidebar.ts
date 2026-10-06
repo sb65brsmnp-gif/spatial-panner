@@ -1,7 +1,9 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
 import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoom, layerHome, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
-  LAYOUTS, MATERIALS, WALLS, layerColor, type HeadMode, type LayerDoc, type SceneDoc, type V3 } from '../model/scene';
+  LAYOUTS, MATERIALS, WALLS, layerColor, hasPath, defaultLink, isSpatialized, isLinked, leadsTo, type HeadMode, type LayerDoc, type LayerTiming, type PathEnd, type SceneDoc, type V3 } from '../model/scene';
+import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
+import { speedArrival } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
 import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
@@ -34,6 +36,11 @@ export class Sidebar {
   private bounceRate: number | null = null;  // null: the device's rate
   private bounceState: BounceEvent | null = null;
   private bounceBar: HTMLElement | null = null;
+  // Fit timing: what is left out (listener 'L', layer indices) and the span
+  // (null: from the earliest start to the latest finish).
+  private fitOut = new Set<string>();
+  private fitStart: number | null = null;
+  private fitEnd: number | null = null;
 
   constructor(private store: Store, private backend: Backend, private tools: Interaction) {
     this.root = el('div', { id: 'sidebar' });
@@ -113,10 +120,13 @@ export class Sidebar {
     const a = this.store.analysis;
     const base = `${this.tab}|${sel}|${this.store.filePath}`;
     switch (this.tab) {
-      case 'layers': return base + JSON.stringify(s.layers) + JSON.stringify([...this.store.audioInfo.keys()])
+      case 'layers': return base + JSON.stringify(s.layers) + JSON.stringify([...this.store.audioInfo.keys()]) + `|${this.tools.opts.layerTarget}|${this.tools.opts.tool}`
+        + (a?.layers ?? []).map((t) => `${t.layer}:${t.length}`).join(',')
         + (this.plugin ? JSON.stringify(this.info?.tracks ?? []) : '');
       case 'path': return base + JSON.stringify(s.listener) + JSON.stringify(s.editor) + JSON.stringify(this.tools.opts)
-        + (a ? `${a.arrival_time}|${a.paths.map((p) => p.length).join(',')}` : '') + s.layers.map((l) => l.name).join('|');
+        + (a ? `${a.arrival_time}|${a.paths.map((p) => p.length).join(',')}|${(a.layers ?? []).map((t) => t.length).join(',')}` : '') + s.layers.map((l) => l.name).join('|')
+        + JSON.stringify(s.layers.map((l) => l.motion ? [l.motion.timing, l.motion.start_time, l.motion.speed, l.motion.keys] : null))
+        + `|${[...this.fitOut].join(',')}|${this.fitStart}|${this.fitEnd}`;
       case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment)
         + (s.room.impulse_response ? JSON.stringify(this.store.audioInfo.get(s.room.impulse_response.file) ?? null) : '');
       case 'output': return base + JSON.stringify(s.editor) + JSON.stringify(this.info);
@@ -138,8 +148,10 @@ export class Sidebar {
   private renderLayers(): void {
     const s = this.store.scene;
     if (this.plugin) {
+      const strays = s.layers.filter((l) => !this.trackName(l.host_id)).length;
       this.body.append(el('p', { class: 'hint' }, s.layers.length
         ? 'Each track running Spatial Panner plays its layer. Drag layers in the 3D view to place them.'
+          + (strays ? ' A layer marked "no track" has no running track: select it and press Remove layer if it is not wanted.' : '')
         : 'Insert Spatial Panner on a track to add it here as a layer. Each track plays its own layer.'));
       if (!s.layers.length) return;
     } else {
@@ -159,8 +171,9 @@ export class Sidebar {
     }
     const list = el('div', { class: 'layer-list' });
     const sel = this.store.selection;
+    const selLayer = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
     s.layers.forEach((l, i) => {
-      const item = el('div', { class: 'layer-item' + (sel.kind === 'layer' && sel.index === i ? ' selected' : '') });
+      const item = el('div', { class: 'layer-item' + (selLayer === i ? ' selected' : '') });
       const color = el('input', { type: 'color', class: 'swatch' });
       color.value = l.color ?? '#4f9cf9';
       color.addEventListener('input', () => this.upd((sc) => { sc.layers[i].color = color.value; }, `color-${i}`));
@@ -168,7 +181,7 @@ export class Sidebar {
       const unbound = this.plugin && !this.trackName(l.host_id);
       const name = el('span', { class: 'layer-name' + (unbound ? ' muted' : ''),
         title: this.plugin ? (unbound ? 'No track plays this layer' : `Track: ${this.trackName(l.host_id)}`) : l.audio || 'no audio file' },
-        l.name || `Layer ${i + 1}`);
+        (l.name || `Layer ${i + 1}`) + (unbound ? ' (no track)' : ''));
       const mute = el('button', { class: 'ms' + (l.mute ? ' on mute' : ''), title: 'Mute' }, 'M');
       mute.addEventListener('click', (e) => { e.stopPropagation(); this.upd((sc) => { sc.layers[i].mute = !sc.layers[i].mute; }); });
       const solo = el('button', { class: 'ms' + (l.solo ? ' on solo' : ''), title: 'Solo' }, 'S');
@@ -186,7 +199,7 @@ export class Sidebar {
     });
     this.body.append(list);
     this.updateMeters();
-    if (sel.kind === 'layer' && s.layers[sel.index]) this.renderLayerDetails(sel.index);
+    if (selLayer >= 0 && s.layers[selLayer]) this.renderLayerDetails(selLayer);
     else this.body.append(el('p', { class: 'hint' }, 'Select a layer (here or in the 3D view) to edit it. Drag layers in the view; Shift+drag changes height.'));
   }
 
@@ -286,6 +299,7 @@ export class Sidebar {
           checkbox(l.loop, (v) => u((x) => { x.loop = v; }), 'loop', D.loop)),
       ));
     }
+    this.renderLayerPath(i);
     if (stereo) {
       const us = (fn: (s: typeof st) => void, key?: string) => u((x) => { x.stereo = x.stereo ?? defaultStereo(); fn(x.stereo); }, key);
       this.body.append(section('Stereo field',
@@ -341,6 +355,119 @@ export class Sidebar {
       row('Reflections', select(['-1', '0', '1', '2', '3'], String(l.reflection_order), (v) => u((x) => { x.reflection_order = parseInt(v, 10); }),
         { '-1': 'room default', '0': 'none', '1': '1st order', '2': '2nd order', '3': '3rd order' }, String(D.reflection_order))),
     ), bound ? el('p', { class: 'muted' }, 'To remove this layer, remove Spatial Panner from its track.') : el('div', { class: 'btn-row' }, remove));
+  }
+
+  // Straight through or spatialised, and the layer's link to the listener
+  // or another layer.
+  private renderSpatializeAndLink(i: number): void {
+    const s = this.store.scene;
+    const l = s.layers[i];
+    const u = (fn: (l: LayerDoc) => void) => this.upd((sc) => fn(sc.layers[i]));
+    const on = isSpatialized(l);
+    this.body.append(section('Spatialize',
+      row('Spatialize', checkbox(on, (v) => u((x) => { if (v) delete x.spatialize; else x.spatialize = false; }), on ? 'on' : 'off: plays straight through', true)),
+      on ? el('p', { class: 'muted' }, 'Off, the layer plays as it is: mono to both ears, stereo left to left and right to right, with no distance, direction, Doppler or room. Its level, mute, fades and place in the scene stay.')
+        : row('Room', checkbox(!!l.room_send, (v) => u((x) => { if (v) x.room_send = true; else delete x.room_send; }), 'send it to the room\'s reverb anyway', false)),
+      this.plugin ? el('p', { class: 'muted' }, 'The track\'s Layer Spatialize and Layer Room Send parameters do the same live and can be automated in Logic (Spatialize must be on here for the parameter to turn it on).') : '',
+    ));
+    // Leaders on offer: the listener and any layer that does not follow this one.
+    const others = s.layers.map((_, j) => j).filter((j) => j !== i && !leadsTo(s.layers, j, i));
+    const cur = !isLinked(l) ? 'none' : String(l.link!.to);
+    const labels: Record<string, string> = { none: 'nothing', listener: 'the listener' };
+    for (const j of others) labels[String(j)] = s.layers[j].name || `Layer ${j + 1}`;
+    const to = select(['none', 'listener', ...others.map(String)], cur, (v) => u((x) => {
+      if (v === 'none') delete x.link;
+      else x.link = { ...(x.link ?? defaultLink('listener')), to: v === 'listener' ? 'listener' : parseInt(v, 10) };
+    }), labels, 'none');
+    const link = l.link;
+    const nk = link?.keys.length ?? 0;
+    const clear = el('button', { class: 'btn small' }, 'Clear');
+    clear.addEventListener('click', () => u((x) => { if (x.link) x.link.keys = []; }));
+    this.body.append(section('Link',
+      row('Linked to', to),
+      isLinked(l) ? row('From the start', checkbox(link!.linked_at_start, (v) => u((x) => { x.link!.linked_at_start = v; }), link!.linked_at_start ? 'linked' : 'free until a key links it', true)) : '',
+      isLinked(l) ? el('p', { class: 'muted' }, 'While linked it keeps its place and bearing relative to that one as it moves and turns with its direction of travel (its own path, if any, goes with it). '
+        + (nk ? `${nk} link key${nk === 1 ? '' : 's'} on the Link lane of the timeline. ` : 'Double-click the Link lane on the timeline to add keys that unlink and link it again at times. ')
+        + 'Unlinking leaves it where it is.', nk ? clear : '')
+        : el('p', { class: 'muted' }, 'Link the layer to the listener or another layer and it moves with it, keeping its distance and bearing; the timeline\'s Link lane unlinks and links it again at times.'),
+    ));
+  }
+
+  // The layer's own path: drawing it, how it is timed, what happens at the
+  // end, turning with it; and its level automation (fades).
+  private renderLayerPath(i: number): void {
+    const l = this.store.scene.layers[i];
+    const u = (fn: (l: LayerDoc) => void, key?: string) => this.upd((s) => fn(s.layers[i]), key ? `${key}-${i}` : undefined);
+    const drawing = this.tools.opts.layerTarget === i && this.tools.opts.tool !== 'select';
+    const draw = el('button', { class: 'btn' + (hasPath(l) ? '' : ' primary') }, hasPath(l) ? 'Redraw' : 'Draw a path');
+    draw.title = 'Draws with the tool chosen in the toolbar (the curve tool when none is): click points, Enter or double-click to finish';
+    draw.addEventListener('click', () => this.tools.drawLayerPath(i));
+    const cancel = el('button', { class: 'btn' }, 'Cancel');
+    cancel.addEventListener('click', () => this.tools.setTool('select'));
+    const rows: (Node | string)[] = [];
+    if (drawing) {
+      rows.push(el('p', { class: 'hint' }, `Drawing ${l.name || `Layer ${i + 1}`}'s path at its height: draw in the 3D view with the ${toolName(this.tools.opts.tool)}. `
+        + 'The layer moves to where the path begins. Esc cancels.'), el('div', { class: 'btn-row' }, cancel));
+    } else if (!hasPath(l)) {
+      rows.push(el('p', { class: 'muted' }, 'Give the layer its own path and it travels along it: at its own speed, at the times you set, or held at a point you can automate. '
+        + 'Click the button below, or pick any drawing tool in the toolbar while this layer is selected (the toolbar\'s "for" shows whose path you are drawing).'),
+        el('div', { class: 'btn-row' }, draw));
+    } else {
+      const m = l.motion!;
+      const length = layerPathLength(this.store.scene, this.store.analysis, i);
+      const remove = el('button', { class: 'btn danger' }, 'Remove path');
+      remove.addEventListener('click', () => u((x) => removePath(x)));
+      const fit = el('button', { class: 'btn' }, 'Fit timing…');
+      fit.title = 'Make this layer, others and the listener start and finish together';
+      fit.addEventListener('click', () => this.setTab('path'));
+      const arrival = layerArrival(l, length);
+      const timing = select(['speed', 'keys', 'position'], m.timing, (v) => u((x) => {
+        const mm = x.motion!;
+        mm.timing = v as LayerTiming;
+        // Keys to start from: setting off now and arriving when the speed
+        // curve would have.
+        if (v === 'keys' && mm.keys.length < 2) {
+          const t0 = mm.start_time;
+          const a = speedArrival(mm.speed, length);
+          mm.keys = [{ time: t0, fraction: 0, easing: 'smooth' }, { time: Math.round((t0 + (a ?? 10)) * 100) / 100, fraction: 1, easing: 'smooth' }];
+        }
+      }), { speed: 'its speed (Layer speed lane)', keys: 'times to be at (Path % lane)', position: 'a point along the path' }, 'speed');
+      const timingRows: (Node | string)[] = [];
+      if (m.timing === 'speed') {
+        timingRows.push(row('Sets off at', numberInput(m.start_time, (v) => u((x) => { x.motion!.start_time = Math.max(0, v); }), { step: 0.1, width: 64, def: 0 }), 's'),
+          el('p', { class: 'muted' }, arrival !== null ? `Reaches the end at ${fmtTime(arrival, true)}. The Layer speed lane on the timeline shapes the journey; drag its red end line to make it quicker or slower.`
+            : 'It stops on the way (its speed reaches 0) and never reaches the end.'));
+      } else if (m.timing === 'keys') {
+        timingRows.push(el('p', { class: 'muted' }, 'Each key on the Path % lane says where along the path the layer is at that time (0 % the start, 100 % the end). Double-click the lane to add one.'));
+      } else {
+        timingRows.push(row('Position', slider(m.fraction * 100, 0, 100, 0.1, (v) => u((x) => { x.motion!.fraction = v / 100; }, 'lfraction'),
+          (v) => `${v.toFixed(1)} %`, () => this.store.endGesture(), 0)));
+      }
+      rows.push(
+        row('Path', el('span', { class: 'muted' }, `${length.toFixed(1)} m${m.path.closed ? ', closed' : ''}`), draw, remove),
+        row('Moves by', timing),
+        ...timingRows,
+        m.timing !== 'position' ? row('At the end', select(['stop', 'loop', 'ping_pong'], m.end, (v) => u((x) => { x.motion!.end = v as PathEnd; }),
+          { stop: 'stops', loop: 'starts again', ping_pong: 'goes back and forth' }, 'stop')) : '',
+        row('Turn', checkbox(m.turn, (v) => u((x) => { x.motion!.turn = v; }), 'turns with its direction of travel', false)),
+        el('p', { class: 'muted' }, m.turn ? 'Its facing, stereo bar or sphere turn as the path turns (and round at each end going back and forth).'
+          : 'It keeps facing the same way wherever it goes.'),
+        this.plugin ? el('p', { class: 'muted' }, 'The track\'s Path Speed (×) and Path Position (%) parameters adjust this live and can be automated in Logic.') : '',
+        el('p', { class: 'muted' }, 'Drag the layer to move it with its path; drag the path\'s points to reshape it (Option+click the line adds a point).'),
+        el('div', { class: 'btn-row' }, fit),
+      );
+    }
+    this.body.append(section('Path', ...rows));
+    this.renderSpatializeAndLink(i);
+    const keys = l.level_keys ?? [];
+    const clear = el('button', { class: 'btn small' }, 'Clear');
+    clear.addEventListener('click', () => u((x) => { delete x.level_keys; }));
+    this.body.append(section('Fades',
+      el('p', { class: 'muted' }, keys.length
+        ? `${keys.length} level key${keys.length === 1 ? '' : 's'} on the Layer level lane (on top of the level above). Drag a key to the bottom of the lane for silence.`
+        : 'Double-click the Layer level lane on the timeline to add level keys: fade the layer in and out (the bottom of the lane is silence).'
+          + (this.plugin ? ' In Logic, the track\'s own volume automation does the same.' : '')),
+      keys.length ? el('div', { class: 'btn-row' }, clear) : ''));
   }
 
   async addAudioFiles(): Promise<void> {
@@ -488,6 +615,8 @@ export class Sidebar {
       L.paths.length ? '' : row('Stands at', vec3Inputs(L.static_position, (v) => this.upd((sc) => { sc.listener.static_position = v; }), 0.1, DL.static_position)),
     ));
 
+    this.renderFit();
+
     // Head.
     const H = L.head;
     const layerNames = s.layers.map((l, i) => l.name || `Layer ${i + 1}`);
@@ -508,6 +637,51 @@ export class Sidebar {
         (v) => `${v.toFixed(0)}° ${v > 0 ? 'left' : v < 0 ? 'right' : ''}`, () => this.store.endGesture())),
       row('Tilt', slider(H.pitch_offset, -90, 90, 1, (v) => this.upd((sc) => { sc.listener.head.pitch_offset = v; }, 'pitch-off'),
         (v) => `${v.toFixed(0)}° ${v > 0 ? 'up' : v < 0 ? 'down' : ''}`, () => this.store.endGesture())),
+    ));
+  }
+
+  // Fit timing: the listener and the chosen layers set off together and reach
+  // the ends of their paths together; their speed curves stretch or squeeze.
+  private renderFit(): void {
+    const s = this.store.scene;
+    const a = this.store.analysis;
+    const L = s.listener;
+    const listenerOk = L.paths.length > 0 && L.position_mode === 'speed';
+    const layers = fittableLayers(s);
+    if (!layers.length) return;
+    const items: { id: string; name: string; start: number | null; end: number | null }[] = [];
+    if (listenerOk) {
+      const arr = speedArrival(L.speed, listenerPathLength(s, a));
+      items.push({ id: 'L', name: 'Listener', start: L.path_start_time, end: arr === null ? null : L.path_start_time + arr });
+    }
+    for (const i of layers) {
+      const l = s.layers[i];
+      items.push({ id: String(i), name: l.name || `Layer ${i + 1}`, start: layerStart(l), end: layerArrival(l, layerPathLength(s, a, i)) });
+    }
+    const chosen = items.filter((x) => !this.fitOut.has(x.id));
+    const starts = chosen.map((x) => x.start).filter((v): v is number => v !== null);
+    const ends = chosen.map((x) => x.end).filter((v): v is number => v !== null);
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    const start = this.fitStart ?? r2(starts.length ? Math.min(...starts) : 0);
+    const end = this.fitEnd ?? r2(ends.length ? Math.max(...ends) : start + 30);
+    const list = el('div', { class: 'fit-list' });
+    for (const x of items) {
+      const when = x.start !== null ? `${fmtTime(x.start, true)} → ${x.end !== null ? fmtTime(x.end, true) : 'never arrives'}` : '';
+      list.append(row('', checkbox(!this.fitOut.has(x.id), (v) => { if (v) this.fitOut.delete(x.id); else this.fitOut.add(x.id); this.render(true); }, x.name),
+        el('span', { class: 'muted' }, when)));
+    }
+    const go = el('button', { class: 'btn primary' }, 'Fit') as HTMLButtonElement;
+    go.disabled = !chosen.length || !(end > start);
+    go.addEventListener('click', () => {
+      this.upd((sc) => fitTiming(sc, this.store.analysis, { listener: chosen.some((x) => x.id === 'L'), layers: chosen.filter((x) => x.id !== 'L').map((x) => parseInt(x.id, 10)) }, start, end));
+      this.fitStart = this.fitEnd = null;
+    });
+    this.body.append(section('Fit timing',
+      el('p', { class: 'muted' }, 'Make the ticked ones set off together and reach the ends of their paths together. Each keeps the shape of its journey, quicker or slower; layers timed by keys have their keys spread over the same span.'),
+      list,
+      row('From', numberInput(start, (v) => { this.fitStart = Math.max(0, v); this.render(true); }, { step: 0.5, width: 64 }), 's  to',
+        numberInput(end, (v) => { this.fitEnd = Math.max(0, v); this.render(true); }, { step: 0.5, width: 64 }), 's'),
+      el('div', { class: 'btn-row' }, go),
     ));
   }
 
@@ -680,6 +854,10 @@ export class Sidebar {
   private flash(text: string, level: 'info' | 'error' = 'info'): void {
     window.dispatchEvent(new CustomEvent('sp-message', { detail: { text, level } }));
   }
+}
+
+function toolName(t: string): string {
+  return ({ freehand: 'freehand tool', polyline: 'point-to-point tool', curve: 'curve tool (click points, Enter to finish)', pen: 'pen tool', shape: 'shape tool' } as Record<string, string>)[t] ?? 'tool';
 }
 
 function layoutChannels(name: string): number {
