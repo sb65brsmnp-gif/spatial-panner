@@ -279,6 +279,47 @@ reverb for scenes where that is wanted. CPU: one first-order layer costs
 convolution of the bus it shares with the reflections; a third-order one
 about a third more for its 16 delay lines.
 
+## Layer paths
+
+A layer may travel along its own path (`motion`). The path is drawn in
+world coordinates starting where the layer stands, and the layer is carried
+by the path's shape: at distance `s` along it the layer's centre is
+`position + path(s) − path(0)`, so moving the layer moves its journey (the
+editor keeps `path(0) = position`). Timing (`motion.timing`):
+
+* `speed`: its own speed curve, key times counting from `start_time` (the
+  layer waits at the start until then), integrated like the listener's.
+* `keys`: "be here at this time": `fraction` of the path (0 start, 1 end)
+  at absolute times, eased between keys.
+* `position`: held at `fraction` (the plugin's Path Position parameter).
+
+At the end (`motion.end`) it stops, starts again (`loop`: a closed path, or
+one whose ends meet within 1 cm, runs on round; an open one jumps back, with
+the layer faded out and in over 5 ms of travel so the jump does not click)
+or goes back and forth (`ping_pong`). Timed by keys, looping repeats the
+keys' span and back-and-forth plays it backwards. With `turn`, the layer
+turns about the vertical with its direction of travel, relative to the
+direction at the start: its directivity facing, stereo bar and Ambisonic
+sphere turn with it (smoothed over 0.15 s), and going back and forth it
+turns round at each end. A path straight up or down keeps the last heading.
+
+`level_keys` automate the layer's level in dB at absolute times on top of
+`level_db` (−80 is silence; a fade to or from silence runs in gain).
+
+The renderer evaluates each layer's place per 32-sample sub-block at the
+time the sound now arriving left it (retarded time, solved by fixed-point
+iteration, four steps on the first sub-block and one after), so a moving
+layer's Doppler is the true f·c/(c − v) of a moving source, not the moving
+receiver's (c + v)/c. Reflections are rebuilt as the layer moves, as for the
+listener. A move of over 1 m within a sub-block (a loop jump, an edit) snaps
+the delay instead of sweeping it. `analyzeScene` samples each moving layer
+(`layers` in the analysis JSON) for the editor. The delay lines are sized
+for the farthest point of every layer's path.
+
+CPU: 64 layers on their own paths cost 18 % more than standing still in a
+box room with 2nd-order reflections (mostly rebuilding the reflections as
+they move) and 13 % more in free field (table under Performance).
+
 ## For the standalone app and the plugin
 
 * Build the `Scene` from the editor's model; a `Renderer` takes an immutable
@@ -325,7 +366,15 @@ about a third more for its 16 delay lines.
     // roll (degrees, head convention). "format" ambix (ACN/SN3D) or fuma (W X Y Z, first order).
     // "audio_files" lists one mono file per channel instead of "audio".
     "channels": 4, "ambisonic": {"format": "ambix", "radius": 3.0, "yaw": 0, "pitch": 0, "roll": 0, "room_send": false},
-    "audio_files": ["w.wav", "y.wav", "z.wav", "x.wav"]
+    "audio_files": ["w.wav", "y.wav", "z.wav", "x.wav"],
+    // A path of its own (see "Layer paths"); written only when there is one.
+    // "timing": speed | keys | position; "end": stop | loop | ping_pong; "turn": turn with travel.
+    "motion": {"path": {"name": "", "closed": false, "segments": [...]}, "timing": "speed",
+               "speed": [{"time": 0, "speed": 1.4, "easing": "linear"}], "start_time": 2,
+               "keys": [{"time": 2, "fraction": 0, "easing": "smooth"}, {"time": 9, "fraction": 1, "easing": "smooth"}],
+               "fraction": 0, "end": "stop", "turn": false},
+    // Level automation (fades), dB at absolute times; -80 is silence.
+    "level_keys": [{"time": 0, "level_db": -80, "easing": "linear"}, {"time": 2, "level_db": 0, "easing": "linear"}]
   }],
   "room": {
     "type": "box" | "outdoor" | "mesh" | "none", "size": [w, h, d], "origin": [x, y, z],
@@ -397,6 +446,7 @@ under 50 % of one core.
 | 64 layers, free field, binaural | 33 % |
 | 64 layers, box room, 1st-order images (6 per layer) | 100 % |
 | 64 layers, box room, 2nd-order images (24 per layer) | 290 % |
+| 64 layers each on its own looping path (turning), free field / 2nd order | 42 % / 286 % (static on the same machine: 37 % / 243 %) |
 | Demo room walk, 5 layers, 2nd order | 27 % (26 % with the old 16-line FDN) |
 | Built-in late reverb alone (32-line FDN) | 1.9 % (16-line: 0.6 %) |
 | One first-order Ambisonic layer, no room, binaural / ambiX out | 3.6 % / 1.0 % |

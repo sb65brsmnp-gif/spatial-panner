@@ -188,6 +188,8 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Layer Mono | on, off | Stereo tracks: on sums left and right at the centre. Off leaves the scene's Mono setting. |
 | Layer Sphere Radius | 10 to 400 %, default 100 | Ambisonic layers: multiplies the sphere's radius in the scene. |
 | Layer Sphere Rotation | ±180° | Ambisonic layers: added to the recording's yaw (turns the whole field). |
+| Layer Path Speed | 0 to 4 ×, default 1 | Layers with their own path, moving by speed: multiplies the layer's speed curve. 0 stops it where it is. |
+| Layer Path Position | 0 to 100 % | Layers with their own path set to "a point along the path": where along it the layer is. Moving the layer's Position slider in the editor moves this parameter too. |
 
 Automation is evaluated every 32 samples (0.7 ms at 48 kHz), and the
 plug-in reports a latency of 32 samples, which Logic compensates.
@@ -216,6 +218,26 @@ that timeline at its own playhead position. This gives three consequences:
 Without any speed automation (the multiplier stays at 1), the listener
 follows the scene's speed curve exactly, from any start point, with nothing
 to replay.
+
+### Layers with their own paths
+
+A layer's path, timing (speed curve, time keys or a point along the path),
+end behaviour (stop, start again, back and forth), "turn along path" and
+level keys (fades) are part of the scene, drawn in the editor, and every
+track plays them exactly from any start point and in a bounce.
+
+**Layer Path Speed** works like the listener's speed: the track records
+the values it plays (every 50 ms) and integrates them, so after changing
+that lane play the section once, or bounce, before relying on it. Only that
+track is affected, since no other track needs to know where its layer is.
+**Clear recorded automation** (now in every track's header) forgets this
+track's recording as well as, on the scene track, the listener's. The
+recording is saved with the track. **Layer Path Position** affects only the
+moment it is at and needs no replay.
+
+The editor in the plug-in window draws moving layers where the scene's own
+timing puts them; Path Speed and Path Position automation are heard but not
+shown there.
 
 ## What each track does
 

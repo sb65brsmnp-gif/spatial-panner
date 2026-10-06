@@ -137,6 +137,32 @@ is in the band. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
+**Layer paths**: select a layer and click *Draw a path* (Layers tab), then
+draw with the chosen tool (the curve tool when none is: click points, Enter
+to finish). The path is drawn at the layer's height and the layer moves to
+where it begins; the line drawn is the line it travels. Dragging the layer
+moves its path with it; its points edit like the listener's (Option+click
+the line adds one, Delete removes one; dragging the first point moves the
+layer). *Moves by* picks the timing: *its speed* (a speed curve on the
+timeline, setting off at *Sets off at*), *times to be at* (keys on a Path %
+lane: where along the path it is at that time) or *a point along the path*
+(a slider, and the Path Position parameter in Logic). *At the end* it stops,
+starts again or goes back and forth; *Turn* turns it with its direction of
+travel (facing, stereo bar, sphere). During playback and scrubbing the 3D
+view shows each layer where the engine has it.
+
+With a layer selected the timeline shows that layer's lanes: **Layer speed**
+(or **Path %**) with its own green *sets off* and red *arrives* lines, which
+drag like the listener's, and **Layer level** for fades (double-click to add
+a key; the bottom of the lane is silence). Esc deselects the layer and
+brings back the listener's lanes.
+
+**Fit timing** (Path & head tab, shown once a layer has a path): tick the
+listener and the layers that should set off and arrive together, set the
+times and click *Fit*. Each speed curve is stretched or squeezed as a whole
+(the shape of the journey stays); a layer timed by keys has its keys spread
+over the same span.
+
 **Room**: a new scene is outdoors (ground only: one reflection off the
 ground, no walls, no reverb tail). *Type* on the Room tab switches to a box
 room with size and centre, wall materials (absorption per band), air
