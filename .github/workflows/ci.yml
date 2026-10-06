@@ -34,7 +34,12 @@ jobs:
         run: brew install ninja
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DSP_BUILD_ID=${GITHUB_SHA::7} $(date -u +%Y-%m-%d)"
+        env:
+          # The branch's own commit (on a pull request, GITHUB_SHA is the merge commit).
+          SP_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          build_id="$(echo "$SP_COMMIT" | cut -c1-7) $(date -u +%Y-%m-%d)"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSP_BUILD_ID="$build_id"
 
       - name: Build (engine, tools, app, plugin)
         run: cmake --build build
