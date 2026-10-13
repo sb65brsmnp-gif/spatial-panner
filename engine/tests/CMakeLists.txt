@@ -4,6 +4,7 @@ add_executable(sp_tests
   test_layer_motion.cpp
   test_dsp.cpp
   test_renderer.cpp
+  test_pan_probe.cpp
   test_scene_json.cpp
   test_live_update.cpp
   test_reverb.cpp

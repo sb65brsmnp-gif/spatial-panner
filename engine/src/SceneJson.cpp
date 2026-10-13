@@ -636,6 +636,16 @@ Scene sceneFromJson(const std::string& text, const std::string& baseDir) {
         if (j.contains("room")) s.room = roomFromJson(j.at("room"), baseDir);
         if (j.contains("listener")) s.listener = listenerFromJson(j.at("listener"));
         if (j.contains("environment")) s.environment = environmentFromJson(j.at("environment"));
+        if (j.contains("pins"))
+            for (const auto& pj : j.at("pins")) {
+                Pin p;
+                p.name = pj.value("name", "");
+                if (pj.contains("position")) p.position = vecFromJson(pj.at("position"), "position");
+                p.radius = std::max(0.01f, pj.value("radius", p.radius));
+                if (pj.contains("gains_db"))
+                    for (const auto& g : pj.at("gains_db")) p.gainsDb.push_back(g.is_number() ? g.get<float>() : -120.0f);
+                s.pins.push_back(std::move(p));
+            }
         return s;
     } catch (const json::exception& e) {
         throw std::runtime_error(std::string("Scene JSON error: ") + e.what());
@@ -652,6 +662,12 @@ std::string sceneToJson(const Scene& s, int indent) {
     j["room"] = roomToJson(s.room);
     j["listener"] = listenerToJson(s.listener);
     j["environment"] = environmentToJson(s.environment);
+    if (!s.pins.empty()) {
+        json pins = json::array();
+        for (const auto& p : s.pins)
+            pins.push_back({{"name", p.name}, {"position", vecToJson(p.position)}, {"radius", p.radius}, {"gains_db", p.gainsDb}});
+        j["pins"] = pins;
+    }
     return j.dump(indent);
 }
 

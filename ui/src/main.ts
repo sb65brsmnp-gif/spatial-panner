@@ -2,8 +2,8 @@
 import * as THREE from 'three';
 import './styles.css';
 import { store } from './model/store';
-import { defaultScene, engineScene, mergeEditorKeys, type SceneDoc } from './model/scene';
-import { createBackend } from './bridge/backend';
+import { defaultScene, engineScene, mergeEditorKeys, withoutTestLayers, type SceneDoc, type V3 } from './model/scene';
+import { createBackend, type PanGainsRequest } from './bridge/backend';
 import { Viewport, type ViewName } from './view/viewport';
 import { SceneView } from './view/sceneView';
 import { Interaction, type ToolName } from './view/interaction';
@@ -67,6 +67,7 @@ const toolbar = new Toolbar(tools, plugin, {
   toggleFollow: () => { follow = !follow; refreshToolbar(); },
 });
 const sidebar = new Sidebar(store, backend, tools, settingsHost);
+sidebar.probe = (points, withoutPin) => { const req = probeRequest(points, withoutPin); return req ? backend.panGains(req) : Promise.resolve([]); };
 const timeline = new Timeline(store, backend);
 tools.blockDelete = () => timeline.keyFocused;
 
@@ -141,6 +142,82 @@ function refreshToolbar(): void {
 }
 tools.onToolChange = refreshToolbar;
 
+// ----------------------------------------------------------- heatmap
+
+// One speaker's coverage painted on the floor: the panner probed on a grid
+// of points in the head's horizontal plane around the listener (the view
+// converts them to the head's frame, the engine answers in dB).
+const HEAT_N = 40;
+let heatTimer: number | null = null;
+let heatBusy = false, heatAgain = false;
+function scheduleHeatmap(): void {
+  if (heatTimer !== null) return;
+  heatTimer = window.setTimeout(() => { heatTimer = null; void drawHeatmap(); }, 80);
+}
+function probeRequest(points: V3[], withoutPin = -1): PanGainsRequest | null {
+  const speakers = store.speakersShown();
+  if (!speakers.length) return null;
+  const pins = (store.scene.pins ?? []).filter((_, i) => i !== withoutPin)
+    .map((p) => ({ position: view.speakerLocalOf(p.position), radius: p.radius, gains_db: p.gains_db }));
+  return { output: { speakers, bass: store.scene.editor?.output?.bass }, points: points.map((p) => view.speakerLocalOf(p)), pins };
+}
+async function drawHeatmap(): Promise<void> {
+  const i = store.heatmapSpeaker;
+  const speakers = store.speakersShown();
+  if (i < 0 || i >= speakers.length) { view.setHeatmap(null, 0, 0, 0, 0); return; }
+  if (heatBusy) { heatAgain = true; return; }
+  const pose = store.poseAt(store.time);
+  if (!pose) return;
+  const extent = Math.max(8, 2.5 * Math.max(...speakers.map((x) => x.distance || 2)));
+  const cx = pose[0], cz = pose[2], y = pose[1];
+  const points: V3[] = [];
+  for (let r = 0; r < HEAT_N; ++r)
+    for (let c = 0; c < HEAT_N; ++c)
+      points.push([cx + ((c + 0.5) / HEAT_N - 0.5) * extent, y, cz + ((r + 0.5) / HEAT_N - 0.5) * extent]);
+  const req = probeRequest(points);
+  if (!req) return;
+  heatBusy = true;
+  try {
+    const rows = await backend.panGains(req);
+    const levels = new Float32Array(HEAT_N * HEAT_N);
+    rows.forEach((row, k) => { levels[k] = row[i] ?? -120; });
+    if (store.heatmapSpeaker === i) view.setHeatmap(levels, HEAT_N, cx, cz, extent);
+  } catch (e) {
+    toast(`Heatmap: ${String(e instanceof Error ? e.message : e)}`, 'error');
+  } finally {
+    heatBusy = false;
+    if (heatAgain) { heatAgain = false; scheduleHeatmap(); }
+  }
+}
+
+// Option-hover in the view: the levels every speaker would get for a layer
+// at that point of the head's horizontal plane, in the HUD.
+let probeText = '';
+let probeTimer: number | null = null;
+let probePending: PointerEvent | null = null;
+viewportEl.addEventListener('pointermove', (e) => {
+  if (!e.altKey || e.target !== vp.renderer.domElement || !store.speakersShown().length) {
+    if (probeText) { probeText = ''; updateHud(); }
+    return;
+  }
+  probePending = e;
+  if (probeTimer !== null) return;
+  probeTimer = window.setTimeout(() => { probeTimer = null; void probeAt(probePending!); }, 60);
+});
+viewportEl.addEventListener('pointerleave', () => { if (probeText) { probeText = ''; updateHud(); } });
+async function probeAt(e: PointerEvent): Promise<void> {
+  const pose = store.poseAt(store.time);
+  if (!pose) return;
+  const hit = vp.intersect(e, new THREE.Plane(new THREE.Vector3(0, 1, 0), -pose[1]));
+  const req = hit ? probeRequest([[hit.x, hit.y, hit.z]]) : null;
+  if (!req || !hit) { if (probeText) { probeText = ''; updateHud(); } return; }
+  const rows = await backend.panGains(req);
+  const speakers = store.speakersShown();
+  const fmt = (db: number) => (db <= -119 ? '—' : `${db > 0 ? '+' : ''}${db.toFixed(1)}`);
+  probeText = `at (${hit.x.toFixed(1)}, ${hit.z.toFixed(1)}) m: ` + speakers.map((sp, k) => `${sp.name || `Spk ${k + 1}`} ${fmt(rows[0]?.[k] ?? -120)}`).join('  ') + ' dB';
+  updateHud();
+}
+
 // --------------------------------------------------------------- HUD
 
 function updateHud(): void {
@@ -149,7 +226,8 @@ function updateHud(): void {
   const yaw = p[3], pitch = p[4];
   hud.innerHTML = `<b>${fmtTime(store.time, true)}</b> &nbsp; listener (${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)}) m`
     + ` &nbsp; head ${Math.abs(yaw).toFixed(0)}° ${yaw >= 0 ? 'left' : 'right'}, ${Math.abs(pitch).toFixed(0)}° ${pitch >= 0 ? 'up' : 'down'}`
-    + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '');
+    + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '')
+    + (probeText ? `<br><span class="probe">${probeText}</span>` : '');
   const s = store.scene;
   // While a drawing tool is out, say whose path it draws: the selected
   // layer's, or the listener's ("for" in the toolbar changes it).
@@ -291,6 +369,8 @@ store.subscribe((kinds) => {
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
   if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updateSpeakers();
   if (kinds.has('scene') || kinds.has('file')) view.updateFloorImage();
+  if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updatePins();
+  if (kinds.has('scene') || kinds.has('output') || kinds.has('file') || kinds.has('time') || kinds.has('analysis')) scheduleHeatmap();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
   if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
@@ -343,7 +423,7 @@ function loadOpened(r: { path: string | null; scene: SceneDoc; raw: unknown }): 
 
 async function saveScene(saveAs: boolean): Promise<void> {
   try {
-    const r = await backend.saveScene(store.scene, saveAs || plugin ? null : store.filePath);
+    const r = await backend.saveScene(withoutTestLayers(store.scene), saveAs || plugin ? null : store.filePath);
     if (!r) return;
     if (plugin) { toast(`Exported ${r.path.split(/[\\/]/).pop()}`, 'info'); return; }
     store.filePath = r.path;
@@ -512,4 +592,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, timeline, setView, project, dropAudio, openRecent };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, timeline, setView, project, dropAudio, openRecent, withoutTestLayers };

@@ -53,10 +53,12 @@ type Drag =
   // Cmd+drag on empty space: a rubber band that selects the layers and
   // speakers inside it (page coordinates).
   | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number }
+  | { kind: 'pin'; index: number; plane: THREE.Plane; offset: THREE.Vector3 }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
   | { kind: 'pen'; anchor: PenAnchor };
 
+const r2 = (v: number) => Math.round(v * 100) / 100;
 const vec = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
 
 // Removes layer i and everything that pointed at it (links, look-at).
@@ -302,6 +304,18 @@ export class Interaction {
     const startHits = rc.intersectObjects([...this.view.startHandles, ...this.view.pickableListener()], false);
     const speakerHits = rc.intersectObjects(this.view.pickableSpeakers(), true);
     const nearer = (a: THREE.Intersection[], b: THREE.Intersection[]) => a.length && (!b.length || a[0].distance < b[0].distance);
+    const pinHits = rc.intersectObjects(this.view.pickablePins(), false);
+    // A pin wins over the listener's wedge behind it (small and explicit).
+    if (pinHits.length && nearer(pinHits, hits) && nearer(pinHits, speakerHits)) {
+      const index = pinHits[0].object.userData.index as number;
+      const pos = pinHits[0].object.position.clone();
+      const plane = this.vp.editPlane(pos, e.shiftKey);
+      const hit = this.vp.intersect(e, plane) ?? pos.clone();
+      this.drag = { kind: 'pin', index, plane, offset: pos.clone().sub(hit) };
+      this.store.select({ kind: 'pin', index });
+      this.vp.controls.enabled = false;
+      return;
+    }
     if (speakerHits.length && nearer(speakerHits, hits) && nearer(speakerHits, startHits)) {
       // The box or its driver disc: the index is on both.
       const index = speakerHits[0].object.userData.index as number;
@@ -456,6 +470,15 @@ export class Interaction {
         this.drawMarquee();
         break;
       }
+      case 'pin': {
+        const hit = this.vp.intersect(e, d.plane);
+        if (!hit) return;
+        const pin = this.store.scene.pins?.[d.index];
+        if (!pin) return;
+        const p = this.keepAxes(pin.position, vec(hit.add(d.offset)), d.plane);
+        this.store.update((s) => { const x = s.pins?.[d.index]; if (x) x.position = [r2(p[0]), r2(p[1]), r2(p[2])]; }, 'pin-move');
+        break;
+      }
       case 'speaker': {
         const hit = this.vp.intersect(e, d.plane);
         if (!hit) return;
@@ -597,6 +620,9 @@ export class Interaction {
       case 'marquee':
         this.finishMarquee(d, _e.shiftKey);
         break;
+      case 'pin':
+        this.store.endGesture();
+        break;
       case 'freehand': {
         const seg = fitFreehand(d.points);
         this.view.clearPreview();
@@ -701,6 +727,9 @@ export class Interaction {
         if (s.listener.head.look_at_layer === sel.index) s.listener.head.look_at_layer = -1;
         else if (s.listener.head.look_at_layer > sel.index) s.listener.head.look_at_layer--;
       });
+      this.store.select({ kind: 'none' });
+    } else if (sel.kind === 'pin') {
+      this.store.update((s) => { s.pins?.splice(sel.index, 1); });
       this.store.select({ kind: 'none' });
     } else if (sel.kind === 'speaker' || sel.kind === 'multi') {
       const layers = this.store.selectedLayers(), speakers = this.store.selectedSpeakers();

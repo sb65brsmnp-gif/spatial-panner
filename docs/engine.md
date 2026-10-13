@@ -467,6 +467,12 @@ it is a leader carried into a track's scene so the link can be followed
     // keyframed: keys are absolute angles. along_path / look_at: keys are
     // offsets on top of the path heading or look-at direction.
   },
+  // Pinned mixes (speakers output only): inside `radius` of `position` a
+  // layer's direct-sound panner gains are blended towards `gains_db` (one per
+  // layout channel, -120 = nothing), fully at the centre. The levels are a
+  // balance; the distance law still applies. See sp/PanProbe.h for the
+  // probe the editor's heatmap uses (VBAP, distance, alignment, pins).
+  "pins": [{"name": "stage left", "position": [x, y, z], "radius": 1.5, "gains_db": [0, -6, -120, ...]}],
   "environment": {"speed_of_sound": 343, "temperature_c": 20, "humidity": 50,
                   "pressure_kpa": 101.325, "air_absorption": true}
 }

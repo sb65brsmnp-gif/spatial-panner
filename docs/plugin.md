@@ -200,7 +200,11 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      Output in the Mixer, or the Audio preferences) route the bus channels
      to the interface. *Test* on a speaker plays pink noise on that channel
      of the scene track's own output while Logic runs the plug-in. Without
-     placed speakers the view shows the scene track's bus layout.
+     placed speakers the view shows the scene track's bus layout. Stereo
+     pairs, several speakers selected at once, the coverage heatmap and
+     Option-hover readout, pinned mixes and the floor picture work as in
+     the app (docs/editor.md); pins are stored in the scene document and
+     reach every track's renderer.
 5. **Bounce** with **File > Bounce**. Every track renders its own layer
    offline, and the result matches playback.
 

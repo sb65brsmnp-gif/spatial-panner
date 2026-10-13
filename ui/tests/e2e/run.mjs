@@ -911,6 +911,87 @@ await check('Room tab: a floor picture is drawn flat under the scene at its widt
   await page.waitForFunction(() => !window.spEditor.store.scene.editor.floor_image && !window.spEditor.view.floorMesh);
 });
 
+await check('Output tab: the heatmap paints one speaker\'s coverage, Option-hover reads the levels at a point', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  await page.click('.tab[data-tab="output"]');
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForFunction(() => window.spEditor.view.pickableSpeakers().length === 12);
+  await page.locator('#sidebar .row:has-text("Heatmap") select').selectOption('0');   // L
+  await page.waitForFunction(() => !!window.spEditor.view.heatmapMesh, null, { timeout: 10000 });
+  const hm = await ed(() => { const m = window.spEditor.view.heatmapMesh; return { w: m.scale.x, x: m.position.x, z: m.position.z, tex: m.material.map.image.width }; });
+  assert(hm.w >= 8 && hm.tex === 40 && Math.abs(hm.x) < 0.01, JSON.stringify(hm));
+  // Front-left of the listener is bright for L, far right is dark.
+  const px = await ed(() => {
+    const d = window.spEditor.view.heatmapMesh.material.map.image.data, n = 40;
+    const at = (col, row) => { const i = (row * n + col) * 4; return d[i] + d[i + 1] + d[i + 2]; };
+    // Texture rows run bottom-up: +Z (behind) first. Front-left = high row, low column; right = high column.
+    return { frontLeft: at(14, 30), right: at(38, 20) };
+  });
+  assert(px.frontLeft > px.right + 100, JSON.stringify(px));
+  await page.screenshot({ path: resolve(outDir, 'heatmap-L.png') });
+  // Option-hover over a point to the front-left: L is loudest in the readout.
+  await page.keyboard.down('Alt');
+  await page.mouse.move(...(await screen([-1.2, 1.7, -2])));
+  await page.mouse.move(...(await screen([-1.2, 1.7, -2.1])));
+  await page.waitForFunction(() => document.querySelector('.hud .probe')?.textContent?.includes('L '), null, { timeout: 5000 });
+  await page.keyboard.up('Alt');
+  const text = await page.textContent('.hud .probe');
+  const m = /L (-?\d+\.\d)/.exec(text), r = /\bR (-?\d+\.\d)/.exec(text);
+  assert(m && r && parseFloat(m[1]) > parseFloat(r[1]) + 6, text);
+  await page.locator('#sidebar .row:has-text("Heatmap") select').selectOption('none');
+  await page.waitForFunction(() => !window.spEditor.view.heatmapMesh);
+});
+
+await check('pinned mixes: a pin is added at a point, captured from the panner, dragged, and removed', async () => {
+  await page.click('#sidebar button:has-text("Add pin")');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins?.length === 1);
+  let pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(pin.gains_db.length === 12 && pin.gains_db.every((g) => g === -120), JSON.stringify(pin));
+  assert(Math.abs(pin.position[2] + 1.2) < 0.01, JSON.stringify(pin.position));   // 1.2 m ahead
+  const drawn = await ed(() => window.spEditor.view.pickablePins().length);
+  assert(drawn === 1, `pins drawn ${drawn}`);
+  await page.waitForSelector('#sidebar .section-title:has-text("Pin: Pin 1")');
+  await page.click('#sidebar button:has-text("Capture from panner")');
+  // 1.2 m ahead: C at about -1.6 dB (distance), L and R well below.
+  await page.waitForFunction(() => window.spEditor.store.scene.pins[0].gains_db[2] > -5);
+  pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(pin.gains_db[0] < pin.gains_db[2] - 6, JSON.stringify(pin.gains_db));
+  // A level slider.
+  const lSlider = page.locator('#sidebar .row:has-text("L") input[type=range]').first();
+  await lSlider.fill('-3');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins[0].gains_db[0] === -3);
+  // Drag the pin in the top view.
+  const from = await screen(pin.position);
+  const to = await screen([pin.position[0] + 2, pin.position[1], pin.position[2]]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(Math.abs(pin.position[0] - 2) < 0.15, JSON.stringify(pin.position));
+  // The engine scene carries the pins.
+  const sent = await ed(() => JSON.stringify(window.spEditor.store.scene.pins));
+  assert(sent.includes('"radius":1.5'), sent);
+  await page.screenshot({ path: resolve(outDir, 'pins.png') });
+  await page.click('#sidebar button:has-text("Remove pin")');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins.length === 0);
+});
+
+await check('test source: a looping layer that is dragged about, left out of the saved scene', async () => {
+  page.once('dialog', (d) => d.accept('/signals/demo.wav'));
+  await page.click('#sidebar button:has-text("Test source…")');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.some((l) => l.test));
+  const l = await ed(() => window.spEditor.store.scene.layers.find((x) => x.test));
+  assert(l.loop === true && l.name.startsWith('Test:'), JSON.stringify(l));
+  await page.waitForSelector('#sidebar button:has-text("Remove test source")');
+  const saved = await ed(() => window.spEditor.withoutTestLayers(window.spEditor.store.scene).layers.length);
+  assert(saved === 0, `saved layers ${saved}`);
+  await page.click('#sidebar button:has-text("Remove test source")');
+  await page.waitForFunction(() => !window.spEditor.store.scene.layers.some((l) => l.test));
+});
+
 await check('Settings tab: text size and label height apply to the page and the view', async () => {
   await page.click('.tab[data-tab="settings"]');
   await page.waitForSelector('#sidebar .section-title:has-text("Labels in the 3D view")');

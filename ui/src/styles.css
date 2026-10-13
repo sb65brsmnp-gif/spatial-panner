@@ -113,6 +113,9 @@ input.num { width: 64px; }
 .speaker-item .ch { color: var(--muted); font-size: 11px; min-width: 34px; text-align: right; }
 .speaker-item .sub-tag { color: #d9b7ff; font-size: 10px; margin-left: 4px; }
 .btn.on { background: #3a3220; border-color: var(--accent); color: var(--accent); }
+.pin-label { background: rgba(60, 30, 20, 0.85); border: 1px solid #ff8a5c; color: #ffd0bf; border-radius: 4px; padding: 1px 5px 2px; font-size: var(--label-size); pointer-events: none; white-space: nowrap; }
+.pin-label.selected { background: #ff8a5c; color: #1b1d22; }
+.hud .probe { color: var(--accent); font-size: 11px; }
 .pair-tag { margin-left: 6px; font-size: 10px; color: var(--muted); }
 .marquee { position: fixed; border: 1px solid var(--accent); background: rgba(255, 200, 87, 0.12); pointer-events: none; z-index: 40; }
 .settings-note { color: var(--muted); font-size: 11px; margin: 2px 0 6px; }

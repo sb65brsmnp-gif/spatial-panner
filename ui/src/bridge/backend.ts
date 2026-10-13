@@ -6,13 +6,23 @@
 // sp-scene tool for analysis and simulates the transport, so the editor can
 // be developed and tested without the app.
 import type { Analysis, AudioInfo } from '../model/store';
-import type { BassDoc, SceneDoc, SpeakerDoc } from '../model/scene';
+import { speakerLocal, type BassDoc, type SceneDoc, type SpeakerDoc, type V3 } from '../model/scene';
 
 export type OutputMode = 'binaural' | 'speakers' | 'ambix';
 
 // What the engine plays through. `speakers`: the scene's placed layout (the
 // preset `layout` otherwise), each on its 1-based output channel.
 export interface OutputConfig { mode: OutputMode; layout: string; speakers?: SpeakerDoc[]; bass?: BassDoc }
+
+// Points and pins in the head's frame (metres; Y up, -Z ahead, +X right).
+export interface PanGainsRequest {
+  output: { speakers: SpeakerDoc[]; bass?: BassDoc };
+  points: V3[];
+  pins?: { position: V3; radius: number; gains_db: number[] }[];
+  rolloff?: number;
+  min_distance?: number;
+  reference_distance?: number;
+}
 
 export interface EngineInfo {
   device: string;
@@ -65,6 +75,8 @@ export interface Backend {
   // device output in the app, this track's bus channel in the plugin (heard
   // while the host runs the plug-in).
   testSpeaker(channel: number): Promise<void>;
+  // What the speaker panner does at head-local points: dB per speaker.
+  panGains(req: PanGainsRequest): Promise<number[][]>;
   info(): Promise<EngineInfo>;
   // The native open dialog for audio files (several); `title` names the ask.
   chooseAudioFiles(title?: string): Promise<AudioInfo[]>;
@@ -153,6 +165,7 @@ class AppBackend implements Backend {
   async resize(width: number, height: number) { await this.call('resize', { width: Math.round(width), height: Math.round(height) }); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
   async testSpeaker(channel: number) { await this.call('testSpeaker', { channel }); }
+  async panGains(req: PanGainsRequest) { return (await this.call<{ gains_db: number[][] }>('panGains', req))?.gains_db ?? []; }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
   chooseFile(title: string, wildcard: string) { return this.call<{ path: string; name: string } | null>('chooseFile', { title, wildcard }); }
@@ -248,6 +261,10 @@ class DevBackend implements Backend {
   async resize() { /* the browser window is the user's to size */ }
   async setOutput(out: OutputConfig) { this.output = out; return { ok: true }; }
   async testSpeaker(_channel: number) { /* no audio in the preview */ }
+  // The preview has no engine: a rough stand-in for VBAP (the nearest
+  // speakers by direction, cosine-weighted), with the same distance law,
+  // alignment and pin blending as the engine's probe.
+  async panGains(req: PanGainsRequest) { return approxPanGains(req); }
   async info(): Promise<EngineInfo> {
     return { device: 'Browser preview (no audio)', sampleRate: 48000, outputChannels: 2, cpu: 0, output: this.output, status: 'Preview' };
   }
@@ -316,4 +333,34 @@ class DevBackend implements Backend {
 
 export function createBackend(): Backend {
   return window.__JUCE__?.backend ? new AppBackend() : new DevBackend();
+}
+
+export function approxPanGains(req: PanGainsRequest): number[][] {
+  const spk = req.output.speakers;
+  const dirs = spk.map((x) => { const v = speakerLocal(x, 1); const l = Math.hypot(...v) || 1; return [v[0] / l, v[1] / l, v[2] / l]; });
+  const maxD = Math.max(0, ...spk.map((x) => x.distance));
+  const align = spk.map((x) => (maxD > 0 ? (x.distance > 0 ? x.distance : maxD) / maxD : 1) * Math.pow(10, (x.trim_db ?? 0) / 20));
+  const rolloff = req.rolloff ?? 1, minD = req.min_distance ?? 0.25, refD = req.reference_distance ?? 1;
+  const refGain = Math.pow(Math.max(refD, 0.01), rolloff);
+  const smooth = (x: number) => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  return req.points.map((p) => {
+    const dist = Math.hypot(...p);
+    const d = dist > 1e-6 ? [p[0] / dist, p[1] / dist, p[2] / dist] : [0, 0, -1];
+    let g = dirs.map((v, i) => (spk[i].lfe ? 0 : Math.pow(Math.max(0, v[0] * d[0] + v[1] * d[1] + v[2] * d[2]), 8)));
+    const power = Math.sqrt(g.reduce((a, b) => a + b * b, 0)) || 1;
+    g = g.map((x) => x / power);
+    // Pins, as the engine's applyPins.
+    let total = 0;
+    const mix = new Array(spk.length).fill(0);
+    for (const pin of req.pins ?? []) {
+      const dd = Math.hypot(p[0] - pin.position[0], p[1] - pin.position[1], p[2] - pin.position[2]);
+      const w = smooth(1 - dd / Math.max(pin.radius, 1e-3));
+      if (w <= 0) continue;
+      total += w;
+      pin.gains_db.forEach((db, c) => { if (c < mix.length && db > -119) mix[c] += w * Math.pow(10, db / 20); });
+    }
+    if (total > 0) { const share = Math.min(total, 1); g = g.map((x, c) => (1 - share) * x + share * mix[c] / total); }
+    const distGain = refGain / Math.pow(Math.max(dist, minD), rolloff);
+    return g.map((x, i) => { const lin = spk[i].lfe ? 0 : x * distGain * align[i]; return lin > 1e-6 ? Math.max(-120, 20 * Math.log10(lin)) : -120; });
+  });
 }

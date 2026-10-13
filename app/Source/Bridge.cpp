@@ -1,9 +1,12 @@
 #include "Bridge.h"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cmath>
 
 #include "sp/SceneAnalysis.h"
 #include "sp/SceneJson.h"
+#include "sp/PanProbe.h"
 
 namespace spapp {
 
@@ -171,6 +174,36 @@ void Bridge::menuCommand(const juce::String& action, const juce::String& path) {
     emit("menu", json{{"action", action.toStdString()}, {"path", path.toStdString()}}.dump());
 }
 
+// {"output": {"speakers": [...], "bass": {...}}, "points": [[x,y,z]...] (head-local),
+//  "pins": [{"position": [x,y,z], "radius", "gains_db": [...]}] (head-local),
+//  "rolloff", "min_distance", "reference_distance"}
+// -> {"gains_db": [[per speaker]...]} (-120 = nothing)
+static std::string panGainsJson(const nlohmann::json& a) {
+    using nlohmann::json;
+    sp::PanProbeRequest req;
+    req.layout = sp::SpeakerLayout::fromJson(a.value("output", json::object()).dump());
+    for (const auto& p : a.value("points", json::array()))
+        req.points.push_back({p.at(0).get<float>(), p.at(1).get<float>(), p.at(2).get<float>()});
+    for (const auto& pj : a.value("pins", json::array())) {
+        sp::Pin pin;
+        const auto& pos = pj.at("position");
+        pin.position = {pos.at(0).get<float>(), pos.at(1).get<float>(), pos.at(2).get<float>()};
+        pin.radius = std::max(0.01f, pj.value("radius", 1.5f));
+        for (const auto& g : pj.value("gains_db", json::array())) pin.gainsDb.push_back(g.is_number() ? g.get<float>() : -120.0f);
+        req.pins.push_back(std::move(pin));
+    }
+    req.rolloff = a.value("rolloff", 1.0f);
+    req.minDistance = a.value("min_distance", 0.25f);
+    req.referenceDistance = a.value("reference_distance", 1.0f);
+    json rows = json::array();
+    for (const auto& row : sp::panProbe(req)) {
+        json r = json::array();
+        for (float g : row) r.push_back(g > 1e-6f ? std::max(-120.0f, 20.0f * std::log10(g)) : -120.0f);
+        rows.push_back(std::move(r));
+    }
+    return json{{"gains_db", rows}}.dump();
+}
+
 std::string Bridge::call(const std::string& name, const std::string& arg, std::function<void(std::string)> async) {
     const json a = arg.empty() ? json::object() : json::parse(arg, nullptr, false);
     if (a.is_discarded()) return err("Bad arguments for " + name);
@@ -206,6 +239,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         session_.setOutput(o);
         return json{{"ok", true}}.dump();
     }
+    if (name == "panGains") return panGainsJson(a);
     if (name == "testSpeaker") {
         // {"channel": 1-based device output, 0 = off}
         const int ch = a.value("channel", 0);
@@ -268,7 +302,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
 juce::WebBrowserComponent::Options Bridge::addTo(juce::WebBrowserComponent::Options o) {
     const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                            "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile",
-                           "recentScenes", "clearRecentScenes", "openScenePath", "testSpeaker"};
+                           "recentScenes", "clearRecentScenes", "openScenePath", "testSpeaker", "panGains"};
     for (const char* n : names) {
         const std::string name = n;
         o = o.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args, Completion done) {

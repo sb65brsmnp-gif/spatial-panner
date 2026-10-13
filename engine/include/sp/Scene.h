@@ -385,14 +385,33 @@ struct Environment {
 
 // ------------------------------------------------------------------ Scene
 
+// A pinned mix: at this point of the world a layer's direct sound goes to
+// the loudspeakers with exactly these levels (one per layout channel, dB,
+// relative to each other; distance still sets the overall loudness) instead
+// of the panner's. The override fades in over `radius` metres around the
+// pin and blends with the panner in between. Speakers output only; the
+// reflections and reverb keep their geometric placement.
+struct Pin {
+    std::string name;
+    Vec3 position{0, 1.6f, -2};
+    float radius = 1.5f;
+    std::vector<float> gainsDb;   // layout channel order; missing = silent
+};
+
 struct Scene {
     std::string name;
     std::vector<Layer> layers;
     Room room;
     Listener listener;
     Environment environment;
+    std::vector<Pin> pins;
     double duration = 0;  // seconds; 0 = derived from the audio by the tools
 };
+
+// The panner gains a layer's direct sound at `position` gets after the pins:
+// `panned` (one per channel, from the panner) blended towards the pins' own
+// levels by their proximity. Used by the renderer and the editor's probe.
+void applyPins(const std::vector<Pin>& pins, const Vec3& position, float* gains, int numChannels);
 
 // Sum of `channels` over the layers: the number of audio inputs the renderer takes.
 int inputChannels(const Scene& scene);

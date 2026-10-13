@@ -164,3 +164,42 @@ describe('selecting several things', () => {
     expect(st.selection).toEqual({ kind: 'none' });
   });
 });
+
+import { approxPanGains } from '../../src/bridge/backend';
+import { withoutTestLayers, defaultPin, PIN_OFF } from '../../src/model/scene';
+
+describe('the preview pan probe', () => {
+  it('puts a point ahead on C, halves the gain at twice the distance, and lets a pin take over', () => {
+    const speakers = presetSpeakers('5.1');
+    const g = approxPanGains({ output: { speakers }, points: [[0, 0, -1], [0, 0, -2]] });
+    expect(Math.abs(g[0][2])).toBeLessThan(1.5);
+    expect(g[0][0]).toBeLessThan(g[0][2] - 10);
+    expect(g[1][2] - g[0][2]).toBeCloseTo(-6.02, 1);
+    expect(g[0][3]).toBe(-120);   // LFE
+    const pinned = approxPanGains({ output: { speakers }, points: [[0, 0, -1]], pins: [{ position: [0, 0, -1], radius: 0.5, gains_db: [PIN_OFF, 0, PIN_OFF, PIN_OFF, PIN_OFF, PIN_OFF] }] });
+    expect(pinned[0][1]).toBeCloseTo(0, 1);
+    expect(pinned[0][2]).toBe(-120);
+  });
+});
+
+describe('the test source', () => {
+  it('is left out of the saved scene, with links and look-at renumbered', () => {
+    const sc = defaultScene();
+    sc.layers = [defaultLayer(0), defaultLayer(1, { test: true }), defaultLayer(2, { link: { to: 0, linked_at_start: true, keys: [] } }), defaultLayer(3, { link: { to: 1, linked_at_start: true, keys: [] } })];
+    sc.listener.head.look_at_layer = 2;
+    const out = withoutTestLayers(sc);
+    expect(out.layers.map((l) => l.name)).toEqual(['Layer 1', 'Layer 3', 'Layer 4']);
+    expect(out.layers[1].link?.to).toBe(0);
+    expect(out.layers[2].link).toBeUndefined();
+    expect(out.listener.head.look_at_layer).toBe(1);
+    expect(sc.layers.length).toBe(4);   // the scene itself is untouched
+    const plain = defaultScene();
+    expect(withoutTestLayers(plain)).toBe(plain);
+  });
+
+  it('a new pin is silent on every speaker', () => {
+    const p = defaultPin([1, 1.6, -2], 6, 0);
+    expect(p.gains_db).toEqual(new Array(6).fill(PIN_OFF));
+    expect(p.radius).toBe(1.5);
+  });
+});

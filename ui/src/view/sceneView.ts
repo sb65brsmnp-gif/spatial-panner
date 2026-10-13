@@ -62,6 +62,14 @@ export class SceneView {
   private lineMaterials: LineMaterial[] = [];
   private head = new THREE.Group();
 
+  // Pinned mixes: a diamond at each pin with a ring for its reach.
+  private pinGroup = new THREE.Group();
+  private pins: { mesh: THREE.Mesh; ring: THREE.Mesh; label: CSS2DObject }[] = [];
+  // The coverage heatmap: a plane on the floor coloured by one speaker's
+  // level, sampled on a grid in the head's horizontal plane.
+  heatmapMesh: THREE.Mesh | null = null;
+  private heatmapTexture: THREE.DataTexture | null = null;
+
   // The floor picture (editor.floor_image) and the two calibration marks.
   private floorGroup = new THREE.Group();
   floorMesh: THREE.Mesh | null = null;
@@ -73,13 +81,97 @@ export class SceneView {
   assetUrl: (path: string) => string = (p) => p;
 
   constructor(private vp: Viewport, private store: Store) {
-    this.root.add(this.floorGroup, this.calibGroup, this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup);
+    this.root.add(this.floorGroup, this.calibGroup, this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup, this.pinGroup);
     vp.scene.add(this.root);
     this.buildListener();
     vp.onBeforeRender(() => {
       const w = vp.container.clientWidth, h = vp.container.clientHeight;
       for (const m of this.lineMaterials) m.resolution.set(w, h);
     });
+  }
+
+  // ----------------------------------------------------------------- pins
+
+  updatePins(): void {
+    const pins = this.store.scene.pins ?? [];
+    const sel = this.store.selection;
+    if (pins.length !== this.pins.length) {
+      clear(this.pinGroup);
+      this.pins = pins.map((_, index) => {
+        const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.16), new THREE.MeshStandardMaterial({ color: 0xff8a5c, roughness: 0.5 }));
+        mesh.userData = { kind: 'pin', index };
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.97, 1, 48), new THREE.MeshBasicMaterial({ color: 0xff8a5c, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }));
+        ring.rotation.x = -Math.PI / 2;
+        const div = document.createElement('div');
+        div.className = 'pin-label';
+        const label = new CSS2DObject(div);
+        this.pinGroup.add(mesh, ring, label);
+        return { mesh, ring, label };
+      });
+    }
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    pins.forEach((p, i) => {
+      const o = this.pins[i];
+      o.mesh.position.set(p.position[0], p.position[1], p.position[2]);
+      o.ring.position.set(p.position[0], floorY + 0.008, p.position[2]);
+      o.ring.scale.setScalar(Math.max(0.05, p.radius));
+      const selected = sel.kind === 'pin' && sel.index === i;
+      (o.mesh.material as THREE.MeshStandardMaterial).emissive.set(selected ? 0xff8a5c : 0x000000);
+      (o.mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = selected ? 0.6 : 0;
+      o.label.element.textContent = p.name || `Pin ${i + 1}`;
+      o.label.element.classList.toggle('selected', selected);
+      o.label.position.set(p.position[0], p.position[1] + 0.3, p.position[2]);
+    });
+    this.pinGroup.visible = pins.length > 0 && this.store.speakersShown().length > 0;
+    this.vp.invalidate();
+  }
+
+  pickablePins(): THREE.Object3D[] { return this.pinGroup.visible ? this.pins.map((o) => o.mesh) : []; }
+
+  // -------------------------------------------------------------- heatmap
+
+  // Paints `levelsDb` (n x n, row by row from -Z to +Z, -X to +X) on a
+  // square of side `extent` metres centred on (cx, cz) on the floor; null
+  // clears it. Colours run from -36 dB (dark) to +6 dB (white).
+  setHeatmap(levelsDb: Float32Array | null, n: number, cx: number, cz: number, extent: number): void {
+    if (!levelsDb) {
+      if (this.heatmapMesh) { this.root.remove(this.heatmapMesh); this.heatmapMesh = null; }
+      this.heatmapTexture?.dispose();
+      this.heatmapTexture = null;
+      this.vp.invalidate();
+      return;
+    }
+    if (!this.heatmapTexture || this.heatmapTexture.image.width !== n) {
+      this.heatmapTexture?.dispose();
+      this.heatmapTexture = new THREE.DataTexture(new Uint8Array(n * n * 4), n, n);
+      this.heatmapTexture.magFilter = THREE.LinearFilter;
+      this.heatmapTexture.minFilter = THREE.LinearFilter;
+      this.heatmapTexture.colorSpace = THREE.SRGBColorSpace;
+      if (this.heatmapMesh) { this.root.remove(this.heatmapMesh); this.heatmapMesh = null; }
+    }
+    const data = this.heatmapTexture.image.data as Uint8Array;
+    for (let i = 0; i < n * n; ++i) {
+      // Texture rows go bottom-up (+Z first when the plane faces up): flip.
+      const row = Math.floor(i / n), col = i % n;
+      const src = (n - 1 - row) * n + col;
+      const [r, g, b] = heatColour(levelsDb[src]);
+      data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b; data[i * 4 + 3] = 200;
+    }
+    this.heatmapTexture.needsUpdate = true;
+    if (!this.heatmapMesh) {
+      this.heatmapMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({ map: this.heatmapTexture, transparent: true, depthWrite: false }));
+      this.heatmapMesh.name = 'heatmap';
+      this.heatmapMesh.rotation.x = -Math.PI / 2;
+      this.heatmapMesh.renderOrder = 1;
+      this.root.add(this.heatmapMesh);
+    }
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    this.heatmapMesh.scale.set(extent, extent, 1);
+    this.heatmapMesh.position.set(cx, floorY + 0.006, cz);
+    this.vp.invalidate();
   }
 
   // --------------------------------------------------------- floor image
@@ -795,6 +887,14 @@ function disposeLayer(l: LayerObj): void {
   l.label.element.remove();
   l.leftTag.element.remove();
   l.right.tag.element.remove();
+}
+
+// -36 dB .. +6 dB: deep blue, teal, green, yellow, white.
+export function heatColour(db: number): [number, number, number] {
+  const t = Math.max(0, Math.min(1, (db + 36) / 42));
+  const stops: [number, number, number][] = [[12, 16, 48], [16, 90, 140], [30, 170, 120], [240, 200, 60], [255, 255, 255]];
+  const x = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  return [0, 1, 2].map((k) => Math.round(stops[i][k] + (stops[i + 1][k] - stops[i][k]) * f)) as [number, number, number];
 }
 
 function clear(g: THREE.Object3D): void {

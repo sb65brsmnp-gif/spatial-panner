@@ -5,7 +5,7 @@ import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoo
   BASS_FILTERS, BASS_FILTER_NAMES, SPEAKER_DISTANCE,
   type BassFilter, type HeadMode, type LayerDoc, type LayerTiming, type OutputDoc, type PathEnd, type SceneDoc, type SpeakerDoc, type V3 } from '../model/scene';
 import { placedSpeakers } from '../view/interaction';
-import { pairedWith, pairSpeakers, unpairSpeaker, moveSpeakerBy, defaultFloorImage, calibratedWidth, type FloorImageDoc } from '../model/scene';
+import { pairedWith, pairSpeakers, unpairSpeaker, moveSpeakerBy, defaultFloorImage, calibratedWidth, defaultPin, PIN_OFF, type FloorImageDoc, type PinDoc } from '../model/scene';
 import { DEFAULT_SETTINGS, type LabelMode, type Settings } from '../model/settings';
 import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
 import { speedArrival } from '../model/scene';
@@ -53,6 +53,9 @@ export class Sidebar {
 
   // Speaker test: the output channel playing noise (0: none).
   private testing = 0;
+
+  // The panner probe for world points (set by main): dB per speaker.
+  probe: ((points: V3[], withoutPin?: number) => Promise<number[][]>) | null = null;
 
   constructor(private store: Store, private backend: Backend, private tools: Interaction, private settingsHost: SettingsHost | null = null) {
     this.root = el('div', { id: 'sidebar' });
@@ -928,6 +931,10 @@ export class Sidebar {
     bounce.disabled = running;
     bounce.addEventListener('click', async () => {
       try {
+        if (this.store.scene.layers.some((l) => l.test)) {
+          this.upd((sc) => { sc.layers = sc.layers.filter((l) => !l.test); });
+          this.flash('The test source was removed before bouncing.', 'info');
+        }
         await this.backend.bounce({ ...out, start: this.bounceFrom, end, sampleRate: rate });
       } catch (e) {
         this.flash(String(e instanceof Error ? e.message : e), 'error');
@@ -1056,9 +1063,16 @@ export class Sidebar {
       list,
       el('div', { class: 'btn-row' }, add, addSub, equal, hide),
       chosen.length > 1 ? el('p', { class: 'hint' }, `${chosen.length} speakers selected: drag one in the 3D view to move them together, Delete removes them. Cmd+click in the 3D view or the list adds or removes one; Cmd+drag on empty space draws a box.`) : '',
+      speakers.length ? row('Heatmap', select(['none', ...speakers.map((_, k) => String(k))], this.store.heatmapSpeaker >= 0 && this.store.heatmapSpeaker < speakers.length ? String(this.store.heatmapSpeaker) : 'none',
+        (v) => { this.store.heatmapSpeaker = v === 'none' ? -1 : parseInt(v, 10); this.store.emit('output'); },
+        { none: 'Off', ...Object.fromEntries(speakers.map((sp, k) => [String(k), sp.name || `Speaker ${k + 1}`])) }, 'none')) : '',
+      speakers.length ? el('p', { class: 'muted' }, 'The heatmap paints how loud a layer at each point of the floor (at head height) would be on that speaker, from -36 dB (dark) to +6 dB (white). '
+        + 'Hold Option and move the pointer over the 3D view to read every speaker\'s level at a point.') : '',
     ));
     if (selected >= 0 && speakers[selected]) this.renderSpeakerDetails(speakers, selected, outputs, busNames);
     this.renderBass(speakers);
+    this.renderPins(speakers);
+    if (!this.plugin) this.renderTestSource();
   }
 
   private renderSpeakerDetails(speakers: SpeakerDoc[], i: number, outputs: number, busNames: string[] | null): void {
@@ -1120,6 +1134,110 @@ export class Sidebar {
       row('', checkbox(!!sp.lfe, (v) => u((x) => { if (v) x.lfe = true; else delete x.lfe; }), 'Subwoofer (plays the bass below, not positions)')),
       el('p', { class: 'muted' }, 'Trim and extra delay add to the distance alignment, for a speaker that measures louder or later than its distance says.'),
       el('div', { class: 'btn-row' }, remove),
+    ));
+  }
+
+  // Pinned mixes: hand-set speaker levels at points of the space, blended
+  // with the panner around them (scene.pins, engine Pin).
+  private renderPins(speakers: SpeakerDoc[]): void {
+    const pins = this.store.scene.pins ?? [];
+    const sel = this.store.selection;
+    const selected = sel.kind === 'pin' ? sel.index : -1;
+    const list = el('div', { class: 'speaker-list' });
+    pins.forEach((p, i) => {
+      const item = el('div', { class: 'speaker-item' + (selected === i ? ' selected' : '') });
+      const on = p.gains_db.filter((g) => g > PIN_OFF + 1).length;
+      item.append(el('span', {}, p.name || `Pin ${i + 1}`), el('span', { class: 'where' }, `(${p.position.map((v) => v.toFixed(1)).join(', ')}) m · r ${p.radius.toFixed(1)} m`),
+        el('span', { class: 'ch' }, on ? `${on} on` : 'silent'));
+      item.addEventListener('click', () => this.store.select({ kind: 'pin', index: i }));
+      list.append(item);
+    });
+    const add = el('button', { class: 'btn' }, 'Add pin');
+    add.title = 'A new pin at the selected layer, or 1.2 m ahead of the listener.';
+    add.addEventListener('click', () => {
+      const s = this.store.scene;
+      const li = this.store.selectedLayers()[0];
+      const pose = this.store.poseAt(this.store.time);
+      const at: V3 = li !== undefined && s.layers[li] ? [...s.layers[li].position] as V3
+        : pose ? [pose[0] - 1.2 * Math.sin(pose[3] * Math.PI / 180), pose[1], pose[2] - 1.2 * Math.cos(pose[3] * Math.PI / 180)] : [0, 1.6, -1.2];
+      const index = pins.length;
+      this.upd((sc) => { (sc.pins ??= []).push(defaultPin(at, speakers.length, index)); });
+      this.store.select({ kind: 'pin', index });
+    });
+    this.body.append(section('Pinned mixes',
+      el('p', { class: 'muted' }, 'A pin fixes the speaker levels a layer gets at a point, like a mark in QLab: inside its radius the panner is blended towards the pin\'s levels. '
+        + 'The levels set the balance between speakers; distance still sets the overall loudness. Speakers output only; reflections keep their geometry.'),
+      list,
+      el('div', { class: 'btn-row' }, add),
+    ));
+    const pin = pins[selected];
+    if (!pin) return;
+    const u = (fn: (p: PinDoc) => void, key?: string) => this.upd((sc) => { const x = sc.pins?.[selected]; if (x) fn(x); }, key ? `${key}-pin-${selected}` : undefined);
+    const nameIn = el('input', { type: 'text', class: 'text' });
+    nameIn.value = pin.name;
+    nameIn.addEventListener('change', () => u((x) => { x.name = nameIn.value; }));
+    const capture = el('button', { class: 'btn' }, 'Capture from panner');
+    capture.title = 'Fills the levels with what the panner does at this point, to tweak from.';
+    capture.addEventListener('click', async () => {
+      const v = this.probe;
+      if (!v) return;
+      // Without this pin itself, which would only read back its own levels.
+      const g = await v([pin.position], selected);
+      if (g && g[0]) u((x) => { x.gains_db = g[0].map((db) => Math.round(Math.max(PIN_OFF, db) * 10) / 10); });
+    });
+    const remove = el('button', { class: 'btn danger' }, 'Remove pin');
+    remove.addEventListener('click', () => this.tools.deleteSelection());
+    const fmtDb = (v: number) => (v <= -59.5 ? 'off' : `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`);
+    const levels = speakers.map((sp, k) => {
+      if (sp.lfe) return '';
+      const cur = pin.gains_db[k] ?? PIN_OFF;
+      return row(sp.name || `Speaker ${k + 1}`, slider(Math.max(-60, cur), -60, 6, 0.5, (v) => u((x) => {
+        while (x.gains_db.length < speakers.length) x.gains_db.push(PIN_OFF);
+        x.gains_db[k] = v <= -59.5 ? PIN_OFF : v;
+      }, `pin-level-${k}`), fmtDb, () => this.store.endGesture(), -60));
+    });
+    this.body.append(section(`Pin: ${pin.name || `Pin ${selected + 1}`}`,
+      row('Name', nameIn),
+      row('Position', numberInput(pin.position[0], (v) => u((x) => { x.position[0] = v; }), { step: 0.1, width: 56, def: 0 }), 'x',
+        numberInput(pin.position[1], (v) => u((x) => { x.position[1] = v; }), { step: 0.1, width: 56, def: 1.6 }), 'y',
+        numberInput(pin.position[2], (v) => u((x) => { x.position[2] = v; }), { step: 0.1, width: 56, def: -2 }), 'z  m'),
+      row('Radius', numberInput(pin.radius, (v) => u((x) => { x.radius = Math.max(0.05, v); }), { step: 0.1, min: 0.05, max: 100, def: 1.5 }), 'm  (full effect at the centre, none at the edge)'),
+      ...levels,
+      el('div', { class: 'btn-row' }, capture, remove),
+      el('p', { class: 'muted' }, 'Drag the pin in the 3D view to move it (Shift+drag for height).'),
+    ));
+  }
+
+  // The app's test source: a chosen file on a layer that plays while you
+  // drag it about, and is left out of the saved scene and of bounces.
+  private renderTestSource(): void {
+    const s = this.store.scene;
+    const i = s.layers.findIndex((l) => l.test);
+    const choose = el('button', { class: 'btn' }, i >= 0 ? 'Change test file…' : 'Test source…');
+    choose.addEventListener('click', async () => {
+      const files = await this.backend.chooseAudioFiles();
+      if (!files.length) return;
+      for (const f of files) this.store.audioInfo.set(f.path, f);
+      const f = files[0];
+      const pose = this.store.poseAt(this.store.time);
+      const r2 = (v: number) => Math.round(v * 100) / 100;
+      const at: V3 = pose ? [r2(pose[0] - 2 * Math.sin(pose[3] * Math.PI / 180)), r2(pose[1]), r2(pose[2] - 2 * Math.cos(pose[3] * Math.PI / 180))] : [0, 1.6, -2];
+      const channels = channelsForFile(Math.min(f.channels || 1, 2));
+      let index = -1;
+      this.upd((sc) => {
+        const k = sc.layers.findIndex((l) => l.test);
+        if (k >= 0) { sc.layers[k].audio = f.path; sc.layers[k].channels = channels; Object.assign(sc.layers[k], layerExtras(channels, sc.layers[k])); index = k; return; }
+        index = sc.layers.length;
+        sc.layers.push(defaultLayer(index, { name: `Test: ${f.name}`, audio: f.path, position: at, home: [...at] as V3, channels, loop: true, color: '#7bd389', test: true, ...layerExtras(channels) }));
+      });
+      this.store.select({ kind: 'layer', index });
+    });
+    const remove = el('button', { class: 'btn danger' }, 'Remove test source');
+    remove.addEventListener('click', () => this.upd((sc) => { sc.layers = sc.layers.filter((l) => !l.test); }));
+    this.body.append(section('Test source',
+      el('p', { class: 'muted' }, i >= 0 ? `${s.layers[i].name} plays on a loop while the transport runs; drag it about in the 3D view to hear the speakers. It is not saved and not bounced.`
+        : 'A file to drag about the space while it plays, to hear what the speakers do. Not saved with the scene.'),
+      el('div', { class: 'btn-row' }, choose, i >= 0 ? remove : ''),
     ));
   }
 

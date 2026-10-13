@@ -28,6 +28,7 @@ export interface AmbisonicDoc { format: AmbisonicFormat; radius: number; yaw: nu
 export interface LayerDoc {
   name: string;
   audio: string;
+  test?: boolean;      // the app's test source: plays, is never saved or bounced
   audio_files?: string[];   // Ambisonic: one mono file per channel instead of `audio`
   channels?: number;   // 1 (default), 2, or 4 / 9 / 16 (Ambisonic)
   stereo?: StereoDoc;
@@ -309,7 +310,43 @@ export interface SceneDoc {
   room: RoomDoc;
   listener: ListenerDoc;
   environment: EnvironmentDoc;
+  pins?: PinDoc[];
   editor?: EditorMeta;
+}
+
+// A pinned mix (engine Pin): at `position` a layer's direct sound goes to
+// the speakers with exactly these levels, one per speaker in the layout's
+// order (dB; -120 or below = nothing), fading in over `radius` metres and
+// blending with the panner in between. Speakers output only.
+export interface PinDoc {
+  name: string;
+  position: V3;
+  radius: number;
+  gains_db: number[];
+}
+
+export const PIN_OFF = -120;
+
+export function defaultPin(position: V3, speakers: number, index: number): PinDoc {
+  return { name: `Pin ${index + 1}`, position: [...position] as V3, radius: 1.5, gains_db: new Array(speakers).fill(PIN_OFF) };
+}
+
+// The scene without its test source (an app-only layer for auditioning the
+// speakers): what gets saved and bounced.
+export function withoutTestLayers(s: SceneDoc): SceneDoc {
+  if (!s.layers.some((l) => l.test)) return s;
+  const gone = s.layers.map((l, i) => (l.test ? i : -1)).filter((i) => i >= 0);
+  const layers = s.layers.filter((l) => !l.test);
+  // Links and look-at by index: drop references to the removed ones.
+  const remap = (i: number) => (i < 0 || gone.includes(i) ? -1 : i - gone.filter((g) => g < i).length);
+  const out: SceneDoc = { ...s, layers: layers.map((l) => {
+    if (!l.link || typeof l.link.to !== 'number') return l;
+    const to = remap(l.link.to);
+    if (to < 0) { const { link: _link, ...rest } = l; return rest; }
+    return { ...l, link: { ...l.link, to } };
+  }) };
+  out.listener = { ...s.listener, head: { ...s.listener.head, look_at_layer: remap(s.listener.head.look_at_layer) } };
+  return out;
 }
 
 // Engine material names (engine/src/Materials.cpp).

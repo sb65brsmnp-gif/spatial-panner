@@ -889,7 +889,10 @@ void Renderer::Impl::computeTargets(Voice& v, const Pose& pose, double time) {
 
         if (t.isDirect) {
             if (cfg.mode == OutputMode::Binaural) updateHrtf(v, rel, dist);
-            else if (cfg.mode == OutputMode::Speakers) vbap.gains(rel, v.spkTarget.data());
+            else if (cfg.mode == OutputMode::Speakers) {
+                vbap.gains(rel, v.spkTarget.data());
+                if (!scene.pins.empty()) applyPins(scene.pins, srcPos, v.spkTarget.data(), static_cast<int>(v.spkTarget.size()));
+            }
         }
     }
 
@@ -1388,6 +1391,7 @@ void Renderer::applyUpdate(SceneUpdate& u) {
     // Vector and object swaps exchange heap buffers without allocating.
     std::swap(im.scene.layers, u.scene.layers);
     std::swap(im.scene.listener, u.scene.listener);
+    std::swap(im.scene.pins, u.scene.pins);
     std::swap(im.scene.name, u.scene.name);
     std::swap(im.poses, u.poses);
     for (auto& v : im.voices) v.layer = &im.scene.layers[static_cast<size_t>(v.layerIndex)];

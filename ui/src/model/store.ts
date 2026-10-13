@@ -27,6 +27,8 @@ export type Selection =
   | { kind: 'point'; path: number; ref: PointRef }
   // A speaker of the output layout (index into speakersShown()).
   | { kind: 'speaker'; index: number }
+  // A pinned mix (index into scene.pins).
+  | { kind: 'pin'; index: number }
   // Several layers and/or speakers (Cmd+click, Cmd+drag): they move and
   // delete together.
   | { kind: 'multi'; layers: number[]; speakers: number[] };
@@ -53,6 +55,9 @@ export class Store {
   // Plugin: what this instance's track renders to (from the plug-in's info):
   // its bus's speakers when the scene has placed none.
   hostOutput: (OutputDoc & { channels?: string[] }) | null = null;
+  // The speaker whose coverage the view paints on the floor (-1 = none);
+  // display state, not saved.
+  heatmapSpeaker = -1;
   meters: number[] = [];        // per-layer dBFS
   filePath: string | null = null;
   dirty = false;
@@ -239,6 +244,7 @@ export class Store {
     const s = this.selection;
     if (s.kind === 'layer' && s.index >= this.scene.layers.length) this.selection = { kind: 'none' };
     if (s.kind === 'speaker' && s.index >= this.speakersShown().length) this.selection = { kind: 'none' };
+    if (s.kind === 'pin' && s.index >= (this.scene.pins?.length ?? 0)) this.selection = { kind: 'none' };
     if (s.kind === 'multi') {
       const n = this.scene.layers.length, m = this.speakersShown().length;
       const layers = s.layers.filter((i) => i < n), speakers = s.speakers.filter((i) => i < m);

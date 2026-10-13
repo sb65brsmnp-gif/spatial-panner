@@ -247,6 +247,51 @@ they come back as placed. The layout is saved in the scene file
 (`editor.output.speakers` and `editor.output.bass`), so the plug-in reads the
 same one.
 
+**Selecting several things.** Cmd+click a layer or speaker in the 3D view
+(or in a list) to add it to the selection or take it out; Cmd+drag on empty
+space draws a box and selects what is inside (Shift keeps the earlier
+selection). Dragging a selected ball moves every selected layer by the same
+amount; dragging a selected speaker turns and moves every selected speaker
+together; Delete removes them all.
+
+**Stereo pairs.** A speaker's *Stereo pair with* menu pairs it with another:
+the two are set 30° either side of their shared centre (a 60° stereo field,
+the left one on the left, at the first one's height and distance) and from
+then on move, turn and change distance as one, whether dragged or typed. A
+bar joins them in the view. *Not paired* frees both. *Hide speakers* takes
+the speakers out of the view (they keep playing); *Custom* in the Layout
+menu starts with no speakers at all, and the engine plays plain stereo
+until some are placed.
+
+**Heatmap and readout.** *Heatmap* in the Speakers section paints how loud a
+layer at each point of the floor (at head height) would be on the chosen
+speaker, from -36 dB (dark blue) to +6 dB (white), with the panner's
+distance law and the speaker alignment included; it follows the listener
+and the speakers as they move. Hold Option and move the pointer over the
+view to read every speaker's level at that point in the HUD. (The browser
+preview approximates the panner; the app and plug-in ask the engine.)
+
+**Pinned mixes.** A pin (Output tab, *Add pin*) fixes the speaker levels a
+layer's direct sound gets at a point, like a mark in QLab: inside its radius
+the panner is blended towards the pin's levels, fully at the centre, not at
+all at the edge, and overlapping pins share by proximity. The levels set the
+balance between speakers; distance still sets the overall loudness, and
+the reflections and reverb keep their geometric placement. *Capture from
+panner* fills a pin with what the panner does there, to tweak from. Pins
+are dragged in the view like layers, and saved in the scene (`pins`).
+Speakers output only.
+
+**Test source** (app): *Test source…* puts a chosen file on a looping layer
+ahead of the listener, to drag about while it plays and hear what the
+speakers do. It is never saved and is removed before a bounce.
+
+**Floor picture** (Room tab): a floor plan, stage drawing or photo laid flat
+under the scene. Pick the file, set its width in metres (the depth follows
+the picture's shape), rotation, centre, height above the floor and opacity.
+*Set scale* takes two clicks on the picture and the real distance between
+those points, and resizes it to match. The picture's top edge faces forward
+(-Z) at 0°. Saved in the scene (`editor.floor_image`, the file by path).
+
 **Settings** tab: text size, height above the ball, background and maximum
 width of the layer labels in the 3D view, or labels on the selected layer
 only; meter width and height; the size of the balls and path points; the
