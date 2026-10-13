@@ -98,6 +98,27 @@ constexpr int kHeaderHeight = 40;
 
 // ============================================================ 3D editor (scene)
 
+// Pictures for the editor's floor: the page asks for /asset/<base64url of
+// the file's path> (the URL scheme hands the provider the path only). Only
+// image files are served, read fresh each time.
+static std::optional<juce::WebBrowserComponent::Resource> imageResource(const juce::String& url) {
+    if (!url.startsWith("/asset/")) return std::nullopt;
+    auto b64 = url.fromFirstOccurrenceOf("/asset/", false, false).upToFirstOccurrenceOf("?", false, false)
+                   .replaceCharacter('-', '+').replaceCharacter('_', '/');
+    while (b64.length() % 4 != 0) b64 += "=";
+    juce::MemoryOutputStream decoded;
+    if (!juce::Base64::convertFromBase64(decoded, b64)) return std::nullopt;
+    const juce::File f(juce::String::fromUTF8(static_cast<const char*>(decoded.getData()), static_cast<int>(decoded.getDataSize())));
+    const auto ext = f.getFileExtension().toLowerCase();
+    const char* mime = ext == ".png" ? "image/png" : (ext == ".jpg" || ext == ".jpeg") ? "image/jpeg" : ext == ".gif" ? "image/gif"
+                     : ext == ".webp" ? "image/webp" : ext == ".bmp" ? "image/bmp" : nullptr;
+    if (mime == nullptr || !f.existsAsFile()) return std::nullopt;
+    juce::MemoryBlock bytes;
+    if (!f.loadFileAsData(bytes)) return std::nullopt;
+    const auto* d = static_cast<const std::byte*>(bytes.getData());
+    return juce::WebBrowserComponent::Resource{std::vector<std::byte>(d, d + bytes.getSize()), mime};
+}
+
 class SceneWebView : public juce::Component, private juce::Timer {
 public:
     explicit SceneWebView(SpatialPannerProcessor& p) : proc_(p) {
@@ -112,7 +133,7 @@ public:
                                    return juce::WebBrowserComponent::Resource{std::vector<std::byte>(d, d + BinaryData::index_htmlSize),
                                                                               "text/html; charset=utf-8"};
                                }
-                               return std::nullopt;
+                               return imageResource(url);
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                                "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing", "resize", "testSpeaker"};

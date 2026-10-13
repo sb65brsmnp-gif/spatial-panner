@@ -5,7 +5,7 @@ import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoo
   BASS_FILTERS, BASS_FILTER_NAMES, SPEAKER_DISTANCE,
   type BassFilter, type HeadMode, type LayerDoc, type LayerTiming, type OutputDoc, type PathEnd, type SceneDoc, type SpeakerDoc, type V3 } from '../model/scene';
 import { placedSpeakers } from '../view/interaction';
-import { pairedWith, pairSpeakers, unpairSpeaker, moveSpeakerBy } from '../model/scene';
+import { pairedWith, pairSpeakers, unpairSpeaker, moveSpeakerBy, defaultFloorImage, calibratedWidth, type FloorImageDoc } from '../model/scene';
 import { DEFAULT_SETTINGS, type LabelMode, type Settings } from '../model/settings';
 import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
 import { speedArrival } from '../model/scene';
@@ -758,6 +758,7 @@ export class Sidebar {
       row('', checkbox(E.air_absorption, (v) => this.upd((sc) => { sc.environment.air_absorption = v; }), 'High-frequency loss over distance', DE.air_absorption)),
       row('Speed of sound', numberInput(E.speed_of_sound, (v) => this.upd((sc) => { sc.environment.speed_of_sound = Math.max(50, v); }), { step: 1, width: 64, def: DE.speed_of_sound }), 'm/s'),
     ));
+    this.renderFloorImage();
   }
 
   // Late reverb: the built-in room model or a loaded impulse response.
@@ -806,6 +807,73 @@ export class Sidebar {
         'of the room\'s Eyring RT60'));
     }
     this.body.append(section('Late reverb', ...rows));
+  }
+
+  // A picture under the scene: chosen from disk, scaled by two points,
+  // faded with opacity, saved in the scene (editor.floor_image).
+  private calibration: { measured: number; real: number } | null = null;
+  private renderFloorImage(): void {
+    const img = this.store.scene.editor?.floor_image;
+    const upd = (fn: (f: FloorImageDoc) => void, key?: string) => this.upd((sc) => { if (sc.editor?.floor_image) fn(sc.editor.floor_image); }, key);
+    const choose = el('button', { class: 'btn small' }, img ? 'Replace…' : 'Choose picture…');
+    choose.addEventListener('click', async () => {
+      const f = await this.backend.chooseFile('Choose a picture for the floor (PNG, JPEG, GIF, WebP)', '*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp');
+      if (!f) return;
+      const aspect = await imageAspect(this.backend.assetUrl(f.path));
+      this.upd((sc) => {
+        const prev = sc.editor?.floor_image;
+        sc.editor = { ...sc.editor, floor_image: prev ? { ...prev, file: f.path, aspect } : defaultFloorImage(f.path, aspect) };
+      });
+    });
+    if (!img) {
+      this.body.append(section('Floor picture',
+        el('p', { class: 'muted' }, 'A floor plan, stage drawing or photo laid flat under the scene, to place layers and speakers against. Saved with the scene.'),
+        el('div', { class: 'btn-row' }, choose)));
+      return;
+    }
+    const name = img.file.split(/[\\/]/).pop() ?? img.file;
+    const remove = el('button', { class: 'btn danger small' }, 'Remove picture');
+    remove.addEventListener('click', () => { this.calibration = null; this.tools.cancelCalibration(); this.upd((sc) => { if (sc.editor) delete sc.editor.floor_image; }); });
+    const depth = img.width * (img.aspect ?? 1);
+    // Scale: two clicks in the view, then the real distance.
+    const scaleBtn = el('button', { class: 'btn small' + (this.tools.calibrating >= 0 ? ' on' : '') }, this.tools.calibrating >= 0 ? 'Cancel' : 'Set scale…');
+    scaleBtn.addEventListener('click', () => {
+      if (this.tools.calibrating >= 0) { this.tools.cancelCalibration(); this.render(true); return; }
+      this.calibration = null;
+      this.tools.startCalibration((measured) => { this.calibration = { measured, real: Math.round(measured * 100) / 100 }; this.render(true); });
+      this.render(true);
+    });
+    let scaleRows: (HTMLElement | string)[] = [];
+    if (this.tools.calibrating >= 0) {
+      scaleRows = [el('p', { class: 'hint' }, this.tools.calibrating === 0 ? 'Click the first of two points on the picture whose real distance you know.' : 'Click the second point.')];
+    } else if (this.calibration) {
+      const c = this.calibration;
+      const apply = el('button', { class: 'btn small primary' }, 'Apply');
+      apply.addEventListener('click', () => {
+        upd((f) => { f.width = calibratedWidth(f, c.measured, c.real); });
+        this.calibration = null;
+        this.tools.cancelCalibration();
+        this.render(true);
+      });
+      const dismiss = el('button', { class: 'btn small' }, 'Cancel');
+      dismiss.addEventListener('click', () => { this.calibration = null; this.tools.cancelCalibration(); this.render(true); });
+      scaleRows = [
+        el('p', { class: 'muted' }, `The two points are ${c.measured.toFixed(2)} m apart at the current size.`),
+        row('Real distance', numberInput(c.real, (v) => { c.real = v; }, { step: 0.1, min: 0.01, max: 1000, def: c.real }), 'm', apply, dismiss),
+      ];
+    }
+    this.body.append(section('Floor picture',
+      row('Picture', el('span', { class: 'file', title: img.file }, name), choose),
+      row('Width', numberInput(img.width, (v) => upd((f) => { f.width = Math.max(0.1, v); }), { step: 0.5, min: 0.1, max: 1000, def: 10 }), `m  (${depth.toFixed(2)} m deep)`, scaleBtn),
+      ...scaleRows,
+      row('Opacity', slider(img.opacity, 0, 1, 0.05, (v) => upd((f) => { f.opacity = v; }, 'floor-opacity'), (v) => `${Math.round(v * 100)}%`, () => this.store.endGesture(), 0.6)),
+      row('Rotation', numberInput(img.rotation, (v) => upd((f) => { f.rotation = v; }), { step: 1, min: -360, max: 360, def: 0 }), '°  (anticlockwise from above)'),
+      row('Centre', numberInput(img.centre[0], (v) => upd((f) => { f.centre[0] = v; }), { step: 0.5, width: 64, def: 0 }), 'x',
+        numberInput(img.centre[1], (v) => upd((f) => { f.centre[1] = v; }), { step: 0.5, width: 64, def: 0 }), 'z  m'),
+      row('Height', numberInput(img.height, (v) => upd((f) => { f.height = v; }), { step: 0.1, min: -50, max: 50, def: 0 }), 'm above the floor'),
+      el('p', { class: 'muted' }, 'The picture\'s top edge faces forward (-Z) at 0°. Set scale: click two points on it whose real distance you know, then type that distance.'),
+      el('div', { class: 'btn-row' }, remove),
+    ));
   }
 
   // -------------------------------------------------------------- output
@@ -1148,4 +1216,14 @@ function meshNote(mesh: unknown, steam: boolean | undefined): string {
   const file = typeof mesh === 'object' && mesh && 'file' in mesh ? String((mesh as { file: unknown }).file).split(/[\\/]/).pop() : null;
   const from = file ? `Shape from ${file}.` : 'Shape stored in the scene file.';
   return steam === false ? `${from} This build has no ray tracer, so a mesh room plays as free field.` : `${from} Surfaces come from the mesh's materials.`;
+}
+
+// The height / width of a picture at `url` (1 when it cannot be read).
+function imageAspect(url: string): Promise<number> {
+  return new Promise((resolve) => {
+    const im = new Image();
+    im.onload = () => resolve(im.naturalWidth > 0 ? im.naturalHeight / im.naturalWidth : 1);
+    im.onerror = () => resolve(1);
+    im.src = url;
+  });
 }

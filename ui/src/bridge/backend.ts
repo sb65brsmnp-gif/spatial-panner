@@ -71,6 +71,8 @@ export interface Backend {
   // One file of any kind through the native open dialog (e.g. an impulse
   // response WAV); `wildcard` as JUCE takes it ("*.wav;*.aif"). null if cancelled.
   chooseFile(title: string, wildcard: string): Promise<{ path: string; name: string } | null>;
+  // A URL the page can load a picture from, given its path on disk.
+  assetUrl(path: string): string;
   audioInfo(paths: string[]): Promise<AudioInfo[]>;
   openScene(): Promise<{ path: string; scene: SceneDoc; raw: unknown } | null>;
   saveScene(scene: SceneDoc, path: string | null): Promise<{ path: string } | null>;
@@ -154,6 +156,12 @@ class AppBackend implements Backend {
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
   chooseFile(title: string, wildcard: string) { return this.call<{ path: string; name: string } | null>('chooseFile', { title, wildcard }); }
+  // The native side serves files under /asset/<base64url of the path>; the
+  // scheme hands it the URL path only, so the file path cannot be a query.
+  assetUrl(path: string) {
+    const b64 = btoa(unescape(encodeURIComponent(path))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return new URL(`asset/${b64}`, window.location.href).toString();
+  }
   async audioInfo(paths: string[]) { return (await this.call<AudioInfo[]>('audioInfo', { paths })) ?? []; }
   openScene() { return this.call<{ path: string; scene: SceneDoc; raw: unknown } | null>('openScene'); }
   saveScene(scene: SceneDoc, path: string | null) { return this.call<{ path: string } | null>('saveScene', { scene, path }); }
@@ -251,6 +259,8 @@ class DevBackend implements Backend {
     const path = window.prompt(`${title}\nPath to a file (browser preview: nothing is read):`, '');
     return path ? { path, name: path.split(/[\\/]/).pop() ?? path } : null;
   }
+  // The browser preview loads pictures by URL (a path the dev server serves).
+  assetUrl(path: string) { return path; }
   async audioInfo(paths: string[]) {
     return paths.map((p) => ({ path: p, name: p.split('/').pop() ?? p, duration: 6, channels: 1, sampleRate: 48000 }));
   }

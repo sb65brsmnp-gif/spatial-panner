@@ -274,6 +274,32 @@ export interface OutputDoc { mode: OutputModeDoc; layout: string; speakers?: Spe
 export interface EditorMeta {
   draw_height?: number;
   output?: OutputDoc;
+  floor_image?: FloorImageDoc;
+}
+
+// A picture under the scene (a floor plan, a stage drawing): drawn flat on
+// the floor, `width` metres wide, its top edge towards -Z at rotation 0.
+// `aspect` is the picture's height / width (kept so the plane has its shape
+// before the image loads); `height` lifts it above the floor.
+export interface FloorImageDoc {
+  file: string;
+  centre: [number, number];   // x, z
+  width: number;              // metres
+  rotation: number;           // degrees, anticlockwise seen from above
+  opacity: number;            // 0..1
+  height: number;             // metres above the floor
+  aspect?: number;
+}
+
+export function defaultFloorImage(file: string, aspect = 1): FloorImageDoc {
+  return { file, centre: [0, 0], width: 10, rotation: 0, opacity: 0.6, height: 0, aspect };
+}
+
+// Two points clicked on the picture measured `measured` metres apart at the
+// current width really are `real` metres apart: the width that makes it so.
+export function calibratedWidth(img: FloorImageDoc, measured: number, real: number): number {
+  if (!(measured > 1e-6) || !(real > 0)) return img.width;
+  return Math.round(img.width * real / measured * 1000) / 1000;
 }
 
 export interface SceneDoc {

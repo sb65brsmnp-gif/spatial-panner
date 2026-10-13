@@ -870,6 +870,47 @@ await check('Cmd+click and Cmd+drag select several layers, which then move toget
   await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 0);
 });
 
+await check('Room tab: a floor picture is drawn flat under the scene at its width, two clicks set its scale, opacity fades it', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  // The dev file chooser is a prompt; set the picture straight into the scene (a 200 x 100 picture, 10 m wide).
+  await ed(() => window.spEditor.store.update((s) => { s.editor = { ...s.editor, floor_image: { file: '/tests/e2e/fixtures/floor.png', centre: [0, 0], width: 10, rotation: 0, opacity: 0.6, height: 0, aspect: 0.5 } }; }));
+  await page.waitForFunction(() => { const m = window.spEditor.view.floorMesh; return !!m && m.scale.x === 10 && m.scale.y === 5; });
+  await page.waitForFunction(() => !!window.spEditor.view.floorImageAspect('/tests/e2e/fixtures/floor.png'), null, { timeout: 10000 });
+  const asp = await ed(() => window.spEditor.view.floorImageAspect('/tests/e2e/fixtures/floor.png'));
+  assert(Math.abs(asp - 0.5) < 1e-6, `aspect ${asp}`);
+  await page.click('.tab[data-tab="room"]');
+  await page.waitForSelector('#sidebar .section-title:has-text("Floor picture")');
+  const widthText = await page.locator('#sidebar .row:has-text("Width")').textContent();
+  assert(widthText.includes('5.00 m deep'), widthText);
+  // Scale: click two points 2 m apart in the view and say they are 4 m apart; the picture doubles.
+  await page.click('#sidebar button:has-text("Set scale…")');
+  await page.waitForFunction(() => window.spEditor.tools.calibrating === 0);
+  await page.mouse.click(...(await screen([-1, 0, 1])));
+  await page.waitForFunction(() => window.spEditor.tools.calibrating === 1);
+  await page.mouse.click(...(await screen([1, 0, 1])));
+  await page.waitForSelector('#sidebar .row:has-text("Real distance")');
+  const measured = await page.locator('#sidebar .section:has-text("Floor picture") .muted').first().textContent();
+  assert(/2\.0\d m apart|1\.9\d m apart/.test(measured), measured);
+  const real = page.locator('#sidebar .row:has-text("Real distance") input');
+  await real.fill('4');
+  await real.press('Enter');
+  await page.click('#sidebar button:has-text("Apply")');
+  await page.waitForFunction(() => { const f = window.spEditor.store.scene.editor.floor_image; return f.width > 19.5 && f.width < 20.5; });
+  await page.waitForFunction(() => window.spEditor.view.floorMesh.scale.x > 19.5);
+  // Opacity.
+  const op = page.locator('#sidebar .row:has-text("Opacity") input[type=range]');
+  await op.fill('0.2');
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.floorMesh.material.opacity - 0.2) < 1e-6);
+  await page.screenshot({ path: resolve(outDir, 'floor-picture.png') });
+  // Saved with the scene and removable.
+  const saved = await ed(() => JSON.parse(JSON.stringify(window.spEditor.store.scene)).editor.floor_image);
+  assert(saved.file === '/tests/e2e/fixtures/floor.png' && Math.abs(saved.opacity - 0.2) < 1e-6, JSON.stringify(saved));
+  await page.click('#sidebar button:has-text("Remove picture")');
+  await page.waitForFunction(() => !window.spEditor.store.scene.editor.floor_image && !window.spEditor.view.floorMesh);
+});
+
 await check('Settings tab: text size and label height apply to the page and the view', async () => {
   await page.click('.tab[data-tab="settings"]');
   await page.waitForSelector('#sidebar .section-title:has-text("Labels in the 3D view")');

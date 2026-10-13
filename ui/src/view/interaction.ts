@@ -184,8 +184,42 @@ export class Interaction {
 
   // ------------------------------------------------------------ events
 
+  // Scale calibration of the floor picture: two clicks on the floor, then
+  // `done` gets the distance between them (metres at the current width).
+  private calibration: { points: V3[]; done: (measured: number) => void } | null = null;
+  startCalibration(done: (measured: number) => void): void {
+    this.cancelDrawing();
+    this.calibration = { points: [], done };
+    this.view.setCalibrationPoints([]);
+    this.store.emit('tool');
+  }
+  cancelCalibration(): void {
+    if (!this.calibration) return;
+    this.calibration = null;
+    this.view.setCalibrationPoints([]);
+    this.store.emit('tool');
+  }
+  get calibrating(): number { return this.calibration ? this.calibration.points.length : -1; }
+  private calibrationClick(e: PointerEvent): void {
+    const c = this.calibration!;
+    const s = this.store.scene;
+    const floorY = (s.room.type === 'box' ? s.room.origin[1] : 0) + (s.editor?.floor_image?.height ?? 0);
+    const hit = this.vp.intersect(e, new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY));
+    if (!hit) return;
+    c.points.push(vec(hit));
+    this.view.setCalibrationPoints(c.points);
+    this.store.emit('tool');
+    if (c.points.length === 2) {
+      const [a, b] = c.points;
+      const measured = Math.hypot(a[0] - b[0], a[2] - b[2]);
+      this.calibration = null;
+      c.done(measured);
+    }
+  }
+
   private down(e: PointerEvent): void {
     if (e.button !== 0 || e.target !== this.vp.renderer.domElement) return;
+    if (this.calibration) return this.calibrationClick(e);
     const tool = this.opts.tool;
     if (tool === 'select') return this.selectDown(e);
     const p = this.drawPoint(e, tool !== 'freehand');
@@ -596,6 +630,7 @@ export class Interaction {
       if (this.opts.tool === 'pen') this.finishPen(false); else this.finishClicks(false);
       e.preventDefault();
     } else if (e.key === 'Escape') {
+      if (this.calibration) { this.cancelCalibration(); return; }
       if (drawingClicks || this.drag) this.cancelDrawing();
       else if (this.opts.tool !== 'select') this.setTool('select');
       else this.store.select({ kind: 'none' });

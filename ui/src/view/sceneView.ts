@@ -62,14 +62,92 @@ export class SceneView {
   private lineMaterials: LineMaterial[] = [];
   private head = new THREE.Group();
 
+  // The floor picture (editor.floor_image) and the two calibration marks.
+  private floorGroup = new THREE.Group();
+  floorMesh: THREE.Mesh | null = null;
+  private floorFile = '';
+  private floorTexture: THREE.Texture | null = null;
+  private floorAspect = new Map<string, number>();
+  private calibGroup = new THREE.Group();
+  // Resolves a file path to a URL the page can load (set by main).
+  assetUrl: (path: string) => string = (p) => p;
+
   constructor(private vp: Viewport, private store: Store) {
-    this.root.add(this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup);
+    this.root.add(this.floorGroup, this.calibGroup, this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup);
     vp.scene.add(this.root);
     this.buildListener();
     vp.onBeforeRender(() => {
       const w = vp.container.clientWidth, h = vp.container.clientHeight;
       for (const m of this.lineMaterials) m.resolution.set(w, h);
     });
+  }
+
+  // --------------------------------------------------------- floor image
+
+  // Draws (or redraws) the picture under the scene. The texture is loaded
+  // once per file; its shape is remembered so a reopened scene is right
+  // before the picture arrives.
+  updateFloorImage(): void {
+    const img = this.store.scene.editor?.floor_image;
+    if (!img || !img.file) {
+      clear(this.floorGroup);
+      this.floorMesh = null;
+      this.floorFile = '';
+      this.floorTexture?.dispose();
+      this.floorTexture = null;
+      this.vp.invalidate();
+      return;
+    }
+    if (img.file !== this.floorFile) {
+      this.floorFile = img.file;
+      this.floorTexture?.dispose();
+      const file = img.file;
+      this.floorTexture = new THREE.TextureLoader().load(this.assetUrl(file), (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        const im = t.image as { width?: number; height?: number } | undefined;
+        if (im?.width && im?.height) this.floorAspect.set(file, im.height / im.width);
+        if (this.floorMesh) (this.floorMesh.material as THREE.MeshBasicMaterial).needsUpdate = true;
+        this.updateFloorImage();
+      });
+      clear(this.floorGroup);
+      this.floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({ map: this.floorTexture, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+      this.floorMesh.name = 'floor-image';
+      this.floorGroup.add(this.floorMesh);
+    }
+    const m = this.floorMesh!;
+    const aspect = img.aspect ?? this.floorAspect.get(img.file) ?? 1;
+    const w = Math.max(0.1, img.width), d = w * aspect;
+    m.scale.set(w, d, 1);
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    m.rotation.set(-Math.PI / 2, 0, img.rotation * Math.PI / 180, 'YXZ');
+    m.position.set(img.centre[0], floorY + 0.004 + img.height, img.centre[1]);
+    (m.material as THREE.MeshBasicMaterial).opacity = Math.max(0, Math.min(1, img.opacity));
+    this.vp.invalidate();
+  }
+
+  // The picture's height / width once it has loaded (undefined before).
+  floorImageAspect(file: string): number | undefined { return this.floorAspect.get(file); }
+
+  // The marks of a scale calibration in progress: up to two points on the
+  // floor and the line between them.
+  setCalibrationPoints(points: V3[]): void {
+    clear(this.calibGroup);
+    for (const p of points) {
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.18, 32), new THREE.MeshBasicMaterial({ color: 0xffc857, side: THREE.DoubleSide, depthTest: false }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(p[0], p[1] + 0.01, p[2]);
+      ring.renderOrder = 10;
+      this.calibGroup.add(ring);
+    }
+    if (points.length === 2) {
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(p[0], p[1] + 0.01, p[2]))),
+        new THREE.LineBasicMaterial({ color: 0xffc857, depthTest: false }));
+      line.renderOrder = 10;
+      this.calibGroup.add(line);
+    }
+    this.vp.invalidate();
   }
 
   // ---------------------------------------------------------------- room

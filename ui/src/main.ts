@@ -27,6 +27,7 @@ viewportEl.append(hud, emptyHint, toasts);
 const vp = new Viewport(viewportEl);
 const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
+view.assetUrl = (p) => backend.assetUrl(p);
 let follow = false;
 store.plugin = plugin;
 
@@ -153,7 +154,10 @@ function updateHud(): void {
   // While a drawing tool is out, say whose path it draws: the selected
   // layer's, or the listener's ("for" in the toolbar changes it).
   const target = tools.opts.tool !== 'select' ? s.layers[tools.opts.layerTarget] : undefined;
-  emptyHint.textContent = tools.opts.tool !== 'select'
+  emptyHint.textContent = tools.calibrating >= 0
+    ? (tools.calibrating === 0 ? 'Floor picture scale: click the first of two points on the picture whose real distance you know. Esc cancels.'
+      : 'Now click the second point.')
+    : tools.opts.tool !== 'select'
     ? (target ? `Drawing the path of ${target.name || `Layer ${tools.opts.layerTarget + 1}`} at its height. For the listener's path instead, choose Listener under "for" in the toolbar. Esc cancels.`
       : s.layers.length ? 'Drawing the listener\'s path. For a layer\'s own path, choose it under "for" in the toolbar, or press Esc and select the layer first.' : '')
     : !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
@@ -286,6 +290,7 @@ store.subscribe((kinds) => {
   if (kinds.has('file') || kinds.has('scene')) syncOutput();
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
   if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updateSpeakers();
+  if (kinds.has('scene') || kinds.has('file')) view.updateFloorImage();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
   if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
