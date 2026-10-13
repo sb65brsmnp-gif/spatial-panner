@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
 import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint, layerHome, firstPoint,
-  defaultScene, hasPath, removeLayerLinks } from '../model/scene';
+  defaultScene, hasPath, removeLayerLinks, sphericalOf, type SceneDoc, type SpeakerDoc } from '../model/scene';
 import { attachPath, layerOfPath, layerPathIndex, moveLayerTo, pathOf, removePath } from '../model/layerMotion';
 import {
   appendSegments, translatePath, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
@@ -47,11 +47,24 @@ type Drag =
   // position, or the active path with its start. `from` is where it started.
   | { kind: 'start'; from: V3; plane: THREE.Plane; offset: THREE.Vector3; alt: boolean; moved: boolean; x: number; y: number }
   | { kind: 'point'; path: number; ref: PointRef; plane: THREE.Plane; offset: THREE.Vector3 }
+  // A speaker of the output layout: moved around the head, which sets its
+  // azimuth, elevation and distance.
+  | { kind: 'speaker'; index: number; plane: THREE.Plane; offset: THREE.Vector3; moved: boolean; x: number; y: number }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
   | { kind: 'pen'; anchor: PenAnchor };
 
 const vec = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
+
+// The scene's placed speakers, for editing: a preset's (or, in the plug-in,
+// the bus's) speakers drawn in their stead are first written into the scene
+// as they stand, so the edit changes one of them and keeps the rest.
+export function placedSpeakers(s: SceneDoc, shown: SpeakerDoc[]): SpeakerDoc[] {
+  const out = s.editor?.output ?? { mode: 'speakers' as const, layout: '7.1.4' };
+  if (!out.speakers?.length) out.speakers = shown.map((x) => ({ ...x }));
+  s.editor = { ...s.editor, output: out };
+  return out.speakers;
+}
 type PathDocHost = { paths: PathDoc[]; active_path: number; static_position: V3 };
 
 export class Interaction {
@@ -241,6 +254,20 @@ export class Interaction {
     const rc = this.vp.ray(e);
     const hits = rc.intersectObjects(this.view.pickableLayers(), false);
     const startHits = rc.intersectObjects([...this.view.startHandles, ...this.view.pickableListener()], false);
+    const speakerHits = rc.intersectObjects(this.view.pickableSpeakers(), true);
+    const nearer = (a: THREE.Intersection[], b: THREE.Intersection[]) => a.length && (!b.length || a[0].distance < b[0].distance);
+    if (speakerHits.length && nearer(speakerHits, hits) && nearer(speakerHits, startHits)) {
+      // The box or its driver disc: the index is on both.
+      const index = speakerHits[0].object.userData.index as number;
+      const pos = new THREE.Vector3();
+      this.view.pickableSpeakers()[index].getWorldPosition(pos);
+      const plane = this.vp.editPlane(pos, e.shiftKey);
+      const hit = this.vp.intersect(e, plane) ?? pos.clone();
+      this.drag = { kind: 'speaker', index, plane, offset: pos.clone().sub(hit), moved: false, x: e.clientX, y: e.clientY };
+      this.store.select({ kind: 'speaker', index });
+      this.vp.controls.enabled = false;
+      return;
+    }
     if (startHits.length && (!hits.length || startHits[0].distance < hits[0].distance) && this.startDown(e)) return;
     if (hits.length) {
       const index = hits[0].object.userData.index as number;
@@ -313,7 +340,7 @@ export class Interaction {
       return;
     }
     // A press that has not moved a few pixels is a click, not a drag.
-    if ((d.kind === 'layer' || d.kind === 'start') && !d.moved) {
+    if ((d.kind === 'layer' || d.kind === 'start' || d.kind === 'speaker') && !d.moved) {
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 4) return;
       d.moved = true;
     }
@@ -323,6 +350,25 @@ export class Interaction {
         if (!hit) return;
         const p = this.keepAxes(d.from, this.snapEdit(vec(hit.add(d.offset)), d.plane), d.plane);
         this.store.update((s) => this.moveStart(s.listener, p), 'start-move');
+        break;
+      }
+      case 'speaker': {
+        const hit = this.vp.intersect(e, d.plane);
+        if (!hit) return;
+        const cur = new THREE.Vector3();
+        const mesh = this.view.pickableSpeakers()[d.index];
+        if (!mesh) return;
+        mesh.getWorldPosition(cur);
+        const p = this.keepAxes(vec(cur), vec(hit.add(d.offset)), d.plane);
+        const local = this.view.speakerLocalOf(p);
+        const sph = sphericalOf(local);
+        this.store.update((s) => {
+          const sp = placedSpeakers(s, this.store.speakersShown())[d.index];
+          if (!sp) return;
+          sp.azimuth = Math.round(sph.azimuth * 10) / 10;
+          sp.elevation = Math.round(sph.elevation * 10) / 10;
+          sp.distance = Math.round(Math.max(0.2, sph.distance) * 100) / 100;
+        }, 'speaker-move');
         break;
       }
       case 'layer': {
@@ -424,6 +470,7 @@ export class Interaction {
         this.store.endGesture();
         break;
       case 'point':
+      case 'speaker':
         this.store.endGesture();
         break;
       case 'freehand': {
@@ -529,6 +576,12 @@ export class Interaction {
         if (s.listener.head.look_at_layer === sel.index) s.listener.head.look_at_layer = -1;
         else if (s.listener.head.look_at_layer > sel.index) s.listener.head.look_at_layer--;
       });
+      this.store.select({ kind: 'none' });
+    } else if (sel.kind === 'speaker') {
+      // The last speaker that is not a subwoofer stays: a layout needs one.
+      const shown = this.store.speakersShown();
+      if (shown.filter((x) => !x.lfe).length <= 1 && !shown[sel.index]?.lfe) return;
+      this.store.update((s) => { placedSpeakers(s, shown).splice(sel.index, 1); });
       this.store.select({ kind: 'none' });
     }
   }

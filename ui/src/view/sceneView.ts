@@ -8,7 +8,8 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, speakerLocal, type LayerDoc, type PathDoc, type SpeakerDoc, type V3 } from '../model/scene';
+import { DEFAULT_SETTINGS, type Settings } from '../model/settings';
 import { layerOfPath, layerPathIndex } from '../model/layerMotion';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
@@ -34,6 +35,10 @@ interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; rin
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
+// A loudspeaker of the output layout: the box, a stem to the floor and its
+// name tag. Group-local to speakerGroup, which sits on the listener's head.
+interface SpeakerObj { mesh: THREE.Mesh; stem: THREE.Line; label: CSS2DObject }
+
 export class SceneView {
   readonly root = new THREE.Group();
   readonly roomGroup = new THREE.Group();
@@ -43,7 +48,13 @@ export class SceneView {
   readonly markerGroup = new THREE.Group();
   readonly previewGroup = new THREE.Group();
   readonly listener = new THREE.Group();
+  // The output layout's speakers, around the listener's head and turned with
+  // it (the renderer pans relative to the head, so this shows which speakers
+  // a layer plays from).
+  readonly speakerGroup = new THREE.Group();
+  private speakers: SpeakerObj[] = [];
   private layers: LayerObj[] = [];
+  settings: Settings = { ...DEFAULT_SETTINGS };
   pointHandles: PointHandle[] = [];
   // The listener's starting point: a disc on the floor under it (drag it to
   // move the start, and the path with it).
@@ -52,7 +63,7 @@ export class SceneView {
   private head = new THREE.Group();
 
   constructor(private vp: Viewport, private store: Store) {
-    this.root.add(this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener);
+    this.root.add(this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup);
     vp.scene.add(this.root);
     this.buildListener();
     vp.onBeforeRender(() => {
@@ -205,7 +216,7 @@ export class SceneView {
     meterBox.appendChild(meter);
     div.append(name, meterBox);
     const label = new CSS2DObject(div);
-    label.position.set(0, LAYER_RADIUS + 0.25, 0);
+    label.position.set(0, LAYER_RADIUS * this.settings.dotSize + this.settings.labelOffset, 0);
     group.add(label);
     this.layerGroup.add(group);
     // A dashed line to what the layer is linked to (world coordinates).
@@ -263,7 +274,9 @@ export class SceneView {
       const selected = sel.kind === 'layer' && sel.index === i;
       mat.emissive.copy(selected ? color : new THREE.Color(0));
       mat.emissiveIntensity = selected ? 0.6 : 0;
-      o.ball.scale.setScalar(selected ? 1.25 : 1);
+      const dotScale = this.settings.dotSize;
+      o.ball.scale.setScalar((selected ? 1.25 : 1) * dotScale);
+      o.label.position.y = LAYER_RADIUS * dotScale + this.settings.labelOffset;
       // Stereo: left and right ends either side of the centre, joined by a
       // bar; folded to mono, the pair collapses to one ball at the centre.
       const stereo = isStereo(l);
@@ -285,7 +298,7 @@ export class SceneView {
         rm.color.copy(mat.color);
         rm.emissive.copy(mat.emissive);
         rm.emissiveIntensity = mat.emissiveIntensity;
-        o.right.ball.scale.setScalar(selected ? 1.25 : 1);
+        o.right.ball.scale.setScalar((selected ? 1.25 : 1) * dotScale);
         const len = 2 * Math.hypot(d[0], d[1], d[2]);
         o.bar.visible = len > 2 * LAYER_RADIUS;
         o.bar.scale.set(1, Math.max(0.01, len - 2 * LAYER_RADIUS * 0.9), 1);
@@ -321,9 +334,111 @@ export class SceneView {
       o.name.textContent = (l.name || `Layer ${i + 1}`) + (spatial ? '' : ' · direct') + (following ? ' · linked' : '');
       o.label.element.classList.toggle('selected', selected);
       o.label.element.classList.toggle('silent', silent);
+      // Settings: names on every layer, on the selected one only, or none.
+      const mode = this.settings.labelMode;
+      o.label.visible = mode !== 'off';
+      o.label.element.classList.toggle('quiet', mode === 'selected' && !selected);
     });
     this.updateMeters();
     this.vp.invalidate();
+  }
+
+  // Display settings (Settings tab): label distance, dot size, time dots.
+  applySettings(s: Settings): void {
+    this.settings = { ...s };
+    this.updateLayers();
+    this.rebuildPaths();
+    this.updateSpeakers();
+  }
+
+  // ------------------------------------------------------------ speakers
+
+  private rebuildSpeakers(list: SpeakerDoc[]): void {
+    for (const sp of this.speakers) sp.label.element.remove();
+    clear(this.speakerGroup);
+    this.speakers = [];
+    list.forEach((s, index) => {
+      const sub = !!s.lfe;
+      const geo = sub ? new THREE.BoxGeometry(0.42, 0.42, 0.42) : new THREE.BoxGeometry(0.26, 0.34, 0.24);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: sub ? 0x8a6fb0 : 0x9aa6b8, roughness: 0.7 }));
+      mesh.userData = { kind: 'speaker', index, sub };
+      // The driver: a disc on the face that looks at the head.
+      const cone = new THREE.Mesh(new THREE.CircleGeometry(sub ? 0.14 : 0.08, 20), new THREE.MeshBasicMaterial({ color: 0x1b1e25 }));
+      cone.position.z = (sub ? 0.21 : 0.12) + 0.002;
+      cone.userData = { kind: 'speaker', index };
+      mesh.add(cone);
+      const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineDashedMaterial({ color: 0x5a6476, dashSize: 0.08, gapSize: 0.06, transparent: true, opacity: 0.7 }));
+      const div = document.createElement('div');
+      div.className = 'speaker-label' + (sub ? ' sub' : '');
+      const name = document.createElement('span');
+      const ch = document.createElement('span');
+      ch.className = 'ch';
+      div.append(name, ch);
+      const label = new CSS2DObject(div);
+      this.speakerGroup.add(mesh, stem, label);
+      this.speakers.push({ mesh, stem, label });
+    });
+  }
+
+  updateSpeakers(): void {
+    const list = this.store.speakersShown();
+    if (list.length !== this.speakers.length) this.rebuildSpeakers(list);
+    const sel = this.store.selection;
+    // The floor, in the head's frame (which may be tilted): the room's floor
+    // height taken straight down in the world.
+    const floorY = this.store.scene.room.type === 'box' ? this.store.scene.room.origin[1] : 0;
+    const headY = this.speakerGroup.position.y;
+    const inv = this.speakerGroup.quaternion.clone().invert();
+    list.forEach((s, i) => {
+      const o = this.speakers[i];
+      const sub = !!s.lfe;
+      // A speaker turned into a subwoofer (or back) gets the other box.
+      if (o.mesh.userData.sub !== sub) {
+        this.rebuildSpeakers(list);
+        this.updateSpeakers();
+        return;
+      }
+      const p = speakerLocal(s);
+      o.mesh.position.set(p[0], p[1], p[2]);
+      o.mesh.lookAt(0, 0, 0);
+      const selected = sel.kind === 'speaker' && sel.index === i;
+      const mat = o.mesh.material as THREE.MeshStandardMaterial;
+      mat.emissive.set(selected ? 0xffc857 : 0x000000);
+      mat.emissiveIntensity = selected ? 0.5 : 0;
+      o.mesh.scale.setScalar(selected ? 1.15 : 1);
+      // Stem: from the box down to the floor, vertical in the world.
+      const worldDown = new THREE.Vector3(0, -1, 0).applyQuaternion(inv);
+      const drop = p[1] + headY - floorY;
+      const foot = new THREE.Vector3(p[0], p[1], p[2]).addScaledVector(worldDown, Math.max(0, drop));
+      (o.stem.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(p[0], p[1], p[2]), foot]);
+      o.stem.computeLineDistances();
+      o.stem.visible = drop > 0.3;
+      o.label.position.set(p[0], p[1] + (sub ? 0.32 : 0.28), p[2]);
+      o.label.visible = this.settings.speakerLabels;
+      (o.label.element.children[0] as HTMLElement).textContent = s.name || `Speaker ${i + 1}`;
+      (o.label.element.children[1] as HTMLElement).textContent = `out ${s.channel}`;
+      o.label.element.classList.toggle('selected', selected);
+    });
+    this.speakerGroup.visible = list.length > 0;
+    this.vp.invalidate();
+  }
+
+  pickableSpeakers(): THREE.Object3D[] {
+    if (!this.speakerGroup.visible) return [];
+    return this.speakers.map((o) => o.mesh);
+  }
+
+  // A world point in the speakers' (head) frame, and back.
+  speakerLocalOf(world: V3): V3 {
+    const v = new THREE.Vector3(world[0], world[1], world[2]);
+    this.speakerGroup.worldToLocal(v);
+    return [v.x, v.y, v.z];
+  }
+  speakerWorldOf(local: V3): V3 {
+    const v = new THREE.Vector3(local[0], local[1], local[2]);
+    this.speakerGroup.localToWorld(v);
+    return [v.x, v.y, v.z];
   }
 
   updateMeters(): void {
@@ -442,6 +557,7 @@ export class SceneView {
         new THREE.MeshBasicMaterial({ color: selected ? 0xffffff : handle ? 0x56ccf2 : 0xffc857, depthTest: false, transparent: true }));
       mesh.renderOrder = 10;
       mesh.position.copy(v3(pos));
+      mesh.scale.setScalar(this.settings.dotSize);
       mesh.userData = { kind: 'point', path: pathIndex, ref };
       this.pointGroup.add(mesh);
       this.pointHandles.push({ mesh, path: pathIndex, ref });
@@ -459,9 +575,9 @@ export class SceneView {
   // (from the engine's pose evaluation, so speed changes show as spacing).
   private buildTimeMarkers(): void {
     const a = this.store.analysis;
-    if (!a || a.active_path < 0 || !a.poses.length) return;
+    if (!this.settings.timeDots || !a || a.active_path < 0 || !a.poses.length) return;
     const step = Math.max(1, Math.round(1 / a.dt));
-    const dotGeo = new THREE.SphereGeometry(0.045, 8, 6);
+    const dotGeo = new THREE.SphereGeometry(0.045 * this.settings.dotSize, 8, 6);
     const dotMat = new THREE.MeshBasicMaterial({ color: 0xffe3a3 });
     let lastPos: number[] | null = null;
     for (let i = 0; i < a.poses.length; i += step) {
@@ -518,6 +634,11 @@ export class SceneView {
     body.rotation.y = p[3] * Math.PI / 180;
     this.vp.setEye(new THREE.Vector3(p[0], p[1], p[2]), this.head.quaternion);
     this.listener.visible = this.vp.view !== 'listener';
+    const moved = !this.speakerGroup.position.equals(this.listener.position) || !this.speakerGroup.quaternion.equals(this.head.quaternion);
+    this.speakerGroup.position.copy(this.listener.position);
+    this.speakerGroup.quaternion.copy(this.head.quaternion);
+    this.speakerGroup.updateMatrixWorld(true);
+    if (moved && this.speakers.length) this.updateSpeakers();
     this.vp.invalidate();
   }
 

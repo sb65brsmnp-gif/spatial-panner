@@ -1,6 +1,6 @@
 // Editor state: the scene document, selection, undo/redo, and the current
 // analysis (engine-sampled paths and poses). Views subscribe to changes.
-import { completeScene, defaultScene, type SceneDoc } from './scene';
+import { completeScene, defaultScene, outputSpeakers, type OutputDoc, type SceneDoc, type SpeakerDoc } from './scene';
 import type { PointRef } from './geometry';
 import { pathOf } from './layerMotion';
 
@@ -24,9 +24,12 @@ export interface Analysis {
 export type Selection =
   | { kind: 'none' }
   | { kind: 'layer'; index: number }
-  | { kind: 'point'; path: number; ref: PointRef };
+  | { kind: 'point'; path: number; ref: PointRef }
+  // A speaker of the output layout (index into speakersShown()).
+  | { kind: 'speaker'; index: number };
 
-export type ChangeKind = 'scene' | 'selection' | 'analysis' | 'time' | 'transport' | 'meters' | 'file' | 'tool';
+// 'output': what the host renders to changed (plugin), or the display settings.
+export type ChangeKind = 'scene' | 'selection' | 'analysis' | 'time' | 'transport' | 'meters' | 'file' | 'tool' | 'output';
 
 type Listener = (kinds: Set<ChangeKind>) => void;
 
@@ -43,6 +46,10 @@ export class Store {
   livePose: number[] | null = null;  // pose from the audio engine while playing
   hostDriven = false;           // plugin: the host's playhead drives time and pose
   hostActive = true;            // plugin: the host is running the plug-in (livePose is current)
+  plugin = false;               // the editor runs inside the plug-in
+  // Plugin: what this instance's track renders to (from the plug-in's info):
+  // its bus's speakers when the scene has placed none.
+  hostOutput: (OutputDoc & { channels?: string[] }) | null = null;
   meters: number[] = [];        // per-layer dBFS
   filePath: string | null = null;
   dirty = false;
@@ -174,9 +181,27 @@ export class Store {
     return Math.max(d, 30);
   }
 
+  // The speakers drawn around the listener: the scene's placed layout; in
+  // the plug-in without one, the bus's own layout; none in binaural or
+  // Ambisonic mode (the app's Output setting, or a stereo track).
+  speakersShown(): SpeakerDoc[] {
+    const out = this.scene.editor?.output;
+    if (this.plugin) {
+      if (out?.speakers?.length) return out.speakers;
+      return this.hostOutput?.mode === 'speakers' ? this.hostOutput.speakers ?? [] : [];
+    }
+    return outputSpeakers(out);
+  }
+
+  // Whether the drawn speakers are the scene's own (editable in place) or
+  // stand in for a preset / the bus: editing one first writes them all into
+  // the scene.
+  speakersPlaced(): boolean { return !!this.scene.editor?.output?.speakers?.length; }
+
   private validateSelection(): void {
     const s = this.selection;
     if (s.kind === 'layer' && s.index >= this.scene.layers.length) this.selection = { kind: 'none' };
+    if (s.kind === 'speaker' && s.index >= this.speakersShown().length) this.selection = { kind: 'none' };
     if (s.kind === 'point') {
       const p = pathOf(this.scene, s.path);
       if (!p || !p.segments[s.ref.seg] || !p.segments[s.ref.seg].points[s.ref.pt]) this.selection = { kind: 'none' };

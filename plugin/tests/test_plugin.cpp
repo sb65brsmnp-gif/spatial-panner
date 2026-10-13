@@ -163,6 +163,25 @@ TEST_CASE("A new instance holds the scene when there is none; later ones are lay
         CHECK(a->sceneDoc()["layers"].size() == 2);
     }
 
+    SECTION("a slot becomes a layer only once its host has given it a timeline position") {
+        // auval (run by Logic after a new build is installed) and Logic's
+        // plug-in scan instantiate the plug-in for many seconds with no
+        // track and no playhead; the session file is shared with them.
+        SpatialPannerProcessor::setAdoptDelaysForTesting(0, 0, true);
+        auto c = makeInstance(ph);
+        c->setRole(SpatialPannerProcessor::Role::Layer);
+        tickAll({c.get(), a.get()}, 3);
+        CHECK(a->sceneDoc()["layers"].size() == 2);
+        CHECK(doc::layerIndex(a->sceneDoc(), c->layerId()) < 0);
+        juce::AudioBuffer<float> buf(2, kBlock);
+        juce::MidiBuffer midi;
+        c->processBlock(buf, midi);
+        tickAll({c.get(), a.get()}, 3);
+        CHECK(a->sceneDoc()["layers"].size() == 3);
+        CHECK(doc::layerIndex(a->sceneDoc(), c->layerId()) >= 0);
+        SpatialPannerProcessor::setAdoptDelaysForTesting(0, 0, false);
+    }
+
     SECTION("a slot becomes a layer only once it has been alive for a while") {
         // Logic makes short-lived instances while loading a project; one that
         // comes and goes within the wait leaves nothing behind.
@@ -780,6 +799,71 @@ TEST_CASE("A layer on a 7.1.4 track renders to the speakers and leaves the LFE a
     for (double e : energy) total += e;
     CHECK(total > 0.01);
     CHECK(energy[static_cast<size_t>(lfe)] < total * 1e-6);
+}
+
+TEST_CASE("The scene's custom speaker layout plays each speaker on the bus channel it names") {
+    FreshSession fs;
+    PlayHead ph;
+    auto scene = makeInstance(ph);
+    scene->setRole(SpatialPannerProcessor::Role::Scene, false);
+    auto a = makeInstance(ph, juce::AudioChannelSet::create7point1point4());
+    a->setRole(SpatialPannerProcessor::Role::Layer);
+    tickAll({scene.get(), a.get()}, 3);
+    json d = scene->sceneDoc();
+    REQUIRE(d["layers"].size() == 1);
+    // Two speakers at the front on bus channels 7 and 8 (1-based), a third
+    // on a channel the bus does not have, and bass management to one sub on
+    // channel 4.
+    d["editor"]["output"] = {{"mode", "speakers"}, {"layout", "custom"},
+                             {"speakers", {{{"name", "A"}, {"azimuth", 30}, {"elevation", 0}, {"distance", 2}, {"channel", 7}},
+                                           {{"name", "B"}, {"azimuth", -30}, {"elevation", 0}, {"distance", 2}, {"channel", 8}},
+                                           {{"name", "Sub"}, {"azimuth", 0}, {"elevation", 0}, {"distance", 2}, {"lfe", true}, {"channel", 4}},
+                                           {{"name", "Far"}, {"azimuth", 180}, {"elevation", 0}, {"distance", 2}, {"channel", 20}}}},
+                             {"bass", {{"enabled", true}, {"cutoff_hz", 120}, {"filter", "lr24"}}}};
+    std::string error;
+    REQUIRE(scene->setSceneDoc(d, error));
+    tickAll({scene.get(), a.get()}, 3);
+    waitEngines({a.get()});
+    const auto layout = a->effectiveLayout();
+    REQUIRE(layout.numChannels() == 3);
+    CHECK(a->effectiveRoute() == std::vector<int>{6, 7, 3});
+
+    juce::AudioBuffer<float> buf(12, kBlock);
+    juce::MidiBuffer midi;
+    std::vector<double> energy(12);
+    for (int pos = 0; pos < 60 * kBlock; pos += kBlock) {
+        ph.pos = pos;
+        buf.clear();
+        // A low tone plus a high one: the low one should reach the sub.
+        for (int k = 0; k < kBlock; ++k)
+            buf.setSample(0, k, 0.3f * std::sin(2.0f * 3.14159265f * 50.0f * static_cast<float>(pos + k) / static_cast<float>(kRate)) +
+                                    0.3f * std::sin(2.0f * 3.14159265f * 2000.0f * static_cast<float>(pos + k) / static_cast<float>(kRate)));
+        a->processBlock(buf, midi);
+        for (int c = 0; c < 12; ++c) energy[static_cast<size_t>(c)] += buf.getRMSLevel(c, 0, kBlock);
+    }
+    double total = 0;
+    for (double e : energy) total += e;
+    CHECK(total > 0.01);
+    CHECK(energy[6] > total * 0.1);
+    CHECK(energy[7] > total * 0.1);
+    CHECK(energy[3] > total * 0.05);   // the sub carries the 50 Hz
+    for (int c : {0, 1, 2, 4, 5, 8, 9, 10, 11}) CHECK(energy[static_cast<size_t>(c)] < total * 1e-6);
+
+    SECTION("the speaker test tone plays on the chosen bus channel while the host runs the instance") {
+        a->setTestNoise(9);
+        std::fill(energy.begin(), energy.end(), 0.0);
+        for (int pos = 0; pos < 20 * kBlock; pos += kBlock) {
+            ph.pos = pos;
+            buf.clear();
+            a->processBlock(buf, midi);
+            if (pos >= 4 * kBlock) energy[9] += buf.getRMSLevel(9, 0, kBlock) / 16.0;
+        }
+        CHECK(energy[9] > 0.03);
+        CHECK(energy[9] < 0.3);
+        a->setTestNoise(-1);
+        for (int pos = 0; pos < 20 * kBlock; pos += kBlock) { ph.pos = pos; buf.clear(); a->processBlock(buf, midi); }
+        CHECK(buf.getRMSLevel(9, 0, kBlock) == 0.0f);
+    }
 }
 
 TEST_CASE("In a room with objects, ray tracing runs on a worker in real time and in line during a bounce") {

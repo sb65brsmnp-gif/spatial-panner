@@ -115,7 +115,7 @@ public:
                                return std::nullopt;
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing", "resize"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing", "resize", "testSpeaker"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -204,13 +204,32 @@ private:
         }
         if (name == "info") {
             json tracks = json::array();
-            for (const auto& t : proc_.hostTracks()) tracks.push_back({{"id", t.id}, {"name", t.name}});
+            // The editor's tick is the one reader of the meters (reading resets
+            // the peaks), so this does not take them.
+            for (const auto& t : proc_.hostTracks(false)) tracks.push_back({{"id", t.id}, {"name", t.name}});
             const auto out = proc_.getBus(false, 0) ? proc_.getBus(false, 0)->getCurrentLayout() : juce::AudioChannelSet::stereo();
+            // What this instance renders to: the bus's channels and, in
+            // Speakers mode, the speakers (the bus's own, or the scene's custom
+            // layout on the bus channels its speakers name, 1-based).
+            const sp::SpeakerLayout layout = proc_.effectiveLayout();
+            const std::vector<int> route = proc_.effectiveRoute();
+            const bool binaural = out == juce::AudioChannelSet::stereo() && !proc_.stereoAsSpeakers();
+            json speakers = json::array();
+            if (!binaural)
+                for (int i = 0; i < layout.numChannels(); ++i) {
+                    const auto& k = layout.speakers[static_cast<size_t>(i)];
+                    speakers.push_back({{"name", k.name}, {"azimuth", k.azimuthDeg}, {"elevation", k.elevationDeg}, {"distance", k.distance},
+                                        {"lfe", k.lfe}, {"trim_db", k.trimDb}, {"delay_ms", k.delayMs},
+                                        {"channel", (i < static_cast<int>(route.size()) ? route[static_cast<size_t>(i)] : i) + 1}});
+                }
+            json channels = json::array();
+            for (int c = 0; c < out.size(); ++c) channels.push_back(juce::AudioChannelSet::getAbbreviatedChannelTypeName(out.getTypeOfChannel(c)).toStdString());
             done(json{{"device", juce::PluginHostType().getHostDescription()},
                       {"sampleRate", proc_.getSampleRate()},
                       {"outputChannels", out.size()},
                       {"cpu", proc_.cpuLoad()},
-                      {"output", {{"mode", "binaural"}, {"layout", "7.1.4"}}},
+                      {"output", {{"mode", binaural ? "binaural" : "speakers"}, {"layout", binaural ? "stereo" : layout.name}, {"speakers", speakers},
+                                  {"channels", channels}, {"bass", json::parse(layout.toJson())["bass"]}}},
                       {"status", proc_.statusText().toStdString()},
                       {"host", "plugin"},
                       {"steamAudio", sp::Renderer::steamAudioAvailable()},
@@ -229,6 +248,13 @@ private:
 #if JUCE_MAC
             setTextEditing(a.value("on", false));
 #endif
+            done(json{{"ok", true}}.dump());
+            return;
+        }
+        if (name == "testSpeaker") {
+            // Pink noise on one bus channel (1-based; 0 = off) while the host
+            // runs this instance (Logic: playing, or the track armed).
+            proc_.setTestNoise(a.value("channel", 0) - 1);
             done(json{{"ok", true}}.dump());
             return;
         }

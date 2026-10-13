@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "LayerPathHistory.h"
 #include "ListenerTimeline.h"
@@ -28,6 +29,10 @@ struct EngineConfig {
     int maxBlock = 512;
     sp::OutputMode mode = sp::OutputMode::Binaural;
     sp::SpeakerLayout layout;   // Speakers mode
+    // Speakers mode: the host bus channel each renderer output plays on
+    // (empty = output c on channel c). The processor applies it; it is here
+    // so a change of routing counts as a change of configuration.
+    std::vector<int> route;
     bool render = true;         // false: only the listener timeline (a scene instance that passes audio through)
     std::string hrtfPath;
     // Offline bounce: Steam Audio simulates in line with the audio so every

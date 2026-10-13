@@ -328,3 +328,38 @@ TEST_CASE("Stereo geometry: offsets and ends round trip") {
     s.layers = {a, b};
     CHECK(inputChannels(s) == 3);
 }
+
+TEST_CASE("Speakers: a custom layout's trim and distance alignment shape each feed") {
+    Scene s = freeFieldScene();
+    Layer l;
+    l.position = {0, 1.6f, -2};   // dead ahead
+    s.layers.push_back(l);
+    // Two front speakers at +-30 degrees, both fed equally by a centre
+    // source; the left one 1 m nearer (so it is delayed and turned down),
+    // the right one trimmed by -6 dB.
+    SpeakerLayout custom;
+    custom.name = "custom";
+    Speaker a, b;
+    a.name = "L"; a.azimuthDeg = 30; a.distance = 2;
+    b.name = "R"; b.azimuthDeg = -30; b.distance = 3; b.trimDb = -6;
+    custom.speakers = {a, b};
+    RenderConfig cfg;
+    cfg.mode = OutputMode::Speakers;
+    cfg.layout = custom;
+    const int n = 24000;
+    const auto in = noise(n);
+    auto r = render(s, cfg, {in}, n);
+    REQUIRE(r.out.size() == 2);
+    const double eL = energy(r.out[0], 4800), eR = energy(r.out[1], 4800);
+    // Left: 2/3 of the far distance -> 20 log10(2/3) = -3.5 dB; right: -6 dB.
+    CHECK(10 * std::log10(eL / eR) == Approx(-3.52 + 6.0).margin(0.6));
+    // The left feed arrives (3 - 2) / 343 s = 140 samples after the right one.
+    double best = 0;
+    int bestLag = 0;
+    for (int lag = 0; lag < 300; ++lag) {
+        double c = 0;
+        for (int i = 4800; i + lag < n; ++i) c += r.out[0][i + lag] * r.out[1][i];
+        if (c > best) { best = c; bestLag = lag; }
+    }
+    CHECK(bestLag == Approx(140).margin(2));
+}

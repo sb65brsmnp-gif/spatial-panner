@@ -79,12 +79,17 @@ public:
     bool readScene(uint64_t& revision, std::string& json) const;
 
     // ---- layer slots
+    enum SlotFlags : uint32_t {
+        kSlotHasPlayhead = 1u << 0,   // the host handed the instance a timeline position (a track in a DAW, not a validator)
+    };
     struct LayerInfo {
         int slot = -1;
         std::string id, name, cloneOf;
         int channels = 1;      // the track's input channels: 1 (mono), 2 (stereo), 4 (quad: a first-order Ambisonic layer), up to 16
+        uint32_t flags = 0;    // SlotFlags
         float meterPeak = 0;
         uint64_t heartbeatMs = 0;
+        bool hasPlayhead() const { return (flags & kSlotHasPlayhead) != 0; }
     };
     // Claims a slot for `id`. If another live instance already uses `id`
     // (a duplicated track), returns -1 so the caller picks a new id.
@@ -94,6 +99,7 @@ public:
     void heartbeatSlot(int slot, uint64_t token);
     void setSlotName(int slot, uint64_t token, const std::string& name);
     void setSlotChannels(int slot, uint64_t token, int channels);
+    void setSlotFlags(int slot, uint64_t token, uint32_t flags);
     void addMeter(int slot, float peak);      // audio thread; peak hold until read
     std::vector<LayerInfo> liveLayers(uint64_t staleMs = 5000, bool takeMeters = true) const;
     bool idInUse(const std::string& id, uint64_t exceptToken, uint64_t staleMs = 5000) const;

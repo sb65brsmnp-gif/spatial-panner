@@ -236,9 +236,41 @@ export interface EnvironmentDoc {
   air_absorption: boolean;
 }
 
+// A loudspeaker of the output layout, placed around the listener's head:
+// azimuth in degrees (0 ahead, positive to the left), elevation (positive
+// up), distance in metres (0: equidistant, nothing to align). `channel` is
+// the 1-based output it plays on: a device output in the app, a bus channel
+// in the plugin. Trim and delay are added to the distance alignment the
+// engine computes (engine/include/sp/SpeakerLayout.h).
+export interface SpeakerDoc {
+  name: string;
+  azimuth: number;
+  elevation: number;
+  distance: number;
+  channel: number;
+  lfe?: boolean;
+  trim_db?: number;
+  delay_ms?: number;
+}
+
+export type BassFilter = 'butterworth12' | 'butterworth24' | 'lr24' | 'lr48';
+export const BASS_FILTERS: BassFilter[] = ['butterworth12', 'butterworth24', 'lr24', 'lr48'];
+export const BASS_FILTER_NAMES: Record<BassFilter, string> = {
+  butterworth12: 'Butterworth 12 dB/oct', butterworth24: 'Butterworth 24 dB/oct', lr24: 'Linkwitz-Riley 24 dB/oct', lr48: 'Linkwitz-Riley 48 dB/oct',
+};
+// Bass management: the lows below the cutoff leave every speaker and go to
+// the subwoofer(s) instead.
+export interface BassDoc { enabled: boolean; cutoff_hz: number; filter: BassFilter; sub_gain_db: number }
+export function defaultBass(): BassDoc { return { enabled: false, cutoff_hz: 80, filter: 'lr24', sub_gain_db: 0 }; }
+
+export type OutputModeDoc = 'binaural' | 'speakers' | 'ambix';
+// `speakers` set: the scene's own layout (a preset placed in the space, or
+// edited from one); unset: the preset `layout`, equidistant.
+export interface OutputDoc { mode: OutputModeDoc; layout: string; speakers?: SpeakerDoc[]; bass?: BassDoc }
+
 export interface EditorMeta {
   draw_height?: number;
-  output?: { mode: 'binaural' | 'speakers' | 'ambix'; layout: string };
+  output?: OutputDoc;
 }
 
 export interface SceneDoc {
@@ -258,6 +290,67 @@ export const MATERIALS = [
 ];
 
 export const LAYOUTS = ['stereo', 'quad', '5.1', '7.1', '5.1.4', '7.1.4', '9.1.6'];
+
+// The engine's presets (engine/src/SpeakerLayout.cpp), in its channel order:
+// [name, azimuth, elevation, subwoofer].
+type PresetSpeaker = [string, number, number, boolean?];
+const FRONT: PresetSpeaker[] = [['L', 30, 0], ['R', -30, 0], ['C', 0, 0], ['LFE', 0, 0, true]];
+export const SPEAKER_PRESETS: Record<string, PresetSpeaker[]> = {
+  stereo: [['L', 30, 0], ['R', -30, 0]],
+  quad: [['L', 45, 0], ['R', -45, 0], ['Ls', 135, 0], ['Rs', -135, 0]],
+  '5.1': [...FRONT, ['Ls', 110, 0], ['Rs', -110, 0]],
+  '7.1': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0]],
+  '5.1.4': [...FRONT, ['Ls', 110, 0], ['Rs', -110, 0], ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+  '7.1.4': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0], ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+  '9.1.6': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0], ['Lw', 60, 0], ['Rw', -60, 0],
+    ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltm', 90, 55], ['Rtm', -90, 55], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+};
+// Where a preset's speakers are placed when they appear in the space.
+export const SPEAKER_DISTANCE = 2;
+
+// A preset's speakers placed `distance` metres from the head, each on the
+// output of its position in the layout (1-based), as the layout played
+// before speakers could be placed.
+export function presetSpeakers(layout: string, distance = SPEAKER_DISTANCE): SpeakerDoc[] {
+  const p = SPEAKER_PRESETS[layout] ?? SPEAKER_PRESETS['7.1.4'];
+  return p.map(([name, azimuth, elevation, lfe], i) => {
+    // A subwoofer's place does not matter to the sound; drawn low and a
+    // little to the left so it does not sit on the centre speaker.
+    const s: SpeakerDoc = lfe ? { name, azimuth: 15, elevation: -25, distance, channel: i + 1, lfe: true }
+      : { name, azimuth, elevation, distance, channel: i + 1 };
+    return s;
+  });
+}
+
+// The speakers an output setting plays through (the placed ones, else the
+// preset's); none in binaural or Ambisonic mode.
+export function outputSpeakers(out: OutputDoc | undefined): SpeakerDoc[] {
+  if (!out || out.mode !== 'speakers') return [];
+  return out.speakers?.length ? out.speakers : presetSpeakers(out.layout);
+}
+
+// Head-local axes, as the engine's: Y up, -Z ahead, +X to the right.
+// Azimuth is positive to the left (the engine's fromSpherical).
+export function speakerLocal(s: SpeakerDoc, drawDistance = SPEAKER_DISTANCE): V3 {
+  const d = s.distance > 0 ? s.distance : drawDistance;
+  const az = s.azimuth * Math.PI / 180, el = s.elevation * Math.PI / 180;
+  return [-d * Math.cos(el) * Math.sin(az), d * Math.sin(el), -d * Math.cos(el) * Math.cos(az)];
+}
+
+export function sphericalOf(v: V3): { azimuth: number; elevation: number; distance: number } {
+  const d = Math.hypot(v[0], v[1], v[2]);
+  if (d < 1e-6) return { azimuth: 0, elevation: 0, distance: 0 };
+  return {
+    azimuth: Math.atan2(-v[0], -v[2]) * 180 / Math.PI,
+    elevation: Math.asin(Math.max(-1, Math.min(1, v[1] / d))) * 180 / Math.PI,
+    distance: d,
+  };
+}
+
+// The output channels a speaker list needs (its highest channel).
+export function speakerChannelsNeeded(speakers: SpeakerDoc[]): number {
+  return speakers.reduce((n, s) => Math.max(n, s.channel), 0);
+}
 
 const PALETTE = ['#4f9cf9', '#f97f4f', '#5fd38d', '#e05fd3', '#f2c94c', '#56ccf2', '#eb5757', '#9b8cff',
   '#6fcf97', '#f2994a', '#bb6bd9', '#2fd1c5'];

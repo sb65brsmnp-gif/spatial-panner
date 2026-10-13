@@ -15,9 +15,13 @@ bool sameLayout(const sp::SpeakerLayout& a, const sp::SpeakerLayout& b) {
     for (size_t i = 0; i < a.speakers.size(); ++i) {
         const auto& x = a.speakers[i];
         const auto& y = b.speakers[i];
-        if (x.azimuthDeg != y.azimuthDeg || x.elevationDeg != y.elevationDeg || x.lfe != y.lfe || x.distance != y.distance) return false;
+        if (x.azimuthDeg != y.azimuthDeg || x.elevationDeg != y.elevationDeg || x.lfe != y.lfe || x.distance != y.distance ||
+            x.trimDb != y.trimDb || x.delayMs != y.delayMs || x.channel != y.channel)
+            return false;
     }
-    return true;
+    const auto& p = a.bass;
+    const auto& q = b.bass;
+    return p.enabled == q.enabled && p.cutoffHz == q.cutoffHz && p.filter == q.filter && p.subGainDb == q.subGainDb;
 }
 
 // Delay-line headroom so layers and paths can be moved while editing (and by
@@ -85,7 +89,7 @@ juce::ThreadPool& buildPool() {
 
 bool EngineConfig::operator==(const EngineConfig& o) const {
     return sampleRate == o.sampleRate && maxBlock == o.maxBlock && mode == o.mode && render == o.render &&
-           hrtfPath == o.hrtfPath && offline == o.offline &&
+           hrtfPath == o.hrtfPath && offline == o.offline && route == o.route &&
            (mode != sp::OutputMode::Speakers || sameLayout(layout, o.layout));
 }
 

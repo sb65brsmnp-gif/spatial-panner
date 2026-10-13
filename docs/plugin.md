@@ -170,12 +170,37 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
 
    On layer tracks, the window shows a small map of the scene with that
    track's layer highlighted.
+   * **Layers appearing on their own ("Layer N").** Every instance of the
+     plug-in on the machine shares one session file, and the scene turns
+     any live instance into a layer. `auval` (which Logic runs on a newly
+     installed build) and Logic's plug-in scan instantiate the plug-in for
+     many seconds with no track name and no playhead, and those instances
+     became unnamed stereo layers. An instance now becomes a layer only
+     once its host has given it a timeline position (`processBlock` with a
+     playhead), which only a track does. Every slot claim, role decision
+     and adoption (or refusal) is appended to
+     `~/Library/Logs/Spatial Panner/tracks.log` with the process and host
+     that made it. Layers whose track is gone are marked "(no track)";
+     *Remove layers without a track* on the Layers tab takes them all out.
 4. **Output.** Binaural or speakers is decided by each track's output format:
    * A stereo track renders binaural. The header's output menu can switch it
      to plain stereo speakers instead.
    * A surround track renders its own layout: quad, 5.0/5.1, 6.x, 7.x, and
      the height formats up to 7.1.4, 7.1.6, 9.1.4 and 9.1.6.
-   * The LFE channel stays silent.
+   * The LFE channel stays silent, unless the scene's bass management sends
+     the lows there.
+   * **Placed speakers.** The editor's Output tab can place a layout in the
+     space instead (a preset, then dragged or typed into place, with trims,
+     delays and bass management, as in the app; see docs/editor.md). Each
+     speaker names the **bus channel** it plays on. Every surround track
+     running Spatial Panner then renders to those speakers on those
+     channels, leaving out a speaker whose channel the track does not have,
+     and plays nothing on the other channels; the track's own format only
+     sets how many channels there are. Logic's I/O Assignments (the track's
+     Output in the Mixer, or the Audio preferences) route the bus channels
+     to the interface. *Test* on a speaker plays pink noise on that channel
+     of the scene track's own output while Logic runs the plug-in. Without
+     placed speakers the view shows the scene track's bus layout.
 5. **Bounce** with **File > Bounce**. Every track renders its own layer
    offline, and the result matches playback.
 

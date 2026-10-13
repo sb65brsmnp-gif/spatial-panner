@@ -690,6 +690,84 @@ await check('a mesh room opens from its OBJ file and is drawn from the engine', 
   await page.screenshot({ path: resolve(outDir, 'lshape.png') });
 });
 
+await check('Output tab: a speaker preset puts its speakers around the listener, binaural hides them', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  await page.click('.tab[data-tab="output"]');
+  await page.waitForSelector('#sidebar select');
+  // Output: Speakers, then the 5.1 layout.
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForSelector('#sidebar .row:has-text("Layout") select');
+  await page.locator('#sidebar .row:has-text("Layout") select').selectOption('5.1');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor?.output?.speakers?.length === 6);
+  const out = await ed(() => window.spEditor.store.scene.editor.output);
+  assert(out.mode === 'speakers' && out.layout === '5.1' && out.speakers[3].lfe === true && out.speakers[5].channel === 6, JSON.stringify(out));
+  await page.waitForTimeout(200);
+  const drawn = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(drawn === 6, `speakers drawn ${drawn}`);
+  const items = await page.locator('#sidebar .speaker-item').count();
+  assert(items === 6, `list items ${items}`);
+  // L sits 2 m from the head, 30 degrees to the left: in front and to the left (-X, -Z).
+  const l = await ed(() => { const v = new (window.spEditor.view.speakerGroup.constructor)(); const m = window.spEditor.view.pickableSpeakers()[0]; m.getWorldPosition(v.position); return [v.position.x, v.position.y, v.position.z]; });
+  assert(l[0] < -0.9 && l[0] > -1.1 && l[2] < -1.6, `L at ${l}`);
+  await page.screenshot({ path: resolve(outDir, 'speakers-5-1.png') });
+  // Back to headphones: no speakers in the space.
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('binaural');
+  await page.waitForTimeout(200);
+  const after = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(after === 0, `speakers still drawn ${after}`);
+});
+
+await check('dragging a speaker in the top view changes its azimuth and distance, typed values move it', async () => {
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForFunction(() => window.spEditor.view.pickableSpeakers().length === 6);
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(100);
+  // The centre speaker (index 2) stands 2 m ahead of the head at [0, 1.7, -2]; drag it to the right and further away.
+  const from = await screen([0, 1.7, -2]);
+  const to = await screen([2, 1.7, -2]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const c = await ed(() => window.spEditor.store.scene.editor.output.speakers[2]);
+  assert(c.azimuth < -40 && c.azimuth > -50, `azimuth ${c.azimuth}`);
+  assert(Math.abs(c.distance - Math.SQRT2 * 2) < 0.15, `distance ${c.distance}`);
+  const sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'speaker' && sel.index === 2, JSON.stringify(sel));
+  const layout = await page.locator('#sidebar .row:has-text("Layout") select').inputValue();
+  assert(layout === 'custom', `layout ${layout}`);
+  // Typed distance.
+  const dist = page.locator('#sidebar .row:has-text("Distance") input');
+  await dist.fill('3.5');
+  await dist.press('Enter');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers[2].distance === 3.5);
+  // Output channel.
+  await page.locator('#sidebar .row:has-text("Output") select').last().selectOption('8');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers[2].channel === 8);
+  // Bass management appears because the preset has a subwoofer.
+  await page.waitForSelector('#sidebar .section-title:has-text("Bass management")');
+  await page.locator('#sidebar .check:has-text("Send the lows") input').check();
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.bass?.enabled === true);
+  await page.screenshot({ path: resolve(outDir, 'speaker-edit.png') });
+});
+
+await check('Settings tab: text size and label height apply to the page and the view', async () => {
+  await page.click('.tab[data-tab="settings"]');
+  await page.waitForSelector('#sidebar .section-title:has-text("Labels in the 3D view")');
+  const size = page.locator('#sidebar .row:has-text("Text size") input[type=range]');
+  await size.fill('16');
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--label-size').trim() === '16px');
+  const off = page.locator('#sidebar .row:has-text("Height above") input[type=range]');
+  await off.fill('0.8');
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.settings.labelOffset - 0.8) < 1e-6);
+  const stored = await ed(() => JSON.parse(localStorage.getItem('sp.settings')));
+  assert(stored.labelSize === 16 && Math.abs(stored.labelOffset - 0.8) < 1e-6, JSON.stringify(stored));
+  await page.click('#sidebar button:has-text("Reset to defaults")');
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--label-size').trim() === '11px');
+});
+
 if (errors.length) { failed++; console.log('Page errors:\n' + errors.join('\n')); }
 await browser.close();
 await server.close();

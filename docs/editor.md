@@ -221,10 +221,39 @@ signals (`sp-gensignals` writes `hall_ir.wav`, stereo 2.5 s, and
 or first-order ambiX, work the same way. The scene file stores the IR path
 relative to the scene, like audio.
 
-**Output**: binaural (SADIE II KU100 HRTF), speakers (stereo, quad, 5.1, 7.1,
-5.1.4, 7.1.4, 9.1.6, mapped onto the device's first outputs) or ambiX. Changes
-apply while playing. *Bounce to WAV…* renders the scene to a 24-bit WAV in the
-current output format, faster than real time.
+**Output**: binaural (SADIE II KU100 HRTF), speakers or ambiX. Changes apply
+while playing. *Bounce to WAV…* renders the scene to a 24-bit WAV in the
+current output format, faster than real time (in speaker mode one file
+channel per speaker, in the list's order).
+
+**Speakers.** Choosing a layout (stereo, quad, 5.1, 7.1, 5.1.4, 7.1.4, 9.1.6)
+puts its speakers in the 3D view, 2 m from the listener's head, each on the
+device output of its place in the layout. They are drawn in the head's frame
+and turn with it, which is how the renderer sees them: a layer plays from the
+speakers nearest its direction from the head. From there the layout is
+yours: drag a speaker to move it around the head (Shift+drag for height), or
+select it and type its azimuth (positive to the left), elevation, distance
+and which **output** it plays on; *Test* plays pink noise on that output.
+Add speakers and subwoofers, remove them (one non-subwoofer stays), set a
+*trim* and an *extra delay* per speaker. The distances align the speakers:
+a nearer speaker is delayed and turned down (by the distance ratio) so every
+speaker's sound reaches the head together, which is what a layout with an
+off-centre listening position needs; all the same distance, nothing changes.
+**Bass management** (shown once a speaker is a subwoofer): the lows below a
+crossover are taken out of every speaker and their sum goes to the
+subwoofer(s), with a Butterworth 12/24 dB/oct or Linkwitz-Riley 24/48 dB/oct
+filter and a sub level. Switching back to headphones hides the speakers;
+they come back as placed. The layout is saved in the scene file
+(`editor.output.speakers` and `editor.output.bass`), so the plug-in reads the
+same one.
+
+**Settings** tab: text size, height above the ball, background and maximum
+width of the layer labels in the 3D view, or labels on the selected layer
+only; meter width and height; the size of the balls and path points; the
+second marks along the path; name tags on speakers. These are kept in the
+browser's storage (per app or plug-in), not in the scene. Meters hold each
+peak 150 ms and fall at 30 dB/s, so a host that runs the plug-in in bursts
+does not make them flicker.
 
 Undo/redo (⌘Z / ⇧⌘Z), open (⌘O), save (⌘S / ⇧⌘S); the same in the File
 menu of the menu bar, with **Open Recent** (the last 10 scenes opened or

@@ -6,18 +6,23 @@
 // sp-scene tool for analysis and simulates the transport, so the editor can
 // be developed and tested without the app.
 import type { Analysis, AudioInfo } from '../model/store';
-import type { SceneDoc } from '../model/scene';
+import type { BassDoc, SceneDoc, SpeakerDoc } from '../model/scene';
 
 export type OutputMode = 'binaural' | 'speakers' | 'ambix';
 
-export interface OutputConfig { mode: OutputMode; layout: string }
+// What the engine plays through. `speakers`: the scene's placed layout (the
+// preset `layout` otherwise), each on its 1-based output channel.
+export interface OutputConfig { mode: OutputMode; layout: string; speakers?: SpeakerDoc[]; bass?: BassDoc }
 
 export interface EngineInfo {
   device: string;
   sampleRate: number;
   outputChannels: number;
   cpu: number;           // fraction of the audio callback budget
-  output: OutputConfig;
+  // Plugin: what this instance renders to (set by its track's bus), with the
+  // bus's channel names; `speakers` carries the bus's own positions or the
+  // scene's placed layout on the channels its speakers name.
+  output: OutputConfig & { channels?: string[] };
   status: string;        // human-readable engine state ("Playing", "Loading audio...")
   steamAudio?: boolean;  // the engine has the ray-traced room model (mesh rooms, objects)
   host?: 'plugin';
@@ -38,7 +43,7 @@ export interface Tick {
   active?: boolean;
 }
 
-export interface BounceRequest { mode: OutputMode; layout: string; start: number; end: number; sampleRate: number }
+export interface BounceRequest extends OutputConfig { start: number; end: number; sampleRate: number }
 // Progress of a running bounce; `done` with or without `error` at the end.
 export interface BounceEvent { path: string; progress?: number; done?: boolean; error?: string }
 
@@ -56,6 +61,10 @@ export interface Backend {
   // the page area (CSS pixels); the plug-in clamps it to its limits.
   resize(width: number, height: number): Promise<void>;
   setOutput(out: OutputConfig): Promise<{ ok: boolean; error?: string }>;
+  // Pink noise at -20 dBFS on one output channel (1-based; 0 stops it): the
+  // device output in the app, this track's bus channel in the plugin (heard
+  // while the host runs the plug-in).
+  testSpeaker(channel: number): Promise<void>;
   info(): Promise<EngineInfo>;
   // The native open dialog for audio files (several); `title` names the ask.
   chooseAudioFiles(title?: string): Promise<AudioInfo[]>;
@@ -141,6 +150,7 @@ class AppBackend implements Backend {
   async editing(on: boolean) { await this.call('editing', { on }); }
   async resize(width: number, height: number) { await this.call('resize', { width: Math.round(width), height: Math.round(height) }); }
   setOutput(out: OutputConfig) { return this.call<{ ok: boolean; error?: string }>('setOutput', out); }
+  async testSpeaker(channel: number) { await this.call('testSpeaker', { channel }); }
   info() { return this.call<EngineInfo>('info'); }
   async chooseAudioFiles(title?: string) { return (await this.call<AudioInfo[]>('chooseAudioFiles', title ? { title } : {})) ?? []; }
   chooseFile(title: string, wildcard: string) { return this.call<{ path: string; name: string } | null>('chooseFile', { title, wildcard }); }
@@ -229,6 +239,7 @@ class DevBackend implements Backend {
   }
   async resize() { /* the browser window is the user's to size */ }
   async setOutput(out: OutputConfig) { this.output = out; return { ok: true }; }
+  async testSpeaker(_channel: number) { /* no audio in the preview */ }
   async info(): Promise<EngineInfo> {
     return { device: 'Browser preview (no audio)', sampleRate: 48000, outputChannels: 2, cpu: 0, output: this.output, status: 'Preview' };
   }

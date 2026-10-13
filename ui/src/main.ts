@@ -11,6 +11,8 @@ import { Toolbar } from './panels/toolbar';
 import { Sidebar } from './panels/sidebar';
 import { Timeline, transportKeyAction } from './panels/timeline';
 import { el, fmtTime } from './panels/dom';
+import { applySettingsToPage, loadSettings, saveSettings, type Settings } from './model/settings';
+import { MeterBallistics } from './model/meters';
 
 const backend = createBackend();
 const plugin = backend.kind === 'plugin';
@@ -26,6 +28,20 @@ const vp = new Viewport(viewportEl);
 const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
 let follow = false;
+store.plugin = plugin;
+
+// Display settings (Settings tab): the page's CSS variables and the view.
+let settings: Settings = loadSettings();
+function applySettings(s: Settings): void {
+  settings = s;
+  applySettingsToPage(s);
+  view.applySettings(s);
+  saveSettings(s);
+  store.emit('output');
+}
+applySettingsToPage(settings);
+view.settings = { ...settings };
+const settingsHost = { get: () => settings, set: (s: Settings) => applySettings(s) };
 
 async function newScene(): Promise<void> {
   if (plugin) {
@@ -49,7 +65,7 @@ const toolbar = new Toolbar(tools, plugin, {
   home: () => homeView(),
   toggleFollow: () => { follow = !follow; refreshToolbar(); },
 });
-const sidebar = new Sidebar(store, backend, tools);
+const sidebar = new Sidebar(store, backend, tools, settingsHost);
 const timeline = new Timeline(store, backend);
 tools.blockDelete = () => timeline.keyFocused;
 
@@ -201,6 +217,9 @@ async function requestAudioInfo(): Promise<void> {
   }
 }
 
+// Peaks arrive as "since the last read": hold and fall, so bursty hosts do
+// not make the meters flicker.
+const meterBallistics = new MeterBallistics();
 backend.onTick((t) => {
   const wasPlaying = store.playing;
   const host = !!t.host;
@@ -210,7 +229,7 @@ backend.onTick((t) => {
   store.playing = t.playing;
   if (t.playing || wasPlaying || host) store.time = t.time;
   store.livePose = t.pose ?? null;
-  if (t.meters) { store.meters = t.meters; store.emit('meters'); }
+  if (t.meters) { store.meters = meterBallistics.update(t.meters, performance.now()); store.emit('meters'); }
   // The host's automation turns the head even while the playhead stands.
   if (t.playing || wasPlaying !== t.playing || moved || host) store.emit('time');
   if (wasPlaying !== t.playing) store.emit('transport');
@@ -220,9 +239,31 @@ backend.onSceneReplaced((doc) => store.replace(mergeEditorKeys(doc, doc)));
 window.addEventListener('sp-message', (e) => { const d = (e as CustomEvent).detail; toast(d.text, d.level); });
 
 async function refreshInfo(): Promise<void> {
-  try { sidebar.info = await backend.info(); sidebar.render(); } catch { /* app not ready */ }
+  try {
+    const info = await backend.info();
+    sidebar.info = info;
+    if (plugin) {
+      // What this track renders to: the speakers drawn when the scene has
+      // placed none, and the bus channel names for the Output tab.
+      const next = JSON.stringify(info.output);
+      if (next !== JSON.stringify(store.hostOutput)) { store.hostOutput = JSON.parse(next); store.emit('output'); }
+    }
+    sidebar.render();
+  } catch { /* app not ready */ }
 }
 setInterval(refreshInfo, 2000);
+
+// The app's engine follows the scene's output setting (mode, layout, placed
+// speakers, bass management); the plug-in reads it from the document.
+let sentOutput = '';
+function syncOutput(): void {
+  if (plugin) return;
+  const out = store.scene.editor?.output ?? { mode: 'binaural' as const, layout: '7.1.4' };
+  const text = JSON.stringify(out);
+  if (text === sentOutput) return;
+  sentOutput = text;
+  backend.setOutput(out).then((r) => { if (r && !r.ok && r.error) toast(r.error, 'error'); }).catch(() => { /* no native side */ });
+}
 
 store.subscribe((kinds) => {
   if (kinds.has('scene')) {
@@ -240,8 +281,9 @@ store.subscribe((kinds) => {
   // A mesh room is drawn from the analysis, which arrives after the scene.
   if (kinds.has('analysis') && store.scene.room.type === 'mesh') view.rebuildRoom();
   if (kinds.has('meters')) view.updateMeters();
-  if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
+  if (kinds.has('file') || kinds.has('scene')) syncOutput();
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
+  if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updateSpeakers();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
   if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();

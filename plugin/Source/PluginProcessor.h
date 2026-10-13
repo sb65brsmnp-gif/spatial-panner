@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -83,7 +84,16 @@ public:
     void clearAutomationHistory();
 
     struct HostTrack { std::string id, name; float meterDb = -120; };
-    std::vector<HostTrack> hostTracks();   // live layer instances (meters read and reset)
+    // Live layer instances. `takeMeters`: read and reset their peak meters
+    // (one reader only, the editor's tick; another reader would steal peaks).
+    std::vector<HostTrack> hostTracks(bool takeMeters = true);
+    // What this instance renders to: the host bus's layout, or the scene's
+    // custom layout on the bus channels its speakers name (channelOf).
+    sp::SpeakerLayout effectiveLayout() const { return engineConfig().layout; }
+    std::vector<int> effectiveRoute() const;
+    // Speaker test: pink noise at -20 dBFS on one bus channel (0-based) of
+    // this instance's output while the host runs it; -1 for none.
+    void setTestNoise(int busChannel) { testChannel_.store(busChannel); }
     const std::string& layerId() const { return layerId_; }
     LayerFile& fileForTesting() { return file_; }
 
@@ -103,7 +113,10 @@ public:
     static void setSessionPathForTesting(const std::string& path);
     // How long a live layer slot must have existed before the scene turns it
     // into a layer (named / unnamed), in ms; the defaults are 1000 and 5000.
-    static void setAdoptDelaysForTesting(int namedMs, int unnamedMs);
+    // `requirePlayhead`: only an instance the host has given a timeline
+    // position becomes a layer (the default outside tests; auval and
+    // Logic's plugin scan have none).
+    static void setAdoptDelaysForTesting(int namedMs, int unnamedMs, bool requirePlayhead = false);
     void tickForTesting() { timerCallback(); }
     LayerEngine& engineForTesting() { return engine_; }
     juce::AudioProcessorValueTreeState& parametersForTesting() { return params_; }
@@ -121,6 +134,10 @@ private:
     void publish();
     void reconfigureEngine();
     EngineConfig engineConfig() const;
+    void addTestNoise(juce::AudioBuffer<float>& buffer);
+    // ~/Library/Logs/Spatial Panner/tracks.log: every slot this instance
+    // claims and every layer the scene adopts, with the host and process.
+    void logTrack(const char* what, const std::string& detail);
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
     juce::AudioProcessorValueTreeState params_;
@@ -142,6 +159,9 @@ private:
     uint64_t seenRevision_ = 0;
     uint32_t seenGeneration_ = 0;
     std::map<std::string, uint32_t> seenSince_;   // scene: live layer ids and when each was first seen
+    std::map<std::string, bool> adoptLogged_;     // scene: slots whose adoption (or refusal) was logged
+    std::string customLayoutText_;                // the scene's custom speaker layout (toJson), empty for none
+    bool slotPlayheadFlag_ = false;               // the playhead flag as last written to the slot
     bool needsPublish_ = false;
     juce::String status_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);   // for callAsync from host threads
@@ -155,6 +175,14 @@ private:
     // simulates Steam Audio asynchronously: the next block waits for the
     // offline renderer so the bounce is deterministic.
     std::atomic<bool> awaitOfflineProgram_{false};
+    std::atomic<bool> sawPlayhead_{false};      // the host gave a timeline position at least once
+    // Speakers mode: bus channel of each renderer output (-1 = none), set
+    // on reconfigure; a block in flight may see the previous mapping.
+    std::array<std::atomic<int>, LayerEngine::kMaxOutputs> routeForAudio_{};
+    std::atomic<int> testChannel_{-1};
+    float testGain_ = 0;
+    float pinkState_[3] = {0, 0, 0};
+    uint32_t noiseSeed_ = 22222;
     std::atomic<float> docLevelGain_{1.0f}, docDoppler_{1.0f}, docSpread_{0.0f};
     std::atomic<int> docChannels_{1};   // the layer's channels in the scene document
     // An Ambisonic layer the plugin plays from a file (more channels than
@@ -172,6 +200,7 @@ private:
     juce::int64 expected_ = -1;
     juce::int64 freeRun_ = 0;
     std::vector<std::vector<float>> in_;   // copies of the layer's input channels (the outputs overwrite the buffer)
+    std::vector<float> scratch_;           // a renderer output the bus has no channel for
     int slotChannels_ = 0;
     std::atomic<double> lastTime_{0};
     std::atomic<bool> lastPlaying_{false};

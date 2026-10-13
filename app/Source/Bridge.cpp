@@ -32,6 +32,27 @@ std::string modeName(sp::OutputMode m) {
     return m == sp::OutputMode::Speakers ? "speakers" : m == sp::OutputMode::Ambisonics ? "ambix" : "binaural";
 }
 
+// The editor's output setting: {"mode", "layout", "speakers"?: [...], "bass"?: {...}}.
+// A speaker list makes a custom layout (checked here; the error names what
+// is wrong); without one the named preset plays.
+OutputSetup outputFrom(const json& a, std::string& error) {
+    OutputSetup o;
+    o.mode = modeFrom(a.value("mode", "binaural"));
+    o.layout = juce::String(a.value("layout", "7.1.4"));
+    if (a.contains("speakers") && a["speakers"].is_array() && !a["speakers"].empty()) {
+        json custom{{"name", o.layout.toStdString()}, {"speakers", a["speakers"]}};
+        if (a.contains("bass")) custom["bass"] = a["bass"];
+        try {
+            o.custom = sp::SpeakerLayout::fromJson(custom.dump()).toJson();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    } else if (sp::SpeakerLayout::preset(o.layout.toStdString()).numChannels() == 0) {
+        error = "Unknown speaker layout " + o.layout.toStdString();
+    }
+    return o;
+}
+
 // Audio paths are absolute in the editor and relative to the scene file on
 // disk (so scenes can move with their audio, and sp-render reads them too).
 void resolveAudioPath(json& a, const juce::File& dir) {
@@ -179,11 +200,16 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         return "";
     }
     if (name == "setOutput") {
-        OutputSetup o;
-        o.mode = modeFrom(a.value("mode", "binaural"));
-        o.layout = juce::String(a.value("layout", "7.1.4"));
-        if (sp::SpeakerLayout::preset(o.layout.toStdString()).numChannels() == 0) return err("Unknown speaker layout " + o.layout.toStdString());
+        std::string e;
+        const OutputSetup o = outputFrom(a, e);
+        if (!e.empty()) return err(e);
         session_.setOutput(o);
+        return json{{"ok", true}}.dump();
+    }
+    if (name == "testSpeaker") {
+        // {"channel": 1-based device output, 0 = off}
+        const int ch = a.value("channel", 0);
+        session_.setTestNoise(ch >= 1 ? ch - 1 : -1);
         return json{{"ok", true}}.dump();
     }
     if (name == "info") {
@@ -242,7 +268,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
 juce::WebBrowserComponent::Options Bridge::addTo(juce::WebBrowserComponent::Options o) {
     const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                            "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile",
-                           "recentScenes", "clearRecentScenes", "openScenePath"};
+                           "recentScenes", "clearRecentScenes", "openScenePath", "testSpeaker"};
     for (const char* n : names) {
         const std::string name = n;
         o = o.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args, Completion done) {
@@ -401,9 +427,9 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
 // events, which is what tells the user where the file is.
 void Bridge::bounce(const std::string& arg, std::function<void(std::string)> done) {
     const json a = json::parse(arg);
-    OutputSetup o;
-    o.mode = modeFrom(a.value("mode", "binaural"));
-    o.layout = juce::String(a.value("layout", "7.1.4"));
+    std::string e;
+    const OutputSetup o = outputFrom(a, e);
+    if (!e.empty()) { done(json{{"nativeError", e}}.dump()); return; }
     const double start = a.value("start", 0.0), end = a.value("end", 30.0), rate = a.value("sampleRate", 48000.0);
     if (session_.bouncing()) { done(json{{"nativeError", "A bounce is already running"}}.dump()); return; }
     const juce::String suffix = o.mode == sp::OutputMode::Binaural ? "binaural" : o.mode == sp::OutputMode::Ambisonics ? "ambix" : o.layout;

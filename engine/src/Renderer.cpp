@@ -8,6 +8,7 @@
 #include "dsp/AirAbsorption.h"
 #include "dsp/Ambisonics.h"
 #include "dsp/Convolver.h"
+#include "dsp/Crossover.h"
 #include "dsp/DelayLine.h"
 #include "dsp/Fdn.h"
 #include "dsp/Fft.h"
@@ -286,6 +287,8 @@ struct Renderer::Impl {
     std::vector<SimpleDelay> speakerDelays;
     std::vector<float> speakerDelaySamples, speakerGains;
     bool speakerCompensation = false;
+    BassCrossover crossover;            // bass management (custom layouts)
+    std::vector<float*> speakerBlocks;  // outBlock per channel, for the crossover
 
     std::vector<Voice> voices;        // point emitters (mono layers, stereo ends)
     std::vector<FieldVoice> fields;   // Ambisonic layers
@@ -395,21 +398,29 @@ Renderer::Impl::Impl(const Scene& s, const RenderConfig& c, double dur) : scene(
     } else if (cfg.mode == OutputMode::Speakers) {
         vbap.init(cfg.layout, cfg.vbapResolutionDeg, 0.0f);
         ambiDecoder.init(cfg.layout, order);
-        // Distance compensation when the layout declares distances.
+        // Speaker alignment when the layout declares distances, trims or
+        // delays: the farthest speaker is the reference; a nearer one is
+        // delayed by the difference in travel time and turned down by the
+        // distance ratio, so every speaker's sound arrives together at the
+        // same level. Trims and delays are added on top.
         float maxD = 0;
         for (const auto& spk : cfg.layout.speakers) maxD = std::max(maxD, spk.distance);
-        speakerCompensation = maxD > 0;
+        speakerCompensation = cfg.layout.needsAlignment();
         if (speakerCompensation) {
             speakerDelays.resize(nOut);
             speakerDelaySamples.resize(nOut);
             speakerGains.resize(nOut);
             for (int i = 0; i < nOut; ++i) {
-                const float d = cfg.layout.speakers[i].distance > 0 ? cfg.layout.speakers[i].distance : maxD;
-                speakerDelaySamples[i] = (maxD - d) / speedOfSound * fs;
-                speakerGains[i] = d / maxD;
+                const Speaker& spk = cfg.layout.speakers[static_cast<size_t>(i)];
+                const float d = spk.distance > 0 ? spk.distance : maxD;
+                const float align = maxD > 0 ? (maxD - d) / speedOfSound * fs : 0.0f;
+                speakerDelaySamples[i] = align + std::max(0.0f, spk.delayMs) * 0.001f * fs;
+                speakerGains[i] = (maxD > 0 ? d / maxD : 1.0f) * dbToGain(spk.trimDb);
                 speakerDelays[i].init(static_cast<int>(speakerDelaySamples[i]) + 2);
             }
         }
+        crossover.init(cfg.layout, fs);
+        speakerBlocks.resize(static_cast<size_t>(nOut));
     }
 
     maxDistance = cfg.maxDistance > 0 ? cfg.maxDistance : estimateMaxDistance(scene, poses, duration, listenerControls);
@@ -1275,6 +1286,10 @@ void Renderer::Impl::renderSubBlock(double time) {
                 for (int i = 0; i < B; ++i) o[i] += w * b[i];
             }
         }
+        if (crossover.active()) {
+            for (int ch = 0; ch < nOut; ++ch) speakerBlocks[static_cast<size_t>(ch)] = outBlock.data() + static_cast<size_t>(ch) * B;
+            crossover.process(speakerBlocks.data(), nOut, B);
+        }
         if (speakerCompensation) {
             for (int ch = 0; ch < nOut; ++ch) {
                 float* o = outBlock.data() + static_cast<size_t>(ch) * B;
@@ -1307,6 +1322,7 @@ void Renderer::Impl::resetState() {
         f.haveMatrix = false;
     }
     for (auto& b : busIn) b.clear();
+    crossover.reset();
     if (fdnEnabled) fdn.reset();
     if (useIr) irReverb.reset();
 #ifdef SP_HAVE_STEAM_AUDIO

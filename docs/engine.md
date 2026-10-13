@@ -201,7 +201,16 @@ counter-clockwise from the front, elevation up) at its boundary
   path). `SampledPath` and `SampledSpeed` are the arc-length and
   speed-integral tables behind it.
 * `SpeakerLayout.h` : presets `stereo quad 5.1 7.1 5.1.4 7.1.4 9.1.6`, or a
-  custom list of speakers (azimuth, elevation, distance, LFE flag).
+  custom list of speakers (azimuth, elevation, distance, LFE flag, trim,
+  extra delay, output channel) with bass management settings; `fromJson` /
+  `toJson` carry the editor's `editor.output` form. In Speakers mode the
+  renderer aligns the feeds by distance (delay `(maxD - d) / c`, gain
+  `d / maxD`, plus the trim and delay) and, with bass management on, runs
+  the crossover (`dsp/Crossover.h`: per speaker a highpass kept in the
+  feed and a lowpass summed to every LFE speaker; Butterworth 12/24 or
+  Linkwitz-Riley 24/48 dB/oct) on the decoded speaker feeds before the
+  alignment. `channelOf(i)` is the output channel a speaker plays on; the
+  renderer writes speakers in list order and the app / plug-in route them.
 * `Renderer.h` : the renderer, `ReflectionsBackend`, `SteamAudioSettings`,
   `Renderer::steamAudioAvailable()`.
 

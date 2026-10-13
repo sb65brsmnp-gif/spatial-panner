@@ -1,15 +1,23 @@
 // Right-hand panel: Layers, Path & listener, Room, Output.
 import type { Store } from '../model/store';
 import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoom, layerHome, isStereo, isAmbisonic, ambisonicOrder, channelsForFile, layerExtras, AMBISONIC_CHANNELS,
-  LAYOUTS, MATERIALS, WALLS, layerColor, hasPath, defaultLink, isSpatialized, isLinked, leadsTo, type HeadMode, type LayerDoc, type LayerTiming, type PathEnd, type SceneDoc, type V3 } from '../model/scene';
+  LAYOUTS, MATERIALS, WALLS, layerColor, hasPath, defaultLink, isSpatialized, isLinked, leadsTo, removeLayerLinks, presetSpeakers, outputSpeakers, defaultBass, speakerChannelsNeeded,
+  BASS_FILTERS, BASS_FILTER_NAMES, SPEAKER_DISTANCE,
+  type BassFilter, type HeadMode, type LayerDoc, type LayerTiming, type OutputDoc, type PathEnd, type SceneDoc, type SpeakerDoc, type V3 } from '../model/scene';
+import { placedSpeakers } from '../view/interaction';
+import { DEFAULT_SETTINGS, type LabelMode, type Settings } from '../model/settings';
 import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
 import { speedArrival } from '../model/scene';
 import { getPoint, isHandle, deletePoint, movePoint } from '../model/geometry';
-import type { Backend, BounceEvent, EngineInfo, OutputMode } from '../bridge/backend';
+import type { Backend, BounceEvent, EngineInfo } from '../bridge/backend';
 import type { Interaction } from '../view/interaction';
 import { checkbox, el, fmtTime, numberInput, resetOnOptionClick, row, section, select, slider, vec3Inputs } from './dom';
 
-type Tab = 'layers' | 'path' | 'room' | 'output';
+type Tab = 'layers' | 'path' | 'room' | 'output' | 'settings';
+
+// The display settings (Settings tab) live outside the scene; the owner
+// applies them to the page and the 3D view.
+export interface SettingsHost { get(): Settings; set(s: Settings): void }
 
 // Defaults that Option-click on a control returns to.
 const D = defaultLayer(0);
@@ -42,10 +50,13 @@ export class Sidebar {
   private fitStart: number | null = null;
   private fitEnd: number | null = null;
 
-  constructor(private store: Store, private backend: Backend, private tools: Interaction) {
+  // Speaker test: the output channel playing noise (0: none).
+  private testing = 0;
+
+  constructor(private store: Store, private backend: Backend, private tools: Interaction, private settingsHost: SettingsHost | null = null) {
     this.root = el('div', { id: 'sidebar' });
     const tabBar = el('div', { class: 'tabs' });
-    const names: [Tab, string][] = [['layers', 'Layers'], ['path', 'Path & head'], ['room', 'Room'], ['output', 'Output']];
+    const names: [Tab, string][] = [['layers', 'Layers'], ['path', 'Path & head'], ['room', 'Room'], ['output', 'Output'], ['settings', 'Settings']];
     for (const [t, label] of names) {
       const b = el('button', { class: 'tab', 'data-tab': t }, label);
       b.addEventListener('click', () => this.setTab(t));
@@ -66,7 +77,7 @@ export class Sidebar {
 
     store.subscribe((kinds) => {
       if (kinds.has('meters')) this.updateMeters();
-      if (kinds.has('scene') || kinds.has('selection') || kinds.has('analysis') || kinds.has('file') || kinds.has('tool')) this.render();
+      if (kinds.has('scene') || kinds.has('selection') || kinds.has('analysis') || kinds.has('file') || kinds.has('tool') || kinds.has('output')) this.render();
     });
     this.setTab('layers');
     backend.onBounce((e) => this.onBounce(e));
@@ -110,6 +121,7 @@ export class Sidebar {
       case 'path': this.renderPath(); break;
       case 'room': this.renderRoom(); break;
       case 'output': this.renderOutput(); break;
+      case 'settings': this.renderSettings(); break;
     }
     this.body.scrollTop = scroll;
   }
@@ -129,7 +141,8 @@ export class Sidebar {
         + `|${[...this.fitOut].join(',')}|${this.fitStart}|${this.fitEnd}`;
       case 'room': return base + JSON.stringify(s.room) + JSON.stringify(s.environment)
         + (s.room.impulse_response ? JSON.stringify(this.store.audioInfo.get(s.room.impulse_response.file) ?? null) : '');
-      case 'output': return base + JSON.stringify(s.editor) + JSON.stringify(this.info);
+      case 'output': return base + JSON.stringify(s.editor) + JSON.stringify(this.info) + `|${this.testing}|${JSON.stringify(this.store.hostOutput)}`;
+      case 'settings': return base + JSON.stringify(this.settingsHost?.get() ?? null);
     }
   }
 
@@ -153,6 +166,17 @@ export class Sidebar {
         ? 'Each track running Spatial Panner plays its layer. Drag layers in the 3D view to place them.'
           + (strays ? ' A layer marked "no track" has no running track: select it and press Remove layer if it is not wanted.' : '')
         : 'Insert Spatial Panner on a track to add it here as a layer. Each track plays its own layer.'));
+      if (strays > 0 && this.info?.tracks) {
+        const rm = el('button', { class: 'btn danger' }, strays === 1 ? 'Remove the layer without a track' : `Remove ${strays} layers without a track`);
+        rm.title = 'Removes every layer no running track plays. Tracks that are only muted or frozen still run their plug-in, so their layers stay.';
+        rm.addEventListener('click', () => {
+          this.upd((sc) => {
+            for (let i = sc.layers.length - 1; i >= 0; --i) if (!this.trackName(sc.layers[i].host_id)) removeLayerAt(sc, i);
+          });
+          this.store.select({ kind: 'none' });
+        });
+        this.body.append(el('div', { class: 'btn-row' }, rm));
+      }
       if (!s.layers.length) return;
     } else {
       const add = el('button', { class: 'btn primary' }, 'Add audio files…');
@@ -781,27 +805,46 @@ export class Sidebar {
 
   // -------------------------------------------------------------- output
 
+  // The scene's output: binaural, speakers (a preset, or speakers placed
+  // around the listener) or Ambisonics. The engine is told by main.ts when
+  // editor.output changes.
+  private output(): OutputDoc { return this.store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' }; }
+
+  private setOutput(fn: (o: OutputDoc) => void, key?: string): void {
+    this.upd((sc) => {
+      const o: OutputDoc = sc.editor?.output ? { ...sc.editor.output } : { mode: 'binaural', layout: '7.1.4' };
+      fn(o);
+      sc.editor = { ...sc.editor, output: o };
+    }, key);
+  }
+
   private renderOutput(): void {
     if (this.plugin) { this.renderPluginOutput(); return; }
-    const out = this.store.scene.editor?.output ?? { mode: 'binaural' as OutputMode, layout: '7.1.4' };
-    const setOut = (mode: OutputMode, layout: string) => {
-      this.upd((sc) => { sc.editor = { ...sc.editor, output: { mode, layout } }; });
-      this.backend.setOutput({ mode, layout }).then((r) => { if (!r.ok && r.error) this.flash(r.error); });
-    };
+    const out = this.output();
     const info = this.info;
     const settings = el('button', { class: 'btn' }, 'Audio device…');
     settings.addEventListener('click', () => this.backend.showAudioSettings());
-    const needed = out.mode === 'binaural' ? 2 : out.mode === 'ambix' ? 16 : layoutChannels(out.layout);
+    const speakers = outputSpeakers(out);
+    const needed = out.mode === 'binaural' ? 2 : out.mode === 'ambix' ? 16 : speakerChannelsNeeded(speakers);
+    const layoutValue = out.speakers?.length ? (LAYOUTS.includes(out.layout) && samePreset(out.speakers, out.layout) ? out.layout : 'custom') : out.layout;
     this.body.append(section('Listen through',
-      row('Output', select(['binaural', 'speakers', 'ambix'], out.mode, (v) => setOut(v as OutputMode, out.layout),
+      row('Output', select(['binaural', 'speakers', 'ambix'], out.mode, (v) => this.setOutput((o) => { o.mode = v as OutputDoc['mode']; }),
         { binaural: 'Headphones (binaural)', speakers: 'Speakers', ambix: 'Ambisonics (ambiX, 3rd order)' }, 'binaural')),
-      out.mode === 'speakers' ? row('Layout', select(LAYOUTS, out.layout, (v) => setOut('speakers', v), {}, '7.1.4')) : '',
+      out.mode === 'speakers' ? row('Layout', select([...LAYOUTS, 'custom'], layoutValue, (v) => this.setOutput((o) => {
+        // A preset puts its speakers in the space, 2 m from the head, each
+        // on the output of its place in the layout.
+        if (v === 'custom') { o.layout = 'custom'; if (!o.speakers?.length) o.speakers = presetSpeakers(out.layout); return; }
+        o.layout = v;
+        o.speakers = presetSpeakers(v);
+      }), { custom: 'Custom' }, '7.1.4')) : '',
       el('p', { class: 'muted' }, out.mode === 'binaural' ? 'Uses the SADIE II KU100 head (HRTF). Wear headphones.'
-        : `Needs ${needed} output channels, sent to outputs 1–${needed} in ${out.mode === 'ambix' ? 'ACN/SN3D order' : 'the layout\'s order'}.`),
-      info && info.outputChannels < needed ? el('p', { class: 'warn-text' }, `The current device has ${info.outputChannels} outputs; only the first ${info.outputChannels} channels will play.`) : '',
+        : out.mode === 'ambix' ? 'Needs 16 output channels, sent to outputs 1–16 in ACN/SN3D order.'
+        : `Each speaker plays on the output chosen below (outputs up to ${needed} in use).`),
+      info && info.outputChannels < needed ? el('p', { class: 'warn-text' }, `The current device has ${info.outputChannels} outputs; speakers on higher outputs will not be heard.`) : '',
       el('div', { class: 'btn-row' }, settings),
       info ? el('p', { class: 'muted' }, `${info.device} · ${(info.sampleRate / 1000).toFixed(1)} kHz · ${info.outputChannels} outputs · ${info.status}`) : '',
     ));
+    if (out.mode === 'speakers') this.renderSpeakers(speakers, info?.outputChannels ?? 0, null);
 
     const end = this.bounceTo ?? this.store.duration;
     const rate = this.bounceRate ?? info?.sampleRate ?? 48000;
@@ -811,7 +854,7 @@ export class Sidebar {
     bounce.disabled = running;
     bounce.addEventListener('click', async () => {
       try {
-        await this.backend.bounce({ mode: out.mode, layout: out.layout, start: this.bounceFrom, end, sampleRate: rate });
+        await this.backend.bounce({ ...out, start: this.bounceFrom, end, sampleRate: rate });
       } catch (e) {
         this.flash(String(e instanceof Error ? e.message : e), 'error');
       }
@@ -835,7 +878,8 @@ export class Sidebar {
         numberInput(end, (v) => { this.bounceTo = v === this.store.duration ? null : Math.max(0, v); }, { step: 1, width: 64, def: this.store.duration }), 's'),
       row('Sample rate', select(['44100', '48000', '88200', '96000'], String(rate), (v) => { this.bounceRate = parseInt(v, 10); }, {},
         String(info?.sampleRate ?? 48000))),
-      el('p', { class: 'muted' }, 'Renders offline with the output setting above: binaural stereo, the speaker layout, or ambiX.'),
+      el('p', { class: 'muted' }, out.mode === 'speakers' ? 'Renders offline through the speaker layout above, one file channel per speaker in the list\'s order (not the outputs chosen).'
+        : 'Renders offline with the output setting above: binaural stereo or ambiX.'),
       el('div', { class: 'btn-row' }, bounce),
       status,
     ));
@@ -843,11 +887,182 @@ export class Sidebar {
 
   private renderPluginOutput(): void {
     const info = this.info;
+    const out = this.output();
+    const host = this.store.hostOutput;
+    const busNames = host?.channels ?? info?.output.channels ?? [];
+    const placed = !!out.speakers?.length;
+    const layoutValue = placed ? (LAYOUTS.includes(out.layout) && samePreset(out.speakers!, out.layout) ? out.layout : 'custom') : 'track';
     this.body.append(section('Listen through',
-      el('p', { class: 'muted' }, 'Each track sets its own output. On a stereo track Spatial Panner renders binaural for headphones '
-        + '(or plain stereo speakers, chosen in the plugin header); on a surround track it renders that track\'s speaker layout, up to 7.1.4.'),
+      el('p', { class: 'muted' }, 'Each track sets its own output from its channel format. A stereo track renders binaural for headphones '
+        + '(or plain stereo speakers, chosen in the plugin header); a surround track renders to speakers.'),
+      info ? el('p', { class: 'muted' }, `This track: ${busNames.length ? `${busNames.length} channels (${busNames.join(' ')})` : 'stereo'}`
+        + ` · ${host?.mode === 'speakers' ? `speakers, ${host.layout}` : 'binaural'}`) : '',
+      row('Speakers', select(['track', ...LAYOUTS, 'custom'], layoutValue, (v) => this.setOutput((o) => {
+        if (v === 'track') { delete o.speakers; return; }
+        if (v === 'custom') { o.layout = 'custom'; if (!o.speakers?.length) o.speakers = (host?.speakers?.length ? host.speakers : presetSpeakers('7.1.4')).map((x) => ({ ...x })); return; }
+        o.layout = v;
+        o.speakers = presetSpeakers(v);
+      }), { track: 'Each track\'s own format', custom: 'Custom' }, 'track')),
+      el('p', { class: 'muted' }, placed
+        ? 'These speakers play on every surround track running Spatial Panner, each on the bus channel chosen below (a speaker on a channel the track does not have is left out). '
+          + 'Logic\'s I/O Assignments (the track\'s Output) route bus channels to your interface.'
+        : 'Pick a layout to place speakers in the space and choose which bus channel each one plays on, or leave each track to its own format.'),
       el('p', { class: 'muted' }, 'To bounce, use File > Bounce in Logic: every track renders its own layer and the mix sums them.'),
-      info ? el('p', { class: 'muted' }, `${info.device} · ${(info.sampleRate / 1000).toFixed(1)} kHz · ${info.status}`) : '',
+    ));
+    const shown = this.store.speakersShown();
+    if (shown.length) this.renderSpeakers(shown, Math.max(busNames.length, 16), busNames);
+  }
+
+  // The speaker list and the selected speaker's fields, shared by the app
+  // (`outputs`: the device's outputs) and the plug-in (`busNames`: this
+  // track's bus channels, more channels allowed for other tracks).
+  private renderSpeakers(speakers: SpeakerDoc[], outputs: number, busNames: string[] | null): void {
+    const sel = this.store.selection;
+    const selected = sel.kind === 'speaker' ? sel.index : -1;
+    const placed = this.store.speakersPlaced();
+    const list = el('div', { class: 'speaker-list' });
+    speakers.forEach((sp, i) => {
+      const item = el('div', { class: 'speaker-item' + (selected === i ? ' selected' : '') });
+      const where = `${fmtDeg(sp.azimuth)} · ${fmtDeg(sp.elevation)} · ${sp.distance > 0 ? `${sp.distance.toFixed(2)} m` : 'equidistant'}`;
+      item.append(el('span', {}, sp.name || `Speaker ${i + 1}`, sp.lfe ? el('span', { class: 'sub-tag' }, 'SUB') : ''),
+        el('span', { class: 'where' }, where), el('span', { class: 'ch' }, `out ${sp.channel}`));
+      item.addEventListener('click', () => this.store.select({ kind: 'speaker', index: i }));
+      list.append(item);
+    });
+    const add = el('button', { class: 'btn' }, 'Add speaker');
+    add.addEventListener('click', () => {
+      this.upd((sc) => {
+        const arr = placedSpeakers(sc, this.store.speakersShown());
+        const used = new Set(arr.map((x) => x.channel));
+        let ch = 1;
+        while (used.has(ch)) ch++;
+        arr.push({ name: `Spk ${arr.length + 1}`, azimuth: 0, elevation: 0, distance: SPEAKER_DISTANCE, channel: ch });
+        if (sc.editor?.output) sc.editor.output.layout = 'custom';
+      });
+      this.store.select({ kind: 'speaker', index: speakers.length });
+    });
+    const addSub = el('button', { class: 'btn' }, 'Add subwoofer');
+    addSub.addEventListener('click', () => {
+      this.upd((sc) => {
+        const arr = placedSpeakers(sc, this.store.speakersShown());
+        const used = new Set(arr.map((x) => x.channel));
+        let ch = 1;
+        while (used.has(ch)) ch++;
+        arr.push({ name: 'Sub', azimuth: 0, elevation: 0, distance: SPEAKER_DISTANCE, channel: ch, lfe: true });
+        if (sc.editor?.output) sc.editor.output.layout = 'custom';
+      });
+      this.store.select({ kind: 'speaker', index: speakers.length });
+    });
+    const equal = el('button', { class: 'btn' }, 'Same distance for all');
+    equal.title = 'Sets every speaker to the distance of the selected one (or 2 m): nothing to align.';
+    equal.addEventListener('click', () => this.upd((sc) => {
+      const arr = placedSpeakers(sc, this.store.speakersShown());
+      const d = selected >= 0 && arr[selected] ? arr[selected].distance : SPEAKER_DISTANCE;
+      for (const x of arr) x.distance = d;
+    }));
+    this.body.append(section('Speakers',
+      el('p', { class: 'muted' }, (placed ? '' : 'The preset\'s positions, shown 2 m from the head. ')
+        + 'Drag a speaker in the 3D view to move it around the head (Shift+drag for height), or type its angles and distance. '
+        + 'Distances align the speakers: a nearer speaker is delayed and turned down so every speaker\'s sound reaches the listener together; '
+        + 'all the same distance, nothing changes.'),
+      list,
+      el('div', { class: 'btn-row' }, add, addSub, equal),
+    ));
+    if (selected >= 0 && speakers[selected]) this.renderSpeakerDetails(speakers, selected, outputs, busNames);
+    this.renderBass(speakers);
+  }
+
+  private renderSpeakerDetails(speakers: SpeakerDoc[], i: number, outputs: number, busNames: string[] | null): void {
+    const sp = speakers[i];
+    const u = (fn: (x: SpeakerDoc) => void, key?: string) => this.upd((sc) => {
+      const arr = placedSpeakers(sc, this.store.speakersShown());
+      if (arr[i]) fn(arr[i]);
+      // Edited by hand: the layout is its own now.
+      if (sc.editor?.output && LAYOUTS.includes(sc.editor.output.layout) && !samePreset(arr, sc.editor.output.layout)) sc.editor.output.layout = 'custom';
+    }, key ? `${key}-spk-${i}` : undefined);
+    const nameIn = el('input', { type: 'text', class: 'text' });
+    nameIn.value = sp.name;
+    nameIn.addEventListener('change', () => u((x) => { x.name = nameIn.value; }));
+    const nOut = Math.max(outputs, sp.channel, 16);
+    const chOptions: string[] = [];
+    const chLabels: Record<string, string> = {};
+    for (let c = 1; c <= nOut; ++c) {
+      chOptions.push(String(c));
+      const bus = busNames && busNames[c - 1];
+      chLabels[String(c)] = bus ? `${c} (${bus})` : busNames && c > busNames.length ? `${c} (not on this track)` : `Output ${c}`;
+    }
+    const test = el('button', { class: 'btn' + (this.testing === sp.channel ? ' on' : '') }, this.testing === sp.channel ? 'Stop test' : 'Test');
+    test.title = this.plugin ? 'Pink noise on this bus channel while Logic runs the plug-in (playing, or the track armed).' : 'Pink noise (-20 dBFS) on this output.';
+    test.addEventListener('click', () => {
+      this.testing = this.testing === sp.channel ? 0 : sp.channel;
+      void this.backend.testSpeaker(this.testing);
+      this.render(true);
+    });
+    const remove = el('button', { class: 'btn danger' }, 'Remove speaker');
+    remove.disabled = !sp.lfe && speakers.filter((x) => !x.lfe).length <= 1;
+    remove.addEventListener('click', () => { this.tools.deleteSelection(); });
+    this.body.append(section(`Speaker: ${sp.name || `Speaker ${i + 1}`}`,
+      row('Name', nameIn),
+      row('Azimuth', numberInput(sp.azimuth, (v) => u((x) => { x.azimuth = wrapDeg(v); }), { step: 1, min: -180, max: 180, def: 0 }), '°  (+ left)'),
+      row('Elevation', numberInput(sp.elevation, (v) => u((x) => { x.elevation = v; }), { step: 1, min: -90, max: 90, def: 0 }), '°  (+ up)'),
+      row('Distance', numberInput(sp.distance, (v) => u((x) => { x.distance = v; }), { step: 0.1, min: 0, max: 50, def: SPEAKER_DISTANCE }), 'm'),
+      row('Output', select(chOptions, String(sp.channel), (v) => u((x) => { x.channel = parseInt(v, 10); }), chLabels), test),
+      row('Trim', numberInput(sp.trim_db ?? 0, (v) => u((x) => { x.trim_db = v; }), { step: 0.5, min: -60, max: 20, def: 0 }), 'dB'),
+      row('Extra delay', numberInput(sp.delay_ms ?? 0, (v) => u((x) => { x.delay_ms = v; }), { step: 0.1, min: 0, max: 500, def: 0 }), 'ms'),
+      row('', checkbox(!!sp.lfe, (v) => u((x) => { if (v) x.lfe = true; else delete x.lfe; }), 'Subwoofer (plays the bass below, not positions)')),
+      el('p', { class: 'muted' }, 'Trim and extra delay add to the distance alignment, for a speaker that measures louder or later than its distance says.'),
+      el('div', { class: 'btn-row' }, remove),
+    ));
+  }
+
+  private renderBass(speakers: SpeakerDoc[]): void {
+    const subs = speakers.filter((x) => x.lfe).length;
+    const b = this.output().bass ?? defaultBass();
+    const u = (fn: (x: typeof b) => void) => this.setOutput((o) => { o.bass = { ...(o.bass ?? defaultBass()) }; fn(o.bass); });
+    if (!subs) {
+      this.body.append(section('Bass management', el('p', { class: 'muted' }, 'Add a subwoofer (or tick Subwoofer on a speaker) to send the lows of every speaker to it.')));
+      return;
+    }
+    this.body.append(section('Bass management',
+      row('', checkbox(b.enabled, (v) => u((x) => { x.enabled = v; }), 'Send the lows to the subwoofer' + (subs > 1 ? 's' : ''))),
+      row('Crossover', numberInput(b.cutoff_hz, (v) => u((x) => { x.cutoff_hz = v; }), { step: 5, min: 20, max: 500, def: 80 }), 'Hz'),
+      row('Filter', select(BASS_FILTERS, b.filter, (v) => u((x) => { x.filter = v as BassFilter; }), BASS_FILTER_NAMES, 'lr24')),
+      row('Sub level', numberInput(b.sub_gain_db, (v) => u((x) => { x.sub_gain_db = v; }), { step: 0.5, min: -30, max: 20, def: 0 }), 'dB'),
+      el('p', { class: 'muted' }, 'Below the crossover the speakers are filtered out and their sum plays from the subwoofer. '
+        + 'Linkwitz-Riley sums flat at the crossover; Butterworth is a plain filter of that steepness.'),
+    ));
+  }
+
+  // ------------------------------------------------------------ settings
+
+  private renderSettings(): void {
+    const host = this.settingsHost;
+    if (!host) { this.body.append(el('p', { class: 'hint' }, 'No display settings here.')); return; }
+    const s = host.get();
+    const set = (fn: (x: Settings) => void) => { const n = { ...host.get() }; fn(n); host.set(n); };
+    const reset = el('button', { class: 'btn' }, 'Reset to defaults');
+    reset.addEventListener('click', () => { host.set({ ...DEFAULT_SETTINGS }); this.render(true); });
+    const pct = (v: number) => `${Math.round(v * 100)}%`;
+    this.body.append(section('Labels in the 3D view',
+      el('p', { class: 'settings-note' }, 'The name and meter over each layer\'s ball.'),
+      row('Show', select(['always', 'selected', 'off'], s.labelMode, (v) => set((x) => { x.labelMode = v as LabelMode; }),
+        { always: 'On every layer', selected: 'On the selected layer only', off: 'Never' }, 'always')),
+      row('Text size', slider(s.labelSize, 8, 20, 1, (v) => set((x) => { x.labelSize = v; }), (v) => `${v} px`, undefined, DEFAULT_SETTINGS.labelSize)),
+      row('Height above', slider(s.labelOffset, 0, 1.5, 0.05, (v) => set((x) => { x.labelOffset = v; }), (v) => `${v.toFixed(2)} m`, undefined, DEFAULT_SETTINGS.labelOffset)),
+      row('Background', slider(s.labelOpacity, 0, 1, 0.05, (v) => set((x) => { x.labelOpacity = v; }), pct, undefined, DEFAULT_SETTINGS.labelOpacity)),
+      row('Max width', slider(s.labelMaxWidth, 60, 400, 10, (v) => set((x) => { x.labelMaxWidth = v; }), (v) => `${v} px`, undefined, DEFAULT_SETTINGS.labelMaxWidth)),
+      row('', checkbox(s.speakerLabels, (v) => set((x) => { x.speakerLabels = v; }), 'Name tags on speakers', true)),
+    ));
+    this.body.append(section('Meters',
+      row('Width (list)', slider(s.meterWidth, 30, 200, 5, (v) => set((x) => { x.meterWidth = v; }), (v) => `${v} px`, undefined, DEFAULT_SETTINGS.meterWidth)),
+      row('Height', slider(s.meterHeight, 2, 12, 1, (v) => set((x) => { x.meterHeight = v; }), (v) => `${v} px`, undefined, DEFAULT_SETTINGS.meterHeight)),
+      el('p', { class: 'settings-note' }, 'Meters hold each peak briefly and fall at 30 dB/s.'),
+    ));
+    this.body.append(section('Points',
+      row('Dot size', slider(s.dotSize, 0.5, 2, 0.05, (v) => set((x) => { x.dotSize = v; }), (v) => `${v.toFixed(2)}×`, undefined, DEFAULT_SETTINGS.dotSize)),
+      row('', checkbox(s.timeDots, (v) => set((x) => { x.timeDots = v; }), 'Second marks along the listener\'s path', true)),
+      el('p', { class: 'settings-note' }, 'Layer balls, path points and the second marks scale together.'),
+      el('div', { class: 'btn-row' }, reset),
     ));
   }
 
@@ -860,8 +1075,33 @@ function toolName(t: string): string {
   return ({ freehand: 'freehand tool', polyline: 'point-to-point tool', curve: 'curve tool (click points, Enter to finish)', pen: 'pen tool', shape: 'shape tool' } as Record<string, string>)[t] ?? 'tool';
 }
 
-function layoutChannels(name: string): number {
-  return ({ stereo: 2, quad: 4, '5.1': 6, '7.1': 8, '5.1.4': 10, '7.1.4': 12, '9.1.6': 16 } as Record<string, number>)[name] ?? 2;
+function fmtDeg(v: number): string { return `${Math.round(v * 10) / 10}°`; }
+
+function wrapDeg(v: number): number {
+  let d = v % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return Math.round(d * 10) / 10;
+}
+
+// Whether `speakers` are the preset as placed (same names, angles, outputs,
+// one distance), so the Layout menu can still show the preset's name.
+function samePreset(speakers: SpeakerDoc[], layout: string): boolean {
+  const p = presetSpeakers(layout, speakers[0]?.distance ?? SPEAKER_DISTANCE);
+  if (p.length !== speakers.length) return false;
+  return p.every((a, i) => {
+    const b = speakers[i];
+    return a.name === b.name && a.azimuth === b.azimuth && a.elevation === b.elevation && a.channel === b.channel && !!a.lfe === !!b.lfe
+      && a.distance === b.distance && !(b.trim_db ?? 0) && !(b.delay_ms ?? 0);
+  });
+}
+
+// Removes layer i and everything that pointed at it (links, look-at).
+function removeLayerAt(sc: SceneDoc, i: number): void {
+  sc.layers.splice(i, 1);
+  removeLayerLinks(sc.layers, i);
+  if (sc.listener.head.look_at_layer === i) sc.listener.head.look_at_layer = -1;
+  else if (sc.listener.head.look_at_layer > i) sc.listener.head.look_at_layer--;
 }
 
 function meshNote(mesh: unknown, steam: boolean | undefined): string {
