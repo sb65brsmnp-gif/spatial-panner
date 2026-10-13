@@ -173,7 +173,7 @@ describe('the preview pan probe', () => {
     const speakers = presetSpeakers('5.1');
     const g = approxPanGains({ output: { speakers }, points: [[0, 0, -1], [0, 0, -2]] });
     expect(Math.abs(g[0][2])).toBeLessThan(1.5);
-    expect(g[0][0]).toBeLessThan(g[0][2] - 10);
+    expect(g[0][0]).toBeLessThan(g[0][2] - 8);   // cos(30°)^8 puts L about 10 dB under C
     expect(g[1][2] - g[0][2]).toBeCloseTo(-6.02, 1);
     expect(g[0][3]).toBe(-120);   // LFE
     const pinned = approxPanGains({ output: { speakers }, points: [[0, 0, -1]], pins: [{ position: [0, 0, -1], radius: 0.5, gains_db: [PIN_OFF, 0, PIN_OFF, PIN_OFF, PIN_OFF, PIN_OFF] }] });
