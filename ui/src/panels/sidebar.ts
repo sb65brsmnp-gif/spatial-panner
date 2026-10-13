@@ -5,6 +5,7 @@ import { defaultLayer, defaultStereo, defaultAmbisonic, defaultScene, defaultRoo
   BASS_FILTERS, BASS_FILTER_NAMES, SPEAKER_DISTANCE,
   type BassFilter, type HeadMode, type LayerDoc, type LayerTiming, type OutputDoc, type PathEnd, type SceneDoc, type SpeakerDoc, type V3 } from '../model/scene';
 import { placedSpeakers } from '../view/interaction';
+import { pairedWith, pairSpeakers, unpairSpeaker, moveSpeakerBy } from '../model/scene';
 import { DEFAULT_SETTINGS, type LabelMode, type Settings } from '../model/settings';
 import { fitTiming, fittableLayers, layerArrival, layerOfPath, layerPathLength, layerStart, listenerPathLength, removePath } from '../model/layerMotion';
 import { speedArrival } from '../model/scene';
@@ -56,7 +57,7 @@ export class Sidebar {
   constructor(private store: Store, private backend: Backend, private tools: Interaction, private settingsHost: SettingsHost | null = null) {
     this.root = el('div', { id: 'sidebar' });
     const tabBar = el('div', { class: 'tabs' });
-    const names: [Tab, string][] = [['layers', 'Layers'], ['path', 'Path & head'], ['room', 'Room'], ['output', 'Output'], ['settings', 'Settings']];
+    const names: [Tab, string][] = [['layers', 'Layers'], ['path', 'Path'], ['room', 'Room'], ['output', 'Output'], ['settings', 'Settings']];
     for (const [t, label] of names) {
       const b = el('button', { class: 'tab', 'data-tab': t }, label);
       b.addEventListener('click', () => this.setTab(t));
@@ -197,7 +198,7 @@ export class Sidebar {
     const sel = this.store.selection;
     const selLayer = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
     s.layers.forEach((l, i) => {
-      const item = el('div', { class: 'layer-item' + (selLayer === i ? ' selected' : '') });
+      const item = el('div', { class: 'layer-item' + (selLayer === i || this.store.isLayerSelected(i) ? ' selected' : '') });
       const color = el('input', { type: 'color', class: 'swatch' });
       color.value = l.color ?? '#4f9cf9';
       color.addEventListener('input', () => this.upd((sc) => { sc.layers[i].color = color.value; }, `color-${i}`));
@@ -218,13 +219,17 @@ export class Sidebar {
       const missing = l.audio && this.store.audioInfo.get(l.audio)?.error;
       item.append(el('div', { class: 'layer-top' }, color, name, missing ? el('span', { class: 'warn', title: missing }, '⚠') : '', mute, solo),
         el('div', { class: 'layer-bottom' }, level, meter));
-      item.addEventListener('click', () => this.store.select({ kind: 'layer', index: i }));
+      item.addEventListener('click', (e) => { if (e.metaKey || e.shiftKey) this.store.toggleSelected('layer', i); else this.store.select({ kind: 'layer', index: i }); });
       list.append(item);
     });
     this.body.append(list);
     this.updateMeters();
-    if (selLayer >= 0 && s.layers[selLayer]) this.renderLayerDetails(selLayer);
-    else this.body.append(el('p', { class: 'hint' }, 'Select a layer (here or in the 3D view) to edit it. Drag layers in the view; Shift+drag changes height.'));
+    const group = this.store.selectedLayers();
+    if (sel.kind === 'multi') {
+      this.body.append(el('p', { class: 'hint' }, `${group.length} layer${group.length === 1 ? '' : 's'} selected${this.store.selectedSpeakers().length ? ` (and ${this.store.selectedSpeakers().length} speakers)` : ''}: `
+        + 'drag one in the 3D view to move them together; Delete removes them. Cmd+click adds or removes one, Cmd+drag on empty space draws a box.'));
+    } else if (selLayer >= 0 && s.layers[selLayer]) this.renderLayerDetails(selLayer);
+    else this.body.append(el('p', { class: 'hint' }, 'Select a layer (here or in the 3D view) to edit it. Drag layers in the view; Shift+drag changes height. Cmd+click selects several.'));
   }
 
   private renderLayerDetails(i: number): void {
@@ -826,14 +831,15 @@ export class Sidebar {
     settings.addEventListener('click', () => this.backend.showAudioSettings());
     const speakers = outputSpeakers(out);
     const needed = out.mode === 'binaural' ? 2 : out.mode === 'ambix' ? 16 : speakerChannelsNeeded(speakers);
-    const layoutValue = out.speakers?.length ? (LAYOUTS.includes(out.layout) && samePreset(out.speakers, out.layout) ? out.layout : 'custom') : out.layout;
+    const layoutValue = Array.isArray(out.speakers) ? (LAYOUTS.includes(out.layout) && out.speakers.length && samePreset(out.speakers, out.layout) ? out.layout : 'custom') : out.layout;
     this.body.append(section('Listen through',
       row('Output', select(['binaural', 'speakers', 'ambix'], out.mode, (v) => this.setOutput((o) => { o.mode = v as OutputDoc['mode']; }),
         { binaural: 'Headphones (binaural)', speakers: 'Speakers', ambix: 'Ambisonics (ambiX, 3rd order)' }, 'binaural')),
       out.mode === 'speakers' ? row('Layout', select([...LAYOUTS, 'custom'], layoutValue, (v) => this.setOutput((o) => {
         // A preset puts its speakers in the space, 2 m from the head, each
         // on the output of its place in the layout.
-        if (v === 'custom') { o.layout = 'custom'; if (!o.speakers?.length) o.speakers = presetSpeakers(out.layout); return; }
+        // Custom starts with no speakers: place your own.
+        if (v === 'custom') { o.layout = 'custom'; o.speakers = []; return; }
         o.layout = v;
         o.speakers = presetSpeakers(v);
       }), { custom: 'Custom' }, '7.1.4')) : '',
@@ -890,8 +896,8 @@ export class Sidebar {
     const out = this.output();
     const host = this.store.hostOutput;
     const busNames = host?.channels ?? info?.output.channels ?? [];
-    const placed = !!out.speakers?.length;
-    const layoutValue = placed ? (LAYOUTS.includes(out.layout) && samePreset(out.speakers!, out.layout) ? out.layout : 'custom') : 'track';
+    const placed = Array.isArray(out.speakers);
+    const layoutValue = placed ? (LAYOUTS.includes(out.layout) && out.speakers!.length && samePreset(out.speakers!, out.layout) ? out.layout : 'custom') : 'track';
     this.body.append(section('Listen through',
       el('p', { class: 'muted' }, 'Each track sets its own output from its channel format. A stereo track renders binaural for headphones '
         + '(or plain stereo speakers, chosen in the plugin header); a surround track renders to speakers.'),
@@ -899,7 +905,7 @@ export class Sidebar {
         + ` · ${host?.mode === 'speakers' ? `speakers, ${host.layout}` : 'binaural'}`) : '',
       row('Speakers', select(['track', ...LAYOUTS, 'custom'], layoutValue, (v) => this.setOutput((o) => {
         if (v === 'track') { delete o.speakers; return; }
-        if (v === 'custom') { o.layout = 'custom'; if (!o.speakers?.length) o.speakers = (host?.speakers?.length ? host.speakers : presetSpeakers('7.1.4')).map((x) => ({ ...x })); return; }
+        if (v === 'custom') { o.layout = 'custom'; o.speakers = []; return; }
         o.layout = v;
         o.speakers = presetSpeakers(v);
       }), { track: 'Each track\'s own format', custom: 'Custom' }, 'track')),
@@ -910,7 +916,7 @@ export class Sidebar {
       el('p', { class: 'muted' }, 'To bounce, use File > Bounce in Logic: every track renders its own layer and the mix sums them.'),
     ));
     const shown = this.store.speakersShown();
-    if (shown.length) this.renderSpeakers(shown, Math.max(busNames.length, 16), busNames);
+    if (shown.length || placed) this.renderSpeakers(shown, Math.max(busNames.length, 16), busNames);
   }
 
   // The speaker list and the selected speaker's fields, shared by the app
@@ -918,19 +924,32 @@ export class Sidebar {
   // track's bus channels, more channels allowed for other tracks).
   private renderSpeakers(speakers: SpeakerDoc[], outputs: number, busNames: string[] | null): void {
     const sel = this.store.selection;
+    const chosen = this.store.selectedSpeakers();
     const selected = sel.kind === 'speaker' ? sel.index : -1;
     const placed = this.store.speakersPlaced();
     const list = el('div', { class: 'speaker-list' });
     speakers.forEach((sp, i) => {
-      const item = el('div', { class: 'speaker-item' + (selected === i ? ' selected' : '') });
+      const item = el('div', { class: 'speaker-item' + (chosen.includes(i) ? ' selected' : '') });
       const where = `${fmtDeg(sp.azimuth)} · ${fmtDeg(sp.elevation)} · ${sp.distance > 0 ? `${sp.distance.toFixed(2)} m` : 'equidistant'}`;
-      item.append(el('span', {}, sp.name || `Speaker ${i + 1}`, sp.lfe ? el('span', { class: 'sub-tag' }, 'SUB') : ''),
+      const partner = pairedWith(speakers, i);
+      item.append(el('span', {}, sp.name || `Speaker ${i + 1}`, sp.lfe ? el('span', { class: 'sub-tag' }, 'SUB') : '',
+        partner >= 0 ? el('span', { class: 'pair-tag' }, `⟷ ${speakers[partner].name || `Speaker ${partner + 1}`}`) : ''),
         el('span', { class: 'where' }, where), el('span', { class: 'ch' }, `out ${sp.channel}`));
-      item.addEventListener('click', () => this.store.select({ kind: 'speaker', index: i }));
+      // Cmd+click (or Shift+click) adds to the selection, as in the 3D view.
+      item.addEventListener('click', (e) => { if (e.metaKey || e.shiftKey) this.store.toggleSelected('speaker', i); else this.store.select({ kind: 'speaker', index: i }); });
       list.append(item);
     });
+    if (!speakers.length) list.append(el('p', { class: 'hint' }, 'No speakers yet. Add speakers below and place them in the space; until then the engine plays plain stereo on outputs 1 and 2.'));
+    // Hide the speakers in the 3D view (they keep playing).
+    const host = this.settingsHost;
+    const shownIn3d = host?.get().showSpeakers ?? true;
+    const hide = el('button', { class: 'btn' + (shownIn3d ? '' : ' on') }, shownIn3d ? 'Hide speakers' : 'Show speakers');
+    hide.title = 'Shows or hides the speakers in the 3D view. Hidden speakers still play.';
+    hide.addEventListener('click', () => { if (host) { host.set({ ...host.get(), showSpeakers: !shownIn3d }); this.render(true); } });
+    // `speakers` can be the document's own array, so count before adding.
     const add = el('button', { class: 'btn' }, 'Add speaker');
     add.addEventListener('click', () => {
+      const index = speakers.length;
       this.upd((sc) => {
         const arr = placedSpeakers(sc, this.store.speakersShown());
         const used = new Set(arr.map((x) => x.channel));
@@ -939,10 +958,11 @@ export class Sidebar {
         arr.push({ name: `Spk ${arr.length + 1}`, azimuth: 0, elevation: 0, distance: SPEAKER_DISTANCE, channel: ch });
         if (sc.editor?.output) sc.editor.output.layout = 'custom';
       });
-      this.store.select({ kind: 'speaker', index: speakers.length });
+      this.store.select({ kind: 'speaker', index });
     });
     const addSub = el('button', { class: 'btn' }, 'Add subwoofer');
     addSub.addEventListener('click', () => {
+      const index = speakers.length;
       this.upd((sc) => {
         const arr = placedSpeakers(sc, this.store.speakersShown());
         const used = new Set(arr.map((x) => x.channel));
@@ -951,7 +971,7 @@ export class Sidebar {
         arr.push({ name: 'Sub', azimuth: 0, elevation: 0, distance: SPEAKER_DISTANCE, channel: ch, lfe: true });
         if (sc.editor?.output) sc.editor.output.layout = 'custom';
       });
-      this.store.select({ kind: 'speaker', index: speakers.length });
+      this.store.select({ kind: 'speaker', index });
     });
     const equal = el('button', { class: 'btn' }, 'Same distance for all');
     equal.title = 'Sets every speaker to the distance of the selected one (or 2 m): nothing to align.';
@@ -966,7 +986,8 @@ export class Sidebar {
         + 'Distances align the speakers: a nearer speaker is delayed and turned down so every speaker\'s sound reaches the listener together; '
         + 'all the same distance, nothing changes.'),
       list,
-      el('div', { class: 'btn-row' }, add, addSub, equal),
+      el('div', { class: 'btn-row' }, add, addSub, equal, hide),
+      chosen.length > 1 ? el('p', { class: 'hint' }, `${chosen.length} speakers selected: drag one in the 3D view to move them together, Delete removes them. Cmd+click in the 3D view or the list adds or removes one; Cmd+drag on empty space draws a box.`) : '',
     ));
     if (selected >= 0 && speakers[selected]) this.renderSpeakerDetails(speakers, selected, outputs, busNames);
     this.renderBass(speakers);
@@ -999,14 +1020,33 @@ export class Sidebar {
       this.render(true);
     });
     const remove = el('button', { class: 'btn danger' }, 'Remove speaker');
-    remove.disabled = !sp.lfe && speakers.filter((x) => !x.lfe).length <= 1;
     remove.addEventListener('click', () => { this.tools.deleteSelection(); });
+    // A typed angle or distance moves the stereo partner with it, like a drag.
+    const move = (dAz: number, dEl: number, dDist: number) => this.upd((sc) => {
+      const arr = placedSpeakers(sc, this.store.speakersShown());
+      if (arr[i]) moveSpeakerBy(arr, i, dAz, dEl, dDist);
+      if (sc.editor?.output && LAYOUTS.includes(sc.editor.output.layout) && !samePreset(arr, sc.editor.output.layout)) sc.editor.output.layout = 'custom';
+    });
+    const partner = pairedWith(speakers, i);
+    const pairOptions = ['none', ...speakers.map((_, k) => String(k)).filter((k) => parseInt(k, 10) !== i && !speakers[parseInt(k, 10)].lfe)];
+    const pairLabels: Record<string, string> = { none: 'Not paired' };
+    speakers.forEach((x, k) => { pairLabels[String(k)] = x.name || `Speaker ${k + 1}`; });
+    const pairSel = select(pairOptions, partner >= 0 ? String(partner) : 'none', (v) => this.upd((sc) => {
+      const arr = placedSpeakers(sc, this.store.speakersShown());
+      if (v === 'none') unpairSpeaker(arr, i);
+      else pairSpeakers(arr, i, parseInt(v, 10));
+      if (sc.editor?.output) sc.editor.output.layout = 'custom';
+    }), pairLabels, 'none');
     this.body.append(section(`Speaker: ${sp.name || `Speaker ${i + 1}`}`,
       row('Name', nameIn),
-      row('Azimuth', numberInput(sp.azimuth, (v) => u((x) => { x.azimuth = wrapDeg(v); }), { step: 1, min: -180, max: 180, def: 0 }), '°  (+ left)'),
-      row('Elevation', numberInput(sp.elevation, (v) => u((x) => { x.elevation = v; }), { step: 1, min: -90, max: 90, def: 0 }), '°  (+ up)'),
-      row('Distance', numberInput(sp.distance, (v) => u((x) => { x.distance = v; }), { step: 0.1, min: 0, max: 50, def: SPEAKER_DISTANCE }), 'm'),
+      row('Azimuth', numberInput(sp.azimuth, (v) => move(wrapDeg(v) - sp.azimuth, 0, 0), { step: 1, min: -180, max: 180, def: 0 }), '°  (+ left)'),
+      row('Elevation', numberInput(sp.elevation, (v) => move(0, v - sp.elevation, 0), { step: 1, min: -90, max: 90, def: 0 }), '°  (+ up)'),
+      row('Distance', numberInput(sp.distance, (v) => move(0, 0, v - sp.distance), { step: 0.1, min: 0, max: 50, def: SPEAKER_DISTANCE }), 'm'),
       row('Output', select(chOptions, String(sp.channel), (v) => u((x) => { x.channel = parseInt(v, 10); }), chLabels), test),
+      sp.lfe ? '' : row('Stereo pair with', pairSel),
+      sp.lfe ? '' : el('p', { class: 'muted' }, partner >= 0
+        ? `Paired with ${speakers[partner].name || `Speaker ${partner + 1}`}: the two move, turn and change distance together, keeping their 60° stereo spread.`
+        : 'Pairing sets the two 30° either side of a shared centre and moves them as one. Drag or type on either and both follow.'),
       row('Trim', numberInput(sp.trim_db ?? 0, (v) => u((x) => { x.trim_db = v; }), { step: 0.5, min: -60, max: 20, def: 0 }), 'dB'),
       row('Extra delay', numberInput(sp.delay_ms ?? 0, (v) => u((x) => { x.delay_ms = v; }), { step: 0.1, min: 0, max: 500, def: 0 }), 'ms'),
       row('', checkbox(!!sp.lfe, (v) => u((x) => { if (v) x.lfe = true; else delete x.lfe; }), 'Subwoofer (plays the bass below, not positions)')),

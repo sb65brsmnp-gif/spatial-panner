@@ -26,7 +26,10 @@ export type Selection =
   | { kind: 'layer'; index: number }
   | { kind: 'point'; path: number; ref: PointRef }
   // A speaker of the output layout (index into speakersShown()).
-  | { kind: 'speaker'; index: number };
+  | { kind: 'speaker'; index: number }
+  // Several layers and/or speakers (Cmd+click, Cmd+drag): they move and
+  // delete together.
+  | { kind: 'multi'; layers: number[]; speakers: number[] };
 
 // 'output': what the host renders to changed (plugin), or the display settings.
 export type ChangeKind = 'scene' | 'selection' | 'analysis' | 'time' | 'transport' | 'meters' | 'file' | 'tool' | 'output';
@@ -187,21 +190,63 @@ export class Store {
   speakersShown(): SpeakerDoc[] {
     const out = this.scene.editor?.output;
     if (this.plugin) {
-      if (out?.speakers?.length) return out.speakers;
+      if (Array.isArray(out?.speakers)) return out!.speakers!;
       return this.hostOutput?.mode === 'speakers' ? this.hostOutput.speakers ?? [] : [];
     }
     return outputSpeakers(out);
   }
 
-  // Whether the drawn speakers are the scene's own (editable in place) or
-  // stand in for a preset / the bus: editing one first writes them all into
-  // the scene.
-  speakersPlaced(): boolean { return !!this.scene.editor?.output?.speakers?.length; }
+  // Whether the drawn speakers are the scene's own (editable in place; a
+  // placed list may be empty) or stand in for a preset / the bus: editing
+  // one first writes them all into the scene.
+  speakersPlaced(): boolean { return Array.isArray(this.scene.editor?.output?.speakers); }
+
+  // The layers in the selection (one, or several), likewise the speakers.
+  selectedLayers(): number[] {
+    const s = this.selection;
+    if (s.kind === 'layer') return [s.index];
+    if (s.kind === 'multi') return s.layers;
+    return [];
+  }
+  selectedSpeakers(): number[] {
+    const s = this.selection;
+    if (s.kind === 'speaker') return [s.index];
+    if (s.kind === 'multi') return s.speakers;
+    return [];
+  }
+  isLayerSelected(i: number): boolean { return this.selectedLayers().includes(i); }
+  isSpeakerSelected(i: number): boolean { return this.selectedSpeakers().includes(i); }
+
+  // Adds or removes one layer or speaker from the selection (Cmd+click).
+  toggleSelected(what: 'layer' | 'speaker', index: number): void {
+    const layers = new Set(this.selectedLayers()), speakers = new Set(this.selectedSpeakers());
+    const set = what === 'layer' ? layers : speakers;
+    if (set.has(index)) set.delete(index); else set.add(index);
+    this.selectMany([...layers], [...speakers]);
+  }
+
+  // A selection of several things; one thing stays a plain selection.
+  selectMany(layers: number[], speakers: number[]): void {
+    layers = [...new Set(layers)].sort((a, b) => a - b);
+    speakers = [...new Set(speakers)].sort((a, b) => a - b);
+    if (!layers.length && !speakers.length) this.select({ kind: 'none' });
+    else if (layers.length === 1 && !speakers.length) this.select({ kind: 'layer', index: layers[0] });
+    else if (speakers.length === 1 && !layers.length) this.select({ kind: 'speaker', index: speakers[0] });
+    else this.select({ kind: 'multi', layers, speakers });
+  }
 
   private validateSelection(): void {
     const s = this.selection;
     if (s.kind === 'layer' && s.index >= this.scene.layers.length) this.selection = { kind: 'none' };
     if (s.kind === 'speaker' && s.index >= this.speakersShown().length) this.selection = { kind: 'none' };
+    if (s.kind === 'multi') {
+      const n = this.scene.layers.length, m = this.speakersShown().length;
+      const layers = s.layers.filter((i) => i < n), speakers = s.speakers.filter((i) => i < m);
+      if (layers.length !== s.layers.length || speakers.length !== s.speakers.length) {
+        if (!layers.length && !speakers.length) this.selection = { kind: 'none' };
+        else this.selection = { kind: 'multi', layers, speakers };
+      }
+    }
     if (s.kind === 'point') {
       const p = pathOf(this.scene, s.path);
       if (!p || !p.segments[s.ref.seg] || !p.segments[s.ref.seg].points[s.ref.pt]) this.selection = { kind: 'none' };

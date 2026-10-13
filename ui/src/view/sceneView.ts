@@ -8,7 +8,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, speakerLocal, type LayerDoc, type PathDoc, type SpeakerDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, speakerLocal, pairedWith, type LayerDoc, type PathDoc, type SpeakerDoc, type V3 } from '../model/scene';
 import { DEFAULT_SETTINGS, type Settings } from '../model/settings';
 import { layerOfPath, layerPathIndex } from '../model/layerMotion';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
@@ -37,7 +37,7 @@ export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
 
 // A loudspeaker of the output layout: the box, a stem to the floor and its
 // name tag. Group-local to speakerGroup, which sits on the listener's head.
-interface SpeakerObj { mesh: THREE.Mesh; stem: THREE.Line; label: CSS2DObject }
+interface SpeakerObj { mesh: THREE.Mesh; stem: THREE.Line; pairBar: THREE.Line; label: CSS2DObject }
 
 export class SceneView {
   readonly root = new THREE.Group();
@@ -241,7 +241,6 @@ export class SceneView {
   updateLayers(): void {
     const s = this.store.scene;
     if (s.layers.length !== this.layers.length) return this.rebuildLayers();
-    const sel = this.store.selection;
     const anySolo = s.layers.some((l) => l.solo);
     const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
     s.layers.forEach((l, i) => {
@@ -271,7 +270,7 @@ export class SceneView {
         o.link.computeLineDistances();
         (o.link.material as THREE.LineDashedMaterial).color.copy(color);
       }
-      const selected = sel.kind === 'layer' && sel.index === i;
+      const selected = this.store.isLayerSelected(i);
       mat.emissive.copy(selected ? color : new THREE.Color(0));
       mat.emissiveIntensity = selected ? 0.6 : 0;
       const dotScale = this.settings.dotSize;
@@ -376,15 +375,17 @@ export class SceneView {
       ch.className = 'ch';
       div.append(name, ch);
       const label = new CSS2DObject(div);
-      this.speakerGroup.add(mesh, stem, label);
-      this.speakers.push({ mesh, stem, label });
+      const pairBar = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: 0xc3ccd9, transparent: true, opacity: 0.6 }));
+      pairBar.visible = false;
+      this.speakerGroup.add(mesh, stem, pairBar, label);
+      this.speakers.push({ mesh, stem, pairBar, label });
     });
   }
 
   updateSpeakers(): void {
     const list = this.store.speakersShown();
     if (list.length !== this.speakers.length) this.rebuildSpeakers(list);
-    const sel = this.store.selection;
     // The floor, in the head's frame (which may be tilted): the room's floor
     // height taken straight down in the world.
     const floorY = this.store.scene.room.type === 'box' ? this.store.scene.room.origin[1] : 0;
@@ -402,7 +403,7 @@ export class SceneView {
       const p = speakerLocal(s);
       o.mesh.position.set(p[0], p[1], p[2]);
       o.mesh.lookAt(0, 0, 0);
-      const selected = sel.kind === 'speaker' && sel.index === i;
+      const selected = this.store.isSpeakerSelected(i);
       const mat = o.mesh.material as THREE.MeshStandardMaterial;
       mat.emissive.set(selected ? 0xffc857 : 0x000000);
       mat.emissiveIntensity = selected ? 0.5 : 0;
@@ -414,14 +415,30 @@ export class SceneView {
       (o.stem.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(p[0], p[1], p[2]), foot]);
       o.stem.computeLineDistances();
       o.stem.visible = drop > 0.3;
+      // A stereo pair: a thin bar between the two.
+      const partner = pairedWith(list, i);
+      o.pairBar.visible = partner > i;
+      if (partner > i) {
+        const q = speakerLocal(list[partner]);
+        (o.pairBar.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(q[0], q[1], q[2])]);
+      }
       o.label.position.set(p[0], p[1] + (sub ? 0.32 : 0.28), p[2]);
       o.label.visible = this.settings.speakerLabels;
       (o.label.element.children[0] as HTMLElement).textContent = s.name || `Speaker ${i + 1}`;
       (o.label.element.children[1] as HTMLElement).textContent = `out ${s.channel}`;
       o.label.element.classList.toggle('selected', selected);
     });
-    this.speakerGroup.visible = list.length > 0;
+    this.speakerGroup.visible = list.length > 0 && this.settings.showSpeakers;
     this.vp.invalidate();
+  }
+
+  // The balls (and speaker boxes) on the page, for a rubber-band selection.
+  layerScreenPoints(): ([number, number] | null)[] {
+    return this.layers.map((o) => { const v = new THREE.Vector3(); o.ball.getWorldPosition(v); return this.vp.screenPoint(v); });
+  }
+  speakerScreenPoints(): ([number, number] | null)[] {
+    if (!this.speakerGroup.visible) return [];
+    return this.speakers.map((o) => { const v = new THREE.Vector3(); o.mesh.getWorldPosition(v); return this.vp.screenPoint(v); });
   }
 
   pickableSpeakers(): THREE.Object3D[] {

@@ -213,7 +213,7 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Parameter | Range | Effect |
 |---|---|---|
 | Listener Speed | 0 to 4 ×, default 1 | Multiplies the scene's speed curve. 0 stops the listener where it is. |
-| Listener Path Position | 0 to 100 % | Where the listener is along the path, when the scene's movement is set to "position along path" (Path & head tab). Draw this lane to move the listener directly. |
+| Listener Path Position | 0 to 100 % | Where the listener is along the path, when the scene's movement is set to "position along path" (Path tab). Draw this lane to move the listener directly. |
 | Listener Head Turn | ±180° | Added to the head direction from the scene. Positive turns left. |
 | Listener Head Tilt | ±90° | Positive looks up. |
 | Listener Head Roll | ±90° | |

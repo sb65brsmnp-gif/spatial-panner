@@ -251,6 +251,9 @@ export interface SpeakerDoc {
   lfe?: boolean;
   trim_db?: number;
   delay_ms?: number;
+  // A stereo pair: both speakers carry the same id and move together (the
+  // same change of azimuth, elevation and distance), keeping their spacing.
+  pair?: string;
 }
 
 export type BassFilter = 'butterworth12' | 'butterworth24' | 'lr24' | 'lr48';
@@ -322,11 +325,66 @@ export function presetSpeakers(layout: string, distance = SPEAKER_DISTANCE): Spe
   });
 }
 
-// The speakers an output setting plays through (the placed ones, else the
-// preset's); none in binaural or Ambisonic mode.
+// The speakers an output setting plays through (the placed ones, even none
+// yet, else the preset's); none in binaural or Ambisonic mode.
 export function outputSpeakers(out: OutputDoc | undefined): SpeakerDoc[] {
   if (!out || out.mode !== 'speakers') return [];
-  return out.speakers?.length ? out.speakers : presetSpeakers(out.layout);
+  return Array.isArray(out.speakers) ? out.speakers : presetSpeakers(out.layout);
+}
+
+// The partner of speaker i in its stereo pair, or -1.
+export function pairedWith(list: SpeakerDoc[], i: number): number {
+  const id = list[i]?.pair;
+  if (!id) return -1;
+  return list.findIndex((s, j) => j !== i && s.pair === id);
+}
+
+// Moves speaker i by a change of azimuth, elevation and distance, and its
+// stereo partner by the same change, so the pair turns and travels as one.
+export function moveSpeakerBy(list: SpeakerDoc[], i: number, dAz: number, dEl: number, dDist: number): void {
+  const j = pairedWith(list, i);
+  for (const k of j >= 0 ? [i, j] : [i]) {
+    const s = list[k];
+    s.azimuth = wrapDegrees(s.azimuth + dAz);
+    s.elevation = Math.round(Math.max(-90, Math.min(90, s.elevation + dEl)) * 10) / 10;
+    s.distance = Math.round(Math.max(0.2, s.distance + dDist) * 100) / 100;
+  }
+}
+
+// Pairs speakers i and j as stereo: the one further left becomes the left
+// speaker, and they are set 60 degrees apart about their mean direction at
+// i's elevation and distance (a normal stereo field). Earlier pairs of
+// either are dissolved.
+export function pairSpeakers(list: SpeakerDoc[], i: number, j: number): void {
+  if (i === j || !list[i] || !list[j]) return;
+  unpairSpeaker(list, i);
+  unpairSpeaker(list, j);
+  const id = `pair-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const a = list[i], b = list[j];
+  let diff = b.azimuth - a.azimuth;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  const centre = a.azimuth + diff / 2;
+  const left = diff > 0 ? b : a, right = diff > 0 ? a : b;
+  left.azimuth = wrapDegrees(centre + 30);
+  right.azimuth = wrapDegrees(centre - 30);
+  b.elevation = a.elevation;
+  b.distance = a.distance;
+  a.pair = id;
+  b.pair = id;
+}
+
+export function unpairSpeaker(list: SpeakerDoc[], i: number): void {
+  const j = pairedWith(list, i);
+  if (j >= 0) delete list[j].pair;
+  if (list[i]) delete list[i].pair;
+}
+
+export function wrapDegrees(v: number): number {
+  let d = v % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return Math.round(d * 10) / 10;
 }
 
 // Head-local axes, as the engine's: Y up, -Z ahead, +X to the right.

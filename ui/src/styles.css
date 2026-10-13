@@ -113,6 +113,8 @@ input.num { width: 64px; }
 .speaker-item .ch { color: var(--muted); font-size: 11px; min-width: 34px; text-align: right; }
 .speaker-item .sub-tag { color: #d9b7ff; font-size: 10px; margin-left: 4px; }
 .btn.on { background: #3a3220; border-color: var(--accent); color: var(--accent); }
+.pair-tag { margin-left: 6px; font-size: 10px; color: var(--muted); }
+.marquee { position: fixed; border: 1px solid var(--accent); background: rgba(255, 200, 87, 0.12); pointer-events: none; z-index: 40; }
 .settings-note { color: var(--muted); font-size: 11px; margin: 2px 0 6px; }
 .meter > div { height: 100%; width: 0; background: #5fd38d; }
 .path-list { display: flex; flex-direction: column; gap: 4px; }

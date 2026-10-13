@@ -83,3 +83,84 @@ describe('settings', () => {
       .toEqual({ ...DEFAULT_SETTINGS, dotSize: 1.5 });
   });
 });
+
+import { pairSpeakers, unpairSpeaker, pairedWith, moveSpeakerBy, defaultScene, defaultLayer, type SpeakerDoc } from '../../src/model/scene';
+import { Store } from '../../src/model/store';
+
+describe('stereo pairs', () => {
+  const two = (): SpeakerDoc[] => [
+    { name: 'A', azimuth: 10, elevation: 0, distance: 2, channel: 1 },
+    { name: 'B', azimuth: -70, elevation: 15, distance: 3, channel: 2 },
+    { name: 'Sub', azimuth: 0, elevation: -20, distance: 2, channel: 3, lfe: true },
+  ];
+
+  it('set the pair 30° either side of their centre, the left one on the left, at the first one\'s height and distance', () => {
+    const list = two();
+    pairSpeakers(list, 0, 1);
+    expect(pairedWith(list, 0)).toBe(1);
+    expect(pairedWith(list, 1)).toBe(0);
+    expect(pairedWith(list, 2)).toBe(-1);
+    // Centre -30: A (further left) goes to 0, B to -60.
+    expect(list[0].azimuth).toBe(0);
+    expect(list[1].azimuth).toBe(-60);
+    expect(list[1].elevation).toBe(0);
+    expect(list[1].distance).toBe(2);
+  });
+
+  it('move, turn and travel together; unpairing frees both', () => {
+    const list = two();
+    pairSpeakers(list, 0, 1);
+    moveSpeakerBy(list, 1, 90, 10, 1);
+    expect(list[0].azimuth).toBe(90);
+    expect(list[1].azimuth).toBe(30);
+    expect(list[0].elevation).toBe(10);
+    expect(list[0].distance).toBe(3);
+    expect(list[1].distance).toBe(3);
+    // Alone, a speaker moves alone; wrapping and clamps apply.
+    moveSpeakerBy(list, 2, -200, -100, -5);
+    expect(list[2].azimuth).toBe(160);
+    expect(list[2].elevation).toBe(-90);
+    expect(list[2].distance).toBe(0.2);
+    unpairSpeaker(list, 0);
+    expect(list[0].pair).toBeUndefined();
+    expect(list[1].pair).toBeUndefined();
+    moveSpeakerBy(list, 0, 10, 0, 0);
+    expect(list[1].azimuth).toBe(30);
+  });
+
+  it('a new pair dissolves the old ones', () => {
+    const list = [...two(), { name: 'D', azimuth: 120, elevation: 0, distance: 2, channel: 4 }];
+    pairSpeakers(list, 0, 1);
+    pairSpeakers(list, 1, 3);
+    expect(pairedWith(list, 0)).toBe(-1);
+    expect(pairedWith(list, 1)).toBe(3);
+  });
+});
+
+describe('selecting several things', () => {
+  it('Cmd+click toggles membership and one thing stays a plain selection', () => {
+    const st = new Store();
+    const sc = defaultScene();
+    sc.layers = [defaultLayer(0), defaultLayer(1), defaultLayer(2)];
+    sc.editor = { ...sc.editor, output: { mode: 'speakers', layout: 'stereo', speakers: [
+      { name: 'L', azimuth: 30, elevation: 0, distance: 2, channel: 1 }, { name: 'R', azimuth: -30, elevation: 0, distance: 2, channel: 2 }] } };
+    st.load(sc, null);
+    st.select({ kind: 'layer', index: 0 });
+    st.toggleSelected('layer', 2);
+    expect(st.selection).toEqual({ kind: 'multi', layers: [0, 2], speakers: [] });
+    expect(st.isLayerSelected(2)).toBe(true);
+    expect(st.isLayerSelected(1)).toBe(false);
+    st.toggleSelected('speaker', 1);
+    expect(st.selectedSpeakers()).toEqual([1]);
+    st.toggleSelected('layer', 0);
+    st.toggleSelected('layer', 2);
+    expect(st.selection).toEqual({ kind: 'speaker', index: 1 });
+    st.selectMany([2, 2, 0], []);
+    expect(st.selection).toEqual({ kind: 'multi', layers: [0, 2], speakers: [] });
+    // A selection past the end of the list is dropped.
+    st.update((s) => { s.layers.splice(1, 1); });
+    expect(st.selectedLayers()).toEqual([0]);
+    st.selectMany([], []);
+    expect(st.selection).toEqual({ kind: 'none' });
+  });
+});

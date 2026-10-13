@@ -14,11 +14,12 @@ export interface Settings {
   dotSize: number;        // scale of the layer balls and path points
   timeDots: boolean;      // the second-marks along the listener's path
   speakerLabels: boolean;
+  showSpeakers: boolean;  // the speakers of the output layout in the 3D view
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   labelSize: 11, labelOffset: 0.25, labelOpacity: 0.8, labelMaxWidth: 220, labelMode: 'always',
-  meterWidth: 50, meterHeight: 4, dotSize: 1, timeDots: true, speakerLabels: true,
+  meterWidth: 50, meterHeight: 4, dotSize: 1, timeDots: true, speakerLabels: true, showSpeakers: true,
 };
 
 const KEY = 'sp.settings';

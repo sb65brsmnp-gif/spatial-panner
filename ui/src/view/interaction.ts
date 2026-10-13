@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import type { Store } from '../model/store';
 import type { PathDoc, SegmentDoc, V3 } from '../model/scene';
 import { stereoEnds, stereoFromEnds, defaultStereo, isStereo, isAmbisonic, defaultAmbisonic, ambisonicSurfacePoint, layerHome, firstPoint,
-  defaultScene, hasPath, removeLayerLinks, sphericalOf, type SceneDoc, type SpeakerDoc } from '../model/scene';
+  defaultScene, hasPath, removeLayerLinks, sphericalOf, moveSpeakerBy, type SceneDoc, type SpeakerDoc } from '../model/scene';
 import { attachPath, layerOfPath, layerPathIndex, moveLayerTo, pathOf, removePath } from '../model/layerMotion';
 import {
   appendSegments, translatePath, circle, deletePoint, ellipse, evaluateSegment, figure8, fitFreehand, helix, insertPoint, movePoint,
@@ -50,18 +50,29 @@ type Drag =
   // A speaker of the output layout: moved around the head, which sets its
   // azimuth, elevation and distance.
   | { kind: 'speaker'; index: number; plane: THREE.Plane; offset: THREE.Vector3; moved: boolean; x: number; y: number }
+  // Cmd+drag on empty space: a rubber band that selects the layers and
+  // speakers inside it (page coordinates).
+  | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number }
   | { kind: 'freehand'; points: V3[] }
   | { kind: 'shape'; start: V3; end: V3 }
   | { kind: 'pen'; anchor: PenAnchor };
 
 const vec = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
 
+// Removes layer i and everything that pointed at it (links, look-at).
+export function removeLayerAt(sc: SceneDoc, i: number): void {
+  sc.layers.splice(i, 1);
+  removeLayerLinks(sc.layers, i);
+  if (sc.listener.head.look_at_layer === i) sc.listener.head.look_at_layer = -1;
+  else if (sc.listener.head.look_at_layer > i) sc.listener.head.look_at_layer--;
+}
+
 // The scene's placed speakers, for editing: a preset's (or, in the plug-in,
 // the bus's) speakers drawn in their stead are first written into the scene
 // as they stand, so the edit changes one of them and keeps the rest.
 export function placedSpeakers(s: SceneDoc, shown: SpeakerDoc[]): SpeakerDoc[] {
   const out = s.editor?.output ?? { mode: 'speakers' as const, layout: '7.1.4' };
-  if (!out.speakers?.length) out.speakers = shown.map((x) => ({ ...x }));
+  if (!Array.isArray(out.speakers)) out.speakers = shown.map((x) => ({ ...x }));
   s.editor = { ...s.editor, output: out };
   return out.speakers;
 }
@@ -232,6 +243,7 @@ export class Interaction {
   }
 
   private selectDown(e: PointerEvent): void {
+    if (e.metaKey) return this.cmdDown(e);
     // Path points first (they sit on top), then layers, then the path line.
     let best: { h: PointHandle; d: number } | null = null;
     for (const h of this.view.pointHandles) {
@@ -264,7 +276,7 @@ export class Interaction {
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
       this.drag = { kind: 'speaker', index, plane, offset: pos.clone().sub(hit), moved: false, x: e.clientX, y: e.clientY };
-      this.store.select({ kind: 'speaker', index });
+      if (!this.store.isSpeakerSelected(index)) this.store.select({ kind: 'speaker', index });
       this.vp.controls.enabled = false;
       return;
     }
@@ -280,7 +292,8 @@ export class Interaction {
       const plane = this.vp.editPlane(pos, e.shiftKey);
       const hit = this.vp.intersect(e, plane) ?? pos.clone();
       this.drag = { kind: 'layer', index, end, mirror: e.altKey, plane, offset: pos.clone().sub(hit), moved: false, x: e.clientX, y: e.clientY };
-      this.store.select({ kind: 'layer', index });
+      // A layer already in a group selection drags the group.
+      if (!this.store.isLayerSelected(index) || this.store.selection.kind !== 'multi') this.store.select({ kind: 'layer', index });
       this.vp.controls.enabled = false;
       return;
     }
@@ -315,6 +328,57 @@ export class Interaction {
       }
     }
     this.store.select({ kind: 'none' });
+  }
+
+  // Cmd+click adds a layer or speaker to the selection (or takes it out);
+  // Cmd+drag on empty space draws a rubber band around several.
+  private cmdDown(e: PointerEvent): void {
+    const rc = this.vp.ray(e);
+    const layerHit = rc.intersectObjects(this.view.pickableLayers(), false)[0];
+    const speakerHit = rc.intersectObjects(this.view.pickableSpeakers(), true)[0];
+    if (layerHit && (!speakerHit || layerHit.distance <= speakerHit.distance)) {
+      this.store.toggleSelected('layer', layerHit.object.userData.index as number);
+      return;
+    }
+    if (speakerHit) {
+      this.store.toggleSelected('speaker', speakerHit.object.userData.index as number);
+      return;
+    }
+    this.drag = { kind: 'marquee', x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+    this.vp.controls.enabled = false;
+    this.marquee.style.display = 'block';
+    this.drawMarquee();
+  }
+
+  private marquee = (() => {
+    const m = document.createElement('div');
+    m.className = 'marquee';
+    m.style.display = 'none';
+    document.body.appendChild(m);
+    return m;
+  })();
+
+  private drawMarquee(): void {
+    const d = this.drag;
+    if (!d || d.kind !== 'marquee') return;
+    const x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1);
+    this.marquee.style.left = `${x}px`;
+    this.marquee.style.top = `${y}px`;
+    this.marquee.style.width = `${Math.abs(d.x1 - d.x0)}px`;
+    this.marquee.style.height = `${Math.abs(d.y1 - d.y0)}px`;
+  }
+
+  // Selects what the rubber band encloses (page coordinates).
+  private finishMarquee(d: { x0: number; y0: number; x1: number; y1: number }, add: boolean): void {
+    this.marquee.style.display = 'none';
+    const x0 = Math.min(d.x0, d.x1), x1 = Math.max(d.x0, d.x1), y0 = Math.min(d.y0, d.y1), y1 = Math.max(d.y0, d.y1);
+    if (x1 - x0 < 3 && y1 - y0 < 3) { if (!add) this.store.select({ kind: 'none' }); return; }
+    const inside = (p: [number, number] | null) => !!p && p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1;
+    const layers = add ? [...this.store.selectedLayers()] : [];
+    const speakers = add ? [...this.store.selectedSpeakers()] : [];
+    this.view.layerScreenPoints().forEach((p, i) => { if (inside(p)) layers.push(i); });
+    this.view.speakerScreenPoints().forEach((p, i) => { if (inside(p)) speakers.push(i); });
+    this.store.selectMany(layers, speakers);
   }
 
   // The drawing plane is at the draw height; a point inserted on a path that
@@ -352,6 +416,12 @@ export class Interaction {
         this.store.update((s) => this.moveStart(s.listener, p), 'start-move');
         break;
       }
+      case 'marquee': {
+        d.x1 = e.clientX;
+        d.y1 = e.clientY;
+        this.drawMarquee();
+        break;
+      }
       case 'speaker': {
         const hit = this.vp.intersect(e, d.plane);
         if (!hit) return;
@@ -360,14 +430,25 @@ export class Interaction {
         if (!mesh) return;
         mesh.getWorldPosition(cur);
         const p = this.keepAxes(vec(cur), vec(hit.add(d.offset)), d.plane);
-        const local = this.view.speakerLocalOf(p);
-        const sph = sphericalOf(local);
+        const to = sphericalOf(this.view.speakerLocalOf(p));
+        const from = sphericalOf(this.view.speakerLocalOf(vec(cur)));
+        let dAz = to.azimuth - from.azimuth;
+        if (dAz > 180) dAz -= 360;
+        if (dAz < -180) dAz += 360;
+        const dEl = to.elevation - from.elevation, dDist = Math.max(0.2, to.distance) - from.distance;
+        // The dragged speaker, the others selected with it, and their stereo
+        // partners all move by the same change.
+        const group = this.store.isSpeakerSelected(d.index) ? this.store.selectedSpeakers() : [d.index];
         this.store.update((s) => {
-          const sp = placedSpeakers(s, this.store.speakersShown())[d.index];
-          if (!sp) return;
-          sp.azimuth = Math.round(sph.azimuth * 10) / 10;
-          sp.elevation = Math.round(sph.elevation * 10) / 10;
-          sp.distance = Math.round(Math.max(0.2, sph.distance) * 100) / 100;
+          const list = placedSpeakers(s, this.store.speakersShown());
+          const done = new Set<number>();
+          for (const i of group) {
+            if (done.has(i) || !list[i]) continue;
+            moveSpeakerBy(list, i, dAz, dEl, dDist);
+            done.add(i);
+            const j = list.findIndex((x, k) => k !== i && !!x.pair && x.pair === list[i].pair);
+            if (j >= 0) done.add(j);
+          }
         }, 'speaker-move');
         break;
       }
@@ -384,7 +465,13 @@ export class Interaction {
           if (d.end === 'centre') {
             const c = shown(l.position);
             const to = this.keepAxes(c, p, d.plane);
-            moveLayerTo(l, [l.position[0] + to[0] - c[0], l.position[1] + to[1] - c[1], l.position[2] + to[2] - c[2]]);
+            const delta: V3 = [to[0] - c[0], to[1] - c[1], to[2] - c[2]];
+            // The others selected with it move by the same amount.
+            const group = this.store.isLayerSelected(d.index) ? this.store.selectedLayers() : [d.index];
+            for (const i of group) {
+              const g = s.layers[i];
+              if (g) moveLayerTo(g, [g.position[0] + delta[0], g.position[1] + delta[1], g.position[2] + delta[2]]);
+            }
             return;
           }
           p = this.fromShown(d.index, this.keepAxes(shown(d.end === 'radius' ? ambisonicSurfacePoint(l, [1, 0, 0]) : stereoEnds(l)[d.end === 'L' ? 0 : 1]), p, d.plane));
@@ -472,6 +559,9 @@ export class Interaction {
       case 'point':
       case 'speaker':
         this.store.endGesture();
+        break;
+      case 'marquee':
+        this.finishMarquee(d, _e.shiftKey);
         break;
       case 'freehand': {
         const seg = fitFreehand(d.points);
@@ -577,11 +667,22 @@ export class Interaction {
         else if (s.listener.head.look_at_layer > sel.index) s.listener.head.look_at_layer--;
       });
       this.store.select({ kind: 'none' });
-    } else if (sel.kind === 'speaker') {
-      // The last speaker that is not a subwoofer stays: a layout needs one.
+    } else if (sel.kind === 'speaker' || sel.kind === 'multi') {
+      const layers = this.store.selectedLayers(), speakers = this.store.selectedSpeakers();
       const shown = this.store.speakersShown();
-      if (shown.filter((x) => !x.lfe).length <= 1 && !shown[sel.index]?.lfe) return;
-      this.store.update((s) => { placedSpeakers(s, shown).splice(sel.index, 1); });
+      this.store.update((s) => {
+        for (const i of [...layers].sort((a, b) => b - a)) removeLayerAt(s, i);
+        if (speakers.length) {
+          const list = placedSpeakers(s, shown);
+          for (const i of [...speakers].sort((a, b) => b - a)) {
+            const x = list[i];
+            if (!x) continue;
+            const j = list.findIndex((y, k) => k !== i && !!y.pair && y.pair === x.pair);
+            if (j >= 0) delete list[j].pair;
+            list.splice(i, 1);
+          }
+        }
+      });
       this.store.select({ kind: 'none' });
     }
   }

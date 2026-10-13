@@ -84,7 +84,7 @@ the listener's path, or the selected layer's own (see *Layer paths* below;
 | Pen (P) | Bézier pen: click for a corner, drag for a smooth point; Enter finishes. |
 | Shape (S) | Drag out a circle, ellipse, figure 8, spiral or helix from its centre. |
 
-Paths are drawn on a plane at the height set under **Path & head** (default
+Paths are drawn on a plane at the height set under **Path** (default
 ear height, 1.6 m); draw in the Front or Side view to draw vertically. Grid
 snap is on the same tab.
 
@@ -179,7 +179,7 @@ says which. Unlinking leaves the layer where it is. *From the start* unticked
 leaves it free until the first linking key. A layer cannot follow one of its
 own followers.
 
-**Fit timing** (Path & head tab, shown once a layer has a path): tick the
+**Fit timing** (Path tab, shown once a layer has a path): tick the
 listener and the layers that should set off and arrive together, set the
 times and click *Fit*. Each speed curve is stretched or squeezed as a whole
 (the shape of the journey stays); a layer timed by keys has its keys spread

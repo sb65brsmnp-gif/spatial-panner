@@ -753,6 +753,123 @@ await check('dragging a speaker in the top view changes its azimuth and distance
   await page.screenshot({ path: resolve(outDir, 'speaker-edit.png') });
 });
 
+await check('Hide speakers takes them out of the 3D view and back; Custom starts with no speakers', async () => {
+  await page.click('.tab[data-tab="output"]');
+  await page.waitForSelector('#sidebar button:has-text("Hide speakers")');
+  await page.click('#sidebar button:has-text("Hide speakers")');
+  await page.waitForSelector('#sidebar button:has-text("Show speakers")');
+  await page.waitForFunction(() => window.spEditor.view.speakerGroup.visible === false);
+  const stored = await ed(() => JSON.parse(localStorage.getItem('sp.settings')));
+  assert(stored.showSpeakers === false, JSON.stringify(stored));
+  await page.click('#sidebar button:has-text("Show speakers")');
+  await page.waitForFunction(() => window.spEditor.view.speakerGroup.visible === true);
+  // Custom: the previous speakers go away.
+  await page.locator('#sidebar .row:has-text("Layout") select').selectOption('custom');
+  await page.waitForFunction(() => Array.isArray(window.spEditor.store.scene.editor.output.speakers) && window.spEditor.store.scene.editor.output.speakers.length === 0);
+  await page.waitForTimeout(100);
+  const items = await page.locator('#sidebar .speaker-item').count();
+  assert(items === 0, `list items ${items}`);
+  const drawn = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(drawn === 0, `speakers drawn ${drawn}`);
+  await page.waitForSelector('#sidebar .hint:has-text("No speakers yet")');
+  const layout = await page.locator('#sidebar .row:has-text("Layout") select').inputValue();
+  assert(layout === 'custom', `layout ${layout}`);
+});
+
+await check('a stereo pair sits 30° either side of its centre and moves as one when dragged or typed', async () => {
+  await page.click('#sidebar button:has-text("Add speaker")');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers.length === 1);
+  await page.click('#sidebar button:has-text("Add speaker")');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers.length === 2);
+  // Second speaker is selected; pair it with the first.
+  await page.waitForSelector('#sidebar .row:has-text("Stereo pair with") select');
+  await page.locator('#sidebar .row:has-text("Stereo pair with") select').selectOption('0');
+  await page.waitForFunction(() => { const sp = window.spEditor.store.scene.editor.output.speakers; return !!sp[0].pair && sp[0].pair === sp[1].pair; });
+  let sp = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  // Both started straight ahead (centre 0): one goes to +30 (left), the other to -30.
+  assert(new Set(sp.map((x) => x.azimuth)).size === 2 && sp.every((x) => Math.abs(x.azimuth) === 30), JSON.stringify(sp));
+  const tags = await page.locator('#sidebar .pair-tag').count();
+  assert(tags === 2, `pair tags ${tags}`);
+  // Typed azimuth on the selected one turns both.
+  const az = page.locator('#sidebar .row:has-text("Azimuth") input');
+  await az.fill(String(sp[1].azimuth + 40));
+  await az.press('Enter');
+  await page.waitForFunction((want) => window.spEditor.store.scene.editor.output.speakers[1].azimuth === want, sp[1].azimuth + 40);
+  sp = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  assert(Math.abs(sp[0].azimuth - sp[1].azimuth) === 60, JSON.stringify(sp));
+  // Dragging the left one in the top view away from the head takes the right one along.
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(100);
+  const left = sp[0].azimuth > sp[1].azimuth ? 0 : 1;
+  const pos = await ed((i) => { const v = new (window.spEditor.view.speakerGroup.constructor)(); window.spEditor.view.pickableSpeakers()[i].getWorldPosition(v.position); return [v.position.x, v.position.y, v.position.z]; }, left);
+  const from = await screen(pos);
+  const to = await screen([pos[0] * 2, pos[1], pos[2] * 2]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const after = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  assert(after[0].distance > 3.5 && Math.abs(after[0].distance - after[1].distance) < 0.05, JSON.stringify(after));
+  assert(Math.abs(Math.abs(after[0].azimuth - after[1].azimuth) - 60) < 2, JSON.stringify(after));
+  await page.screenshot({ path: resolve(outDir, 'speaker-pair.png') });
+});
+
+await check('Cmd+click and Cmd+drag select several layers, which then move together', async () => {
+  await page.click('.tab[data-tab="layers"]');
+  await page.click('text=Add audio files…');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.length >= 3);
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(150);
+  const layers = await ed(() => window.spEditor.store.scene.layers.map((l) => l.position));
+  // Adding files leaves the last one selected; start from nothing.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  // Cmd+click the first two balls.
+  await page.keyboard.down('Meta');
+  await page.mouse.click(...(await screen(layers[0])));
+  await page.mouse.click(...(await screen(layers[1])));
+  await page.keyboard.up('Meta');
+  let sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi' && sel.layers.length === 2 && sel.layers.includes(0) && sel.layers.includes(1), JSON.stringify(sel));
+  await page.waitForSelector('#sidebar .hint:has-text("2 layers selected")');
+  // Cmd+click one again takes it out.
+  await page.keyboard.down('Meta');
+  await page.mouse.click(...(await screen(layers[1])));
+  await page.keyboard.up('Meta');
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'layer' && sel.index === 0, JSON.stringify(sel));
+  // Cmd+drag a box around every ball on empty space.
+  const pts = await Promise.all(layers.map((p) => screen(p)));
+  const x0 = Math.min(...pts.map((p) => p[0])) - 40, x1 = Math.max(...pts.map((p) => p[0])) + 40;
+  const y0 = Math.min(...pts.map((p) => p[1])) - 40, y1 = Math.max(...pts.map((p) => p[1])) + 40;
+  await page.keyboard.down('Meta');
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x1, y1, { steps: 5 });
+  const box = await page.locator('.marquee').isVisible();
+  assert(box, 'no rubber band shown');
+  await page.mouse.up();
+  await page.keyboard.up('Meta');
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi' && sel.layers.length === layers.length, JSON.stringify(sel));
+  // Dragging one selected ball moves them all by the same amount.
+  const from = await screen(layers[0]);
+  const to = await screen([layers[0][0] + 1.5, layers[0][1], layers[0][2]]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const moved = await ed(() => window.spEditor.store.scene.layers.map((l) => l.position));
+  for (let i = 0; i < layers.length; ++i) {
+    assert(Math.abs(moved[i][0] - layers[i][0] - 1.5) < 0.15 && Math.abs(moved[i][2] - layers[i][2]) < 0.15, `layer ${i}: ${layers[i]} -> ${moved[i]}`);
+  }
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi', `selection lost: ${JSON.stringify(sel)}`);
+  await page.screenshot({ path: resolve(outDir, 'multi-select.png') });
+  // Delete removes them all.
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 0);
+});
+
 await check('Settings tab: text size and label height apply to the page and the view', async () => {
   await page.click('.tab[data-tab="settings"]');
   await page.waitForSelector('#sidebar .section-title:has-text("Labels in the 3D view")');

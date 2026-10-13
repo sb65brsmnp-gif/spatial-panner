@@ -258,7 +258,9 @@ setInterval(refreshInfo, 2000);
 let sentOutput = '';
 function syncOutput(): void {
   if (plugin) return;
-  const out = store.scene.editor?.output ?? { mode: 'binaural' as const, layout: '7.1.4' };
+  let out = store.scene.editor?.output ?? { mode: 'binaural' as const, layout: '7.1.4' };
+  // A custom layout with nothing placed yet plays plain stereo meanwhile.
+  if (out.mode === 'speakers' && Array.isArray(out.speakers) && !out.speakers.length) out = { ...out, layout: 'stereo', speakers: undefined };
   const text = JSON.stringify(out);
   if (text === sentOutput) return;
   sentOutput = text;
