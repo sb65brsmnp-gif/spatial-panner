@@ -94,6 +94,13 @@ struct LayerControls {
     // yaw added.
     float ambisonicRadiusScale = 1.0f;
     float ambisonicYawOffsetDeg = 0;
+    // Layers with a path: travel or place along it instead of the scene's
+    // own timing (the plugin's Path Speed and Path Position automation).
+    MotionOverride motion;
+    // Off: the layer plays straight through (Layer::spatialize is off too
+    // when either is); `roomSend` turns its room send on when either is.
+    bool spatialize = true;
+    bool roomSend = false;
 };
 
 // A scene edit prepared off the audio thread by Renderer::prepareUpdate and

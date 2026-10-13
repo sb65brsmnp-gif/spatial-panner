@@ -28,6 +28,7 @@ export interface AmbisonicDoc { format: AmbisonicFormat; radius: number; yaw: nu
 export interface LayerDoc {
   name: string;
   audio: string;
+  test?: boolean;      // the app's test source: plays, is never saved or bounced
   audio_files?: string[];   // Ambisonic: one mono file per channel instead of `audio`
   channels?: number;   // 1 (default), 2, or 4 / 9 / 16 (Ambisonic)
   stereo?: StereoDoc;
@@ -46,6 +47,18 @@ export interface LayerDoc {
   reflection_order: number;
   start_time: number;
   loop: boolean;
+  // Its own path and how it travels it (absent: the layer stands still), and
+  // level automation (fades). See MotionDoc.
+  motion?: MotionDoc;
+  level_keys?: LevelKey[];
+  // Off: the layer plays straight through (mono to both ears, stereo left to
+  // left and right to right), unprocessed; still a layer with its level,
+  // mute, fades and place in the scene. `room_send` keeps it feeding the
+  // room's reverb. Absent: on / off.
+  spatialize?: boolean;
+  room_send?: boolean;
+  // Linked to the listener or another layer: see LinkDoc. Absent: not linked.
+  link?: LinkDoc;
   // editor-only
   color?: string;
   solo?: boolean;
@@ -70,6 +83,82 @@ export interface PathDoc {
 }
 
 export interface SpeedKey { time: number; speed: number; easing: Easing }
+
+// A layer travelling along its own path (engine: sp::LayerMotion). The path
+// is in world coordinates and starts where the layer stands; the editor keeps
+// it that way (moving the layer moves its path). Timing:
+//   'speed'    - its own speed curve; key times count from start_time
+//   'keys'     - "be here at this time": fraction of the path (0..1) at
+//                absolute times
+//   'position' - stays at `fraction` of the path (automate it in Logic)
+// At the end it stops, loops (a closed path runs on round; an open one jumps
+// back with a short fade) or goes back and forth. `turn`: the layer turns
+// with the direction it travels (its facing, stereo bar, sphere).
+export type LayerTiming = 'speed' | 'keys' | 'position';
+export type PathEnd = 'stop' | 'loop' | 'ping_pong';
+export interface PathKey { time: number; fraction: number; easing: Easing }
+export interface MotionDoc {
+  path: PathDoc;
+  timing: LayerTiming;
+  speed: SpeedKey[];
+  start_time: number;
+  keys: PathKey[];
+  fraction: number;
+  end: PathEnd;
+  turn: boolean;
+}
+// Level automation: dB at absolute times; SILENT_DB is silence.
+export interface LevelKey { time: number; level_db: number; easing: Easing }
+export const SILENT_DB = -80;
+
+// A layer linked to the listener ('listener') or to another layer (its
+// index) keeps its place and bearing relative to that leader while linked,
+// as the leader moves and turns with its direction of travel; its own path,
+// if any, is travelled in the leader's frame. `keys` link and unlink it at
+// times (each sets the state from its time on; `linked_at_start` before the
+// first). Unlinking leaves it where it is; linking again takes hold there.
+export interface LinkKey { time: number; linked: boolean }
+export interface LinkDoc { to: 'listener' | number; linked_at_start: boolean; keys: LinkKey[] }
+
+export function defaultLink(to: 'listener' | number): LinkDoc {
+  return { to, linked_at_start: true, keys: [] };
+}
+export function isSpatialized(l: LayerDoc): boolean { return l.spatialize !== false; }
+export function isLinked(l: LayerDoc): boolean { return !!l.link && (l.link.to === 'listener' || (typeof l.link.to === 'number' && l.link.to >= 0)); }
+// Linked at time t?
+export function linkedAt(link: LinkDoc, t: number): boolean {
+  let on = link.linked_at_start;
+  for (const k of link.keys) { if (k.time <= t) on = k.linked; else break; }
+  return on;
+}
+// Does layer `i` lead (directly or through others) to layer `j`? Used to
+// keep a layer from following one of its own followers.
+export function leadsTo(layers: LayerDoc[], i: number, j: number): boolean {
+  for (let n = 0, k = i; n < layers.length; n++) {
+    const to = layers[k]?.link?.to;
+    if (typeof to !== 'number' || to < 0) return false;
+    if (to === j) return true;
+    k = to;
+  }
+  return false;
+}
+// A layer removed: links to it go, links past it move down.
+export function removeLayerLinks(layers: LayerDoc[], removed: number): void {
+  for (const l of layers) {
+    const to = l.link?.to;
+    if (typeof to !== 'number') continue;
+    if (to === removed) delete l.link;
+    else if (to > removed) l.link!.to = to - 1;
+  }
+}
+
+export function defaultMotion(path: PathDoc): MotionDoc {
+  return { path, timing: 'speed', speed: [{ time: 0, speed: 1.4, easing: 'linear' }], start_time: 0, keys: [], fraction: 0, end: 'stop', turn: false };
+}
+
+export function hasPath(l: LayerDoc): boolean {
+  return !!l.motion && l.motion.path.segments.length > 0;
+}
 export interface HeadKey { time: number; yaw: number; pitch: number; roll: number; easing: Easing }
 
 export type HeadMode = 'along_path' | 'look_at' | 'keyframed';
@@ -148,9 +237,70 @@ export interface EnvironmentDoc {
   air_absorption: boolean;
 }
 
+// A loudspeaker of the output layout, placed around the listener's head:
+// azimuth in degrees (0 ahead, positive to the left), elevation (positive
+// up), distance in metres (0: equidistant, nothing to align). `channel` is
+// the 1-based output it plays on: a device output in the app, a bus channel
+// in the plugin. Trim and delay are added to the distance alignment the
+// engine computes (engine/include/sp/SpeakerLayout.h).
+export interface SpeakerDoc {
+  name: string;
+  azimuth: number;
+  elevation: number;
+  distance: number;
+  channel: number;
+  lfe?: boolean;
+  trim_db?: number;
+  delay_ms?: number;
+  // A stereo pair: both speakers carry the same id and move together (the
+  // same change of azimuth, elevation and distance), keeping their spacing.
+  pair?: string;
+}
+
+export type BassFilter = 'butterworth12' | 'butterworth24' | 'lr24' | 'lr48';
+export const BASS_FILTERS: BassFilter[] = ['butterworth12', 'butterworth24', 'lr24', 'lr48'];
+export const BASS_FILTER_NAMES: Record<BassFilter, string> = {
+  butterworth12: 'Butterworth 12 dB/oct', butterworth24: 'Butterworth 24 dB/oct', lr24: 'Linkwitz-Riley 24 dB/oct', lr48: 'Linkwitz-Riley 48 dB/oct',
+};
+// Bass management: the lows below the cutoff leave every speaker and go to
+// the subwoofer(s) instead.
+export interface BassDoc { enabled: boolean; cutoff_hz: number; filter: BassFilter; sub_gain_db: number }
+export function defaultBass(): BassDoc { return { enabled: false, cutoff_hz: 80, filter: 'lr24', sub_gain_db: 0 }; }
+
+export type OutputModeDoc = 'binaural' | 'speakers' | 'ambix';
+// `speakers` set: the scene's own layout (a preset placed in the space, or
+// edited from one); unset: the preset `layout`, equidistant.
+export interface OutputDoc { mode: OutputModeDoc; layout: string; speakers?: SpeakerDoc[]; bass?: BassDoc }
+
 export interface EditorMeta {
   draw_height?: number;
-  output?: { mode: 'binaural' | 'speakers' | 'ambix'; layout: string };
+  output?: OutputDoc;
+  floor_image?: FloorImageDoc;
+}
+
+// A picture under the scene (a floor plan, a stage drawing): drawn flat on
+// the floor, `width` metres wide, its top edge towards -Z at rotation 0.
+// `aspect` is the picture's height / width (kept so the plane has its shape
+// before the image loads); `height` lifts it above the floor.
+export interface FloorImageDoc {
+  file: string;
+  centre: [number, number];   // x, z
+  width: number;              // metres
+  rotation: number;           // degrees, anticlockwise seen from above
+  opacity: number;            // 0..1
+  height: number;             // metres above the floor
+  aspect?: number;
+}
+
+export function defaultFloorImage(file: string, aspect = 1): FloorImageDoc {
+  return { file, centre: [0, 0], width: 10, rotation: 0, opacity: 0.6, height: 0, aspect };
+}
+
+// Two points clicked on the picture measured `measured` metres apart at the
+// current width really are `real` metres apart: the width that makes it so.
+export function calibratedWidth(img: FloorImageDoc, measured: number, real: number): number {
+  if (!(measured > 1e-6) || !(real > 0)) return img.width;
+  return Math.round(img.width * real / measured * 1000) / 1000;
 }
 
 export interface SceneDoc {
@@ -160,7 +310,43 @@ export interface SceneDoc {
   room: RoomDoc;
   listener: ListenerDoc;
   environment: EnvironmentDoc;
+  pins?: PinDoc[];
   editor?: EditorMeta;
+}
+
+// A pinned mix (engine Pin): at `position` a layer's direct sound goes to
+// the speakers with exactly these levels, one per speaker in the layout's
+// order (dB; -120 or below = nothing), fading in over `radius` metres and
+// blending with the panner in between. Speakers output only.
+export interface PinDoc {
+  name: string;
+  position: V3;
+  radius: number;
+  gains_db: number[];
+}
+
+export const PIN_OFF = -120;
+
+export function defaultPin(position: V3, speakers: number, index: number): PinDoc {
+  return { name: `Pin ${index + 1}`, position: [...position] as V3, radius: 1.5, gains_db: new Array(speakers).fill(PIN_OFF) };
+}
+
+// The scene without its test source (an app-only layer for auditioning the
+// speakers): what gets saved and bounced.
+export function withoutTestLayers(s: SceneDoc): SceneDoc {
+  if (!s.layers.some((l) => l.test)) return s;
+  const gone = s.layers.map((l, i) => (l.test ? i : -1)).filter((i) => i >= 0);
+  const layers = s.layers.filter((l) => !l.test);
+  // Links and look-at by index: drop references to the removed ones.
+  const remap = (i: number) => (i < 0 || gone.includes(i) ? -1 : i - gone.filter((g) => g < i).length);
+  const out: SceneDoc = { ...s, layers: layers.map((l) => {
+    if (!l.link || typeof l.link.to !== 'number') return l;
+    const to = remap(l.link.to);
+    if (to < 0) { const { link: _link, ...rest } = l; return rest; }
+    return { ...l, link: { ...l.link, to } };
+  }) };
+  out.listener = { ...s.listener, head: { ...s.listener.head, look_at_layer: remap(s.listener.head.look_at_layer) } };
+  return out;
 }
 
 // Engine material names (engine/src/Materials.cpp).
@@ -170,6 +356,122 @@ export const MATERIALS = [
 ];
 
 export const LAYOUTS = ['stereo', 'quad', '5.1', '7.1', '5.1.4', '7.1.4', '9.1.6'];
+
+// The engine's presets (engine/src/SpeakerLayout.cpp), in its channel order:
+// [name, azimuth, elevation, subwoofer].
+type PresetSpeaker = [string, number, number, boolean?];
+const FRONT: PresetSpeaker[] = [['L', 30, 0], ['R', -30, 0], ['C', 0, 0], ['LFE', 0, 0, true]];
+export const SPEAKER_PRESETS: Record<string, PresetSpeaker[]> = {
+  stereo: [['L', 30, 0], ['R', -30, 0]],
+  quad: [['L', 45, 0], ['R', -45, 0], ['Ls', 135, 0], ['Rs', -135, 0]],
+  '5.1': [...FRONT, ['Ls', 110, 0], ['Rs', -110, 0]],
+  '7.1': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0]],
+  '5.1.4': [...FRONT, ['Ls', 110, 0], ['Rs', -110, 0], ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+  '7.1.4': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0], ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+  '9.1.6': [...FRONT, ['Lss', 90, 0], ['Rss', -90, 0], ['Lrs', 135, 0], ['Rrs', -135, 0], ['Lw', 60, 0], ['Rw', -60, 0],
+    ['Ltf', 45, 45], ['Rtf', -45, 45], ['Ltm', 90, 55], ['Rtm', -90, 55], ['Ltr', 135, 45], ['Rtr', -135, 45]],
+};
+// Where a preset's speakers are placed when they appear in the space.
+export const SPEAKER_DISTANCE = 2;
+
+// A preset's speakers placed `distance` metres from the head, each on the
+// output of its position in the layout (1-based), as the layout played
+// before speakers could be placed.
+export function presetSpeakers(layout: string, distance = SPEAKER_DISTANCE): SpeakerDoc[] {
+  const p = SPEAKER_PRESETS[layout] ?? SPEAKER_PRESETS['7.1.4'];
+  return p.map(([name, azimuth, elevation, lfe], i) => {
+    // A subwoofer's place does not matter to the sound; drawn low and a
+    // little to the left so it does not sit on the centre speaker.
+    const s: SpeakerDoc = lfe ? { name, azimuth: 15, elevation: -25, distance, channel: i + 1, lfe: true }
+      : { name, azimuth, elevation, distance, channel: i + 1 };
+    return s;
+  });
+}
+
+// The speakers an output setting plays through (the placed ones, even none
+// yet, else the preset's); none in binaural or Ambisonic mode.
+export function outputSpeakers(out: OutputDoc | undefined): SpeakerDoc[] {
+  if (!out || out.mode !== 'speakers') return [];
+  return Array.isArray(out.speakers) ? out.speakers : presetSpeakers(out.layout);
+}
+
+// The partner of speaker i in its stereo pair, or -1.
+export function pairedWith(list: SpeakerDoc[], i: number): number {
+  const id = list[i]?.pair;
+  if (!id) return -1;
+  return list.findIndex((s, j) => j !== i && s.pair === id);
+}
+
+// Moves speaker i by a change of azimuth, elevation and distance, and its
+// stereo partner by the same change, so the pair turns and travels as one.
+export function moveSpeakerBy(list: SpeakerDoc[], i: number, dAz: number, dEl: number, dDist: number): void {
+  const j = pairedWith(list, i);
+  for (const k of j >= 0 ? [i, j] : [i]) {
+    const s = list[k];
+    s.azimuth = wrapDegrees(s.azimuth + dAz);
+    s.elevation = Math.round(Math.max(-90, Math.min(90, s.elevation + dEl)) * 10) / 10;
+    s.distance = Math.round(Math.max(0.2, s.distance + dDist) * 100) / 100;
+  }
+}
+
+// Pairs speakers i and j as stereo: the one further left becomes the left
+// speaker, and they are set 60 degrees apart about their mean direction at
+// i's elevation and distance (a normal stereo field). Earlier pairs of
+// either are dissolved.
+export function pairSpeakers(list: SpeakerDoc[], i: number, j: number): void {
+  if (i === j || !list[i] || !list[j]) return;
+  unpairSpeaker(list, i);
+  unpairSpeaker(list, j);
+  const id = `pair-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const a = list[i], b = list[j];
+  let diff = b.azimuth - a.azimuth;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  const centre = a.azimuth + diff / 2;
+  const left = diff > 0 ? b : a, right = diff > 0 ? a : b;
+  left.azimuth = wrapDegrees(centre + 30);
+  right.azimuth = wrapDegrees(centre - 30);
+  b.elevation = a.elevation;
+  b.distance = a.distance;
+  a.pair = id;
+  b.pair = id;
+}
+
+export function unpairSpeaker(list: SpeakerDoc[], i: number): void {
+  const j = pairedWith(list, i);
+  if (j >= 0) delete list[j].pair;
+  if (list[i]) delete list[i].pair;
+}
+
+export function wrapDegrees(v: number): number {
+  let d = v % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return Math.round(d * 10) / 10;
+}
+
+// Head-local axes, as the engine's: Y up, -Z ahead, +X to the right.
+// Azimuth is positive to the left (the engine's fromSpherical).
+export function speakerLocal(s: SpeakerDoc, drawDistance = SPEAKER_DISTANCE): V3 {
+  const d = s.distance > 0 ? s.distance : drawDistance;
+  const az = s.azimuth * Math.PI / 180, el = s.elevation * Math.PI / 180;
+  return [-d * Math.cos(el) * Math.sin(az), d * Math.sin(el), -d * Math.cos(el) * Math.cos(az)];
+}
+
+export function sphericalOf(v: V3): { azimuth: number; elevation: number; distance: number } {
+  const d = Math.hypot(v[0], v[1], v[2]);
+  if (d < 1e-6) return { azimuth: 0, elevation: 0, distance: 0 };
+  return {
+    azimuth: Math.atan2(-v[0], -v[2]) * 180 / Math.PI,
+    elevation: Math.asin(Math.max(-1, Math.min(1, v[1] / d))) * 180 / Math.PI,
+    distance: d,
+  };
+}
+
+// The output channels a speaker list needs (its highest channel).
+export function speakerChannelsNeeded(speakers: SpeakerDoc[]): number {
+  return speakers.reduce((n, s) => Math.max(n, s.channel), 0);
+}
 
 const PALETTE = ['#4f9cf9', '#f97f4f', '#5fd38d', '#e05fd3', '#f2c94c', '#56ccf2', '#eb5757', '#9b8cff',
   '#6fcf97', '#f2994a', '#bb6bd9', '#2fd1c5'];
@@ -324,7 +626,11 @@ export function completeScene(raw: Partial<SceneDoc>): SceneDoc {
   s.listener = { ...d.listener, ...(raw.listener ?? {}) } as ListenerDoc;
   s.listener.head = { ...d.listener.head, ...(raw.listener?.head ?? {}) };
   s.environment = { ...d.environment, ...(raw.environment ?? {}) };
-  s.layers = (raw.layers ?? []).map((l, i) => defaultLayer(i, l));
+  s.layers = (raw.layers ?? []).map((l, i) => {
+    const out = defaultLayer(i, l);
+    if (out.motion) out.motion = { ...defaultMotion(out.motion.path), ...out.motion };
+    return out;
+  });
   // A file from before "home" was kept: where things are now is home.
   for (const l of s.layers) if (!l.home) l.home = [...l.position] as V3;
   for (const p of s.listener.paths) { const f = firstPoint(p); if (!p.home && f) p.home = f; }
@@ -345,6 +651,7 @@ export function mergeEditorKeys(canonical: SceneDoc, raw: any): SceneDoc {
         if (r?.solo) l.solo = true;
         if (typeof r?.host_id === 'string') l.host_id = r.host_id;
         if (isV3(r?.home)) l.home = r.home;
+        if (l.motion && isV3(r?.motion?.path?.home)) l.motion.path.home = r.motion.path.home;
       });
     if (Array.isArray(raw.listener?.paths))
       s.listener.paths.forEach((p, i) => { const h = raw.listener.paths[i]?.home; if (isV3(h)) p.home = h; });
@@ -407,6 +714,60 @@ export function headKeyAt(keys: HeadKey[], t: number): { yaw: number; pitch: num
   const span = b.time - a.time;
   const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
   return { yaw: a.yaw + (b.yaw - a.yaw) * u, pitch: a.pitch + (b.pitch - a.pitch) * u, roll: a.roll + (b.roll - a.roll) * u };
+}
+
+// Same as the engine's PathKey evaluation (LayerMotionEvaluator::keyFraction)
+// over one pass: the fraction of the path at absolute time t.
+export function pathKeyAt(keys: PathKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].fraction;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.fraction;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  return a.fraction + (b.fraction - a.fraction) * applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+}
+
+// The level automation in dB at t (0 with no keys); a fade to or from
+// silence runs in gain, like the engine (levelKeysDb).
+export function levelAt(keys: LevelKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  if (t <= keys[0].time) return keys[0].level_db;
+  const last = keys[keys.length - 1];
+  if (t >= last.time) return last.level_db;
+  let i = 0;
+  while (i + 1 < keys.length && keys[i + 1].time <= t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.time - a.time;
+  const u = applyEasing(a.easing, span > 0 ? (t - a.time) / span : 1);
+  if (a.level_db > SILENT_DB && b.level_db > SILENT_DB) return a.level_db + (b.level_db - a.level_db) * u;
+  const ga = a.level_db <= SILENT_DB ? 0 : Math.pow(10, a.level_db / 20);
+  const gb = b.level_db <= SILENT_DB ? 0 : Math.pow(10, b.level_db / 20);
+  const g = ga + (gb - ga) * u;
+  return g <= Math.pow(10, SILENT_DB / 20) ? SILENT_DB : 20 * Math.log10(g);
+}
+
+// Metres covered by `t` seconds of a speed curve (its key times count from 0),
+// integrated like the engine's SampledSpeed table.
+export function speedTravel(keys: SpeedKey[], t: number, dt = 0.005): number {
+  let d = 0;
+  for (let u = 0; u < t; u += dt) d += speedAt(keys, u + Math.min(dt, t - u) / 2) * Math.min(dt, t - u);
+  return d;
+}
+
+// How long the speed curve takes to cover `length` metres; null when it never
+// does within `limit` seconds (it stops on the way).
+export function speedArrival(keys: SpeedKey[], length: number, limit = 7200, dt = 0.005): number | null {
+  if (length <= 0) return 0;
+  let d = 0;
+  for (let u = 0; u < limit; u += dt) {
+    const v = speedAt(keys, u + dt / 2);
+    if (d + v * dt >= length) return u + (v > 0 ? (length - d) / v : 0);
+    d += v * dt;
+  }
+  return null;
 }
 
 export function sortKeys<T extends { time: number }>(keys: T[]): void {

@@ -59,9 +59,10 @@ await page.addInitScript(() => {
       return { ok: true };
     },
     info() {
-      return { device: 'Logic Pro', sampleRate: 48000, outputChannels: 2, cpu: 0, output: { mode: 'binaural', layout: '7.1.4' },
+      return { device: 'Logic Pro', sampleRate: 48000, outputChannels: 2, cpu: 0, output: host.output ?? { mode: 'binaural', layout: 'stereo', speakers: [], channels: ['L', 'R'] },
         status: 'Holds the scene', host: 'plugin', tracks: host.tracks };
     },
+    testSpeaker(a) { host.tests = [...(host.tests ?? []), a.channel]; },
     startupScene() {
       if (!host.doc) {
         host.doc = { name: 'Logic session', duration: 0, layers: [], room: { type: 'box', size: [12, 3.5, 16] },
@@ -75,8 +76,10 @@ await page.addInitScript(() => {
     chooseAudioFiles() { return []; },
     confirm(a) { host.confirms.push(a.message); return { ok: host.confirmAnswer }; },
     editing(a) { host.editing.push(a.on); },
+    resize(a) { host.resizes.push([a.width, a.height]); },
   };
   host.editing = [];
+  host.resizes = [];
   // "Reopening the window": a saved document from the last session.
   try {
     const saved = localStorage.getItem('e2e-doc');
@@ -200,6 +203,8 @@ await check('a focused text field tells the plug-in, so typed keys stay in the p
 });
 
 await check('a path drawn while Logic stands at 12.5 s starts there', async () => {
+  // A layer is still selected from above; the tools would draw its path.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
   await page.keyboard.press('l');
   for (const p of [[-4, 1.7, -4], [4, 1.7, -4], [4, 1.7, 4]]) await page.mouse.click(...(await ed((p) => window.spEditor.project(p), p)));
   await page.keyboard.press('Enter');
@@ -274,6 +279,71 @@ await check('reopened with an outdoor room and one layer, the 3D view can still 
   const want = [14, 13, 18].map((v) => v / Math.hypot(14, 13, 18));
   assert(home.every((v, i) => Math.abs(v - want[i]) < 1e-3), `Home direction ${home}`);
   assert(d2 > 5, `Home distance ${d2}`);
+});
+
+await check('dragging the corner grip asks the plug-in for a new window size', async () => {
+  const grip = page.locator('.resize-grip');
+  assert(await grip.count() === 1, 'no grip');
+  const box = await grip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + 60, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const sizes = await ed(() => window.__host.resizes);
+  assert(sizes.length >= 1, 'no resize request');
+  const [w, h] = sizes[sizes.length - 1];
+  assert(w >= 1440 + 100 && h >= 900 + 40, `asked for ${w}x${h}`);
+});
+
+await check('a layer whose track is gone is marked, with the hint on removing it', async () => {
+  await ed(() => { window.__host.tracks = window.__host.tracks.filter((t) => t.id !== 't-vox'); });
+  await page.waitForTimeout(2300);  // the sidebar re-reads the track list every 2 s
+  await page.click('.tab[data-tab="path"]');
+  await page.click('.tab[data-tab="layers"]');
+  await page.waitForTimeout(200);
+  const names = await page.locator('#sidebar .layer-name').allTextContents();
+  assert(names.some((n) => n.includes('Vox (no track)')), `names ${names}`);
+  const hint = await page.locator('#sidebar .hint').first().textContent();
+  assert(hint.includes('Remove layer'), `hint ${hint}`);
+});
+
+await check('Remove layers without a track takes the stray layers out in one go', async () => {
+  const before = await ed(() => window.spEditor.store.scene.layers.length);
+  await page.click('#sidebar button:has-text("without a track")');
+  await page.waitForFunction((n) => window.spEditor.store.scene.layers.length === n - 1, before);
+  const names = await ed(() => window.spEditor.store.scene.layers.map((l) => l.name));
+  assert(!names.includes('Vox'), `names ${names}`);
+  assert(await page.locator('#sidebar button:has-text("without a track")').count() === 0, 'button still there');
+});
+
+await check('a 7.1.4 track draws the bus speakers; placing a preset writes speakers into the document for every track', async () => {
+  await ed(() => {
+    window.__host.output = { mode: 'speakers', layout: '7.1.4', channels: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr'],
+      speakers: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr'].map((name, i) => ({ name, azimuth: 30 * i, elevation: i > 7 ? 45 : 0, distance: 0, lfe: i === 3, channel: i + 1 })) };
+  });
+  await page.waitForFunction(() => window.spEditor.view.pickableSpeakers().length === 12, null, { timeout: 8000 }).catch(async (e) => {
+    const st = await ed(() => ({ host: window.spEditor.store.hostOutput, plugin: window.spEditor.store.plugin, shown: window.spEditor.store.speakersShown().length, drawn: window.spEditor.view.pickableSpeakers().length, vis: window.spEditor.view.speakerGroup.visible }));
+    throw new Error(`speakers not drawn: ${JSON.stringify(st)} (${e.message})`);
+  });
+  await page.click('.tab[data-tab="output"]');
+  await page.waitForSelector('#sidebar .row:has-text("Speakers") select');
+  assert(await page.locator('#sidebar .speaker-item').count() === 12, 'bus speakers not listed');
+  const unplaced = await ed(() => window.spEditor.store.scene.editor?.output?.speakers?.length ?? 0);
+  assert(unplaced === 0, 'speakers placed before a preset was chosen');
+  await page.locator('#sidebar .row:has-text("Speakers") select').first().selectOption('5.1');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor?.output?.speakers?.length === 6);
+  await page.waitForFunction(() => window.__host.doc?.editor?.output?.speakers?.length === 6, null, { timeout: 5000 });
+  // The Output menu names the bus channels; Test asks the plug-in for noise on the chosen one.
+  await page.locator('#sidebar .speaker-item').nth(1).click();
+  await page.waitForSelector('#sidebar .section-title:has-text("Speaker: R")');
+  const labels = await page.locator('#sidebar .row:has-text("Output") select').last().locator('option').allTextContents();
+  assert(labels[1] === '2 (R)' && labels[12].includes('not on this track'), `labels ${labels}`);
+  await page.click('#sidebar button:has-text("Test")');
+  await page.waitForFunction(() => (window.__host.tests ?? []).includes(2));
+  await page.click('#sidebar button:has-text("Stop test")');
+  await page.waitForFunction(() => (window.__host.tests ?? []).at(-1) === 0);
+  await page.screenshot({ path: resolve(outDir, 'plugin-speakers.png') });
 });
 
 await page.screenshot({ path: resolve(outDir, 'plugin-mode.png') });

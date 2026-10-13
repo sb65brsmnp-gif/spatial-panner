@@ -105,6 +105,9 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    * **Scene only**: this track holds the scene and passes its own audio
      through. Use this on an empty or aux track if you want the listener
      controls on a track of their own.
+   The status line ends with **build** and the commit and date the plug-in
+   was built from (`SP_BUILD_ID`, set by CI or from git), so a report can
+   say which build it is about.
 
    One scene per session. Choosing Scene on another track takes the scene
    over: the document moves with it, and the old scene track becomes a
@@ -120,6 +123,13 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
    * Each track is a layer. The layer is named after the track, and the
      **Track** menu on the Layers tab shows which track plays which layer.
      Duplicating a track in Logic puts the copy at the same position.
+     A track becomes a layer once its instance has announced itself for a
+     second (five seconds when the host has not named the track yet): Logic
+     creates short-lived instances while it loads a project, and a new
+     instance only learns its saved layer id when Logic restores its state,
+     so adopting instances at once left unnamed stray layers behind. A layer
+     whose track is gone stays, marked "(no track)" on the Layers tab, with
+     its placement; **Remove layer** in its details deletes it.
    * There is no transport. The editor's playhead follows Logic's, and you
      play, stop, scrub and cycle in Logic. With the plug-in window in front,
      Space, Return, `,`, `.`, Home and End still run Logic's play/stop, go
@@ -132,6 +142,16 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
      page tells the plug-in through the `editing` native function). Cmd+S
      saves the project (scene included) through the menu. Keys the editor
      uses (tool and view keys, Delete, Cmd+Z) stay in the editor.
+     Logic's out-of-process hosting hands the same key-down event to the
+     view twice (the second copy after the key-up), and each copy that goes
+     up unhandled toggles Logic's transport once, so Space played and
+     stopped again; the second copy of an event is swallowed. Every key the
+     view receives is appended to `~/Library/Logs/Spatial Panner/keys.log`
+     with the call path that delivered it.
+   * The window is resized with the grip in the page's bottom-right corner
+     (the page calls the `resize` native function; JUCE's own corner
+     resizer sits underneath the web view, where it cannot be reached).
+     Logic sizes the plug-in window from the view.
    * Logic runs a plug-in only while playing, or on a track that is
      record-enabled or input-monitored. While Logic stands still the
      plug-in sees neither the playhead nor its own listener pose, so the
@@ -150,12 +170,41 @@ killall -9 AudioComponentRegistrar; auval -v aufx Spnr SpPn
 
    On layer tracks, the window shows a small map of the scene with that
    track's layer highlighted.
+   * **Layers appearing on their own ("Layer N").** Every instance of the
+     plug-in on the machine shares one session file, and the scene turns
+     any live instance into a layer. `auval` (which Logic runs on a newly
+     installed build) and Logic's plug-in scan instantiate the plug-in for
+     many seconds with no track name and no playhead, and those instances
+     became unnamed stereo layers. An instance now becomes a layer only
+     once its host has given it a timeline position (`processBlock` with a
+     playhead), which only a track does. Every slot claim, role decision
+     and adoption (or refusal) is appended to
+     `~/Library/Logs/Spatial Panner/tracks.log` with the process and host
+     that made it. Layers whose track is gone are marked "(no track)";
+     *Remove layers without a track* on the Layers tab takes them all out.
 4. **Output.** Binaural or speakers is decided by each track's output format:
    * A stereo track renders binaural. The header's output menu can switch it
      to plain stereo speakers instead.
    * A surround track renders its own layout: quad, 5.0/5.1, 6.x, 7.x, and
      the height formats up to 7.1.4, 7.1.6, 9.1.4 and 9.1.6.
-   * The LFE channel stays silent.
+   * The LFE channel stays silent, unless the scene's bass management sends
+     the lows there.
+   * **Placed speakers.** The editor's Output tab can place a layout in the
+     space instead (a preset, then dragged or typed into place, with trims,
+     delays and bass management, as in the app; see docs/editor.md). Each
+     speaker names the **bus channel** it plays on. Every surround track
+     running Spatial Panner then renders to those speakers on those
+     channels, leaving out a speaker whose channel the track does not have,
+     and plays nothing on the other channels; the track's own format only
+     sets how many channels there are. Logic's I/O Assignments (the track's
+     Output in the Mixer, or the Audio preferences) route the bus channels
+     to the interface. *Test* on a speaker plays pink noise on that channel
+     of the scene track's own output while Logic runs the plug-in. Without
+     placed speakers the view shows the scene track's bus layout. Stereo
+     pairs, several speakers selected at once, the coverage heatmap and
+     Option-hover readout, pinned mixes and the floor picture work as in
+     the app (docs/editor.md); pins are stored in the scene document and
+     reach every track's renderer.
 5. **Bounce** with **File > Bounce**. Every track renders its own layer
    offline, and the result matches playback.
 
@@ -168,7 +217,7 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Parameter | Range | Effect |
 |---|---|---|
 | Listener Speed | 0 to 4 ×, default 1 | Multiplies the scene's speed curve. 0 stops the listener where it is. |
-| Listener Path Position | 0 to 100 % | Where the listener is along the path, when the scene's movement is set to "position along path" (Path & head tab). Draw this lane to move the listener directly. |
+| Listener Path Position | 0 to 100 % | Where the listener is along the path, when the scene's movement is set to "position along path" (Path tab). Draw this lane to move the listener directly. |
 | Listener Head Turn | ±180° | Added to the head direction from the scene. Positive turns left. |
 | Listener Head Tilt | ±90° | Positive looks up. |
 | Listener Head Roll | ±90° | |
@@ -188,6 +237,10 @@ The plug-in's parameters appear in Logic's automation lanes under two groups.
 | Layer Mono | on, off | Stereo tracks: on sums left and right at the centre. Off leaves the scene's Mono setting. |
 | Layer Sphere Radius | 10 to 400 %, default 100 | Ambisonic layers: multiplies the sphere's radius in the scene. |
 | Layer Sphere Rotation | ±180° | Ambisonic layers: added to the recording's yaw (turns the whole field). |
+| Layer Path Speed | 0 to 4 ×, default 1 | Layers with their own path, moving by speed: multiplies the layer's speed curve. 0 stops it where it is. |
+| Layer Path Position | 0 to 100 % | Layers with their own path set to "a point along the path": where along it the layer is. Moving the layer's Position slider in the editor moves this parameter too. |
+| Layer Spatialize | on, off, default on | Off plays the track straight through (left to left, right to right, mono to both at −3 dB), with no spatialisation or room. The layer's own Spatialize switch in the editor must be on for this parameter to turn it on. |
+| Layer Room Send | on, off, default off | A straight-through track still feeds the room's reverb (as if from 1 m). On here or in the editor. |
 
 Automation is evaluated every 32 samples (0.7 ms at 48 kHz), and the
 plug-in reports a latency of 32 samples, which Logic compensates.
@@ -216,6 +269,35 @@ that timeline at its own playhead position. This gives three consequences:
 Without any speed automation (the multiplier stays at 1), the listener
 follows the scene's speed curve exactly, from any start point, with nothing
 to replay.
+
+### Layers with their own paths
+
+A layer's path, timing (speed curve, time keys or a point along the path),
+end behaviour (stop, start again, back and forth), "turn along path" and
+level keys (fades) are part of the scene, drawn in the editor, and every
+track plays them exactly from any start point and in a bounce.
+
+**Layer Path Speed** works like the listener's speed: the track records
+the values it plays (every 50 ms) and integrates them, so after changing
+that lane play the section once, or bounce, before relying on it. Only that
+track is affected, since no other track needs to know where its layer is.
+**Clear recorded automation** (now in every track's header) forgets this
+track's recording as well as, on the scene track, the listener's. The
+recording is saved with the track. **Layer Path Position** affects only the
+moment it is at and needs no replay.
+
+The editor in the plug-in window draws moving layers where the scene's own
+timing puts them; Path Speed and Path Position automation are heard but not
+shown there.
+
+### Linked layers
+
+A layer linked to the listener or to another layer (Link on the Layers tab)
+follows it on every track, from any start point and in a bounce, because the
+link is part of the scene: each track's engine carries the layers its layer
+follows (a chain, if there is one) as position-only copies with no audio.
+Link and unlink keys live on the scene's timeline (the Link lane); there is
+no Logic lane for them.
 
 ## What each track does
 

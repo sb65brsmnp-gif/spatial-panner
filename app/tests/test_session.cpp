@@ -292,6 +292,50 @@ TEST_CASE("Session bounces binaural and 7.1.4 WAV files") {
     CHECK_FALSE(bad.exists());
 }
 
+TEST_CASE("Session routes a custom speaker layout to the outputs its speakers name, and plays the speaker test") {
+    juce::TemporaryFile tmpDir;
+    const auto dir = tmpDir.getFile();
+    dir.createDirectory();
+    Rig rig;
+    auto& s = rig.s;
+    if (!Session::hrtfFile().existsAsFile()) SKIP("HRTF not available");
+    s.setScene(testScene(dir), 20);
+    waitIdle(s);
+
+    // Two speakers on device outputs 7 and 8 (1-based), nothing elsewhere.
+    sp::SpeakerLayout custom;
+    custom.name = "custom";
+    sp::Speaker a, b;
+    a.name = "L"; a.azimuthDeg = 30; a.distance = 2; a.channel = 6;
+    b.name = "R"; b.azimuthDeg = -30; b.distance = 2; b.channel = 7;
+    custom.speakers = {a, b};
+    OutputSetup out;
+    out.mode = sp::OutputMode::Speakers;
+    out.layout = "custom";
+    out.custom = custom.toJson();
+    s.setOutput(out);
+    waitIdle(s);
+    s.transport(Session::Transport::Play);
+    auto d = rig.run(1.0, 12);
+    for (int ch = 0; ch < 12; ++ch) {
+        INFO("channel " << ch);
+        if (ch == 6 || ch == 7) CHECK(rms(d[static_cast<size_t>(ch)], 12000) > 1e-3);
+        else CHECK(rms(d[static_cast<size_t>(ch)], 12000) == 0.0);
+    }
+    s.transport(Session::Transport::Stop);
+    rig.run(4.0, 12);
+
+    // The speaker test puts noise on one output only, scene or no scene.
+    s.setTestNoise(2);
+    auto n = rig.run(0.5, 12);
+    CHECK(rms(n[2], 4800) > 0.03);
+    CHECK(rms(n[2], 4800) < 0.3);
+    CHECK(rms(n[0], 4800) == 0.0);
+    s.setTestNoise(-1);
+    auto q = rig.run(0.5, 12);
+    CHECK(rms(q[2], 4800) == 0.0);
+}
+
 int main(int argc, char* argv[]) {
     juce::ScopedJuceInitialiser_GUI init;
     return Catch::Session().run(argc, argv);

@@ -1,14 +1,17 @@
 add_executable(sp_tests
   test_math.cpp
   test_pose.cpp
+  test_layer_motion.cpp
   test_dsp.cpp
   test_renderer.cpp
+  test_pan_probe.cpp
   test_scene_json.cpp
   test_live_update.cpp
   test_reverb.cpp
   test_room.cpp
   test_ir.cpp
-  test_soundfield.cpp)
+  test_soundfield.cpp
+  test_layer_links.cpp)
 if(SP_WITH_STEAM_AUDIO)
   target_sources(sp_tests PRIVATE test_steam.cpp)
 endif()

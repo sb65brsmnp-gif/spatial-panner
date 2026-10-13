@@ -45,6 +45,7 @@ struct Program {
     std::vector<const float*> inPtrs;
     std::vector<std::vector<float>> out;
     std::vector<float*> outPtrs;
+    std::vector<int> route;   // renderer output c plays on device output route[c]
 
     void allocate() {
         const size_t nl = static_cast<size_t>(renderer->numInputs()), no = static_cast<size_t>(renderer->numOutputs());
@@ -54,6 +55,10 @@ struct Program {
         outPtrs.resize(no);
         for (size_t i = 0; i < nl; ++i) inPtrs[i] = in[i].data();
         for (size_t i = 0; i < no; ++i) outPtrs[i] = out[i].data();
+        route.resize(no);
+        const auto& cfg = renderer->config();
+        for (size_t i = 0; i < no; ++i)
+            route[i] = cfg.mode == sp::OutputMode::Speakers ? cfg.layout.channelOf(static_cast<int>(i)) : static_cast<int>(i);
     }
 };
 
@@ -69,7 +74,14 @@ struct Patch {
 static float editHeadroomDistance(const sp::Scene& s) {
     float r = 5.0f;
     auto grow = [&](const sp::Vec3& p) { r = std::max(r, p.length()); };
-    for (const auto& l : s.layers) grow(l.position);
+    for (const auto& l : s.layers) {
+        grow(l.position);
+        // A layer's path carries it from its place by the path's shape.
+        if (!l.motion.hasPath() || l.motion.path.segments.front().points.empty()) continue;
+        const sp::Vec3 p0 = l.motion.path.segments.front().points.front();
+        for (const auto& seg : l.motion.path.segments)
+            for (const auto& q : seg.points) grow(l.position + (q - p0));
+    }
     for (const auto& p : s.listener.paths)
         for (const auto& seg : p.segments)
             for (const auto& q : seg.points) grow(q);
@@ -117,13 +129,24 @@ juce::File Session::hrtfFile() {
     return {};
 }
 
+sp::SpeakerLayout OutputSetup::speakerLayout() const {
+    if (!custom.empty()) {
+        try {
+            return sp::SpeakerLayout::fromJson(custom);
+        } catch (const std::exception&) {
+        }
+    }
+    sp::SpeakerLayout l = sp::SpeakerLayout::preset(layout.toStdString());
+    if (l.numChannels() == 0) l = sp::SpeakerLayout::preset("7.1.4");
+    return l;
+}
+
 sp::RenderConfig Session::makeConfig(const OutputSetup& out, double rate) {
     sp::RenderConfig cfg;
     cfg.sampleRate = rate;
     cfg.mode = out.mode;
     cfg.ambisonicsOrder = 3;
-    cfg.layout = sp::SpeakerLayout::preset(out.layout.toStdString());
-    if (cfg.layout.numChannels() == 0) cfg.layout = sp::SpeakerLayout::preset("7.1.4");
+    cfg.layout = out.speakerLayout();
     cfg.hrtfPath = hrtfFile().getFullPathName().toStdString();
     return cfg;
 }
@@ -568,26 +591,41 @@ void Session::renderChunk(float* const* out, int numOut, int offset, int n) {
 
     fillInputs(*p, n, g0, step, true);
     p->renderer->process(p->inPtrs.data(), p->outPtrs.data(), n, t);
-    const int nc = std::min(numOut, static_cast<int>(p->out.size()));
+    const int nc = static_cast<int>(p->out.size());
+    // Renderer output c goes to the device output its speaker names (a
+    // custom layout's channels); outputs the device lacks are dropped.
+    auto dest = [&](const Program& q, int c) -> float* {
+        const int d = q.route[static_cast<size_t>(c)];
+        return d >= 0 && d < numOut && out[d] ? out[d] + offset : nullptr;
+    };
 
     if (fading_) {
         Program* f = fading_;
         fillInputs(*f, n, g0, step, false);
         f->renderer->process(f->inPtrs.data(), f->outPtrs.data(), n, t);
         const int fadeLen = static_cast<int>(kFadeSeconds * sr);
-        const int nf = std::min(numOut, static_cast<int>(f->out.size()));
+        const int nf = static_cast<int>(f->out.size());
         for (int k = 0; k < n; ++k) {
             const float w = std::min(1.0f, static_cast<float>(fadePos_ + k) / static_cast<float>(fadeLen));
-            const float gi = std::sin(w * juce::MathConstants<float>::halfPi), go = std::cos(w * juce::MathConstants<float>::halfPi);
+            const float gi = std::sin(w * juce::MathConstants<float>::halfPi);
             for (int c = 0; c < nc; ++c) p->out[static_cast<size_t>(c)][static_cast<size_t>(k)] *= gi;
-            for (int c = 0; c < nf; ++c) out[c][offset + k] += f->out[static_cast<size_t>(c)][static_cast<size_t>(k)] * go;
+        }
+        for (int c = 0; c < nf; ++c) {
+            float* dst = dest(*f, c);
+            if (!dst) continue;
+            const float* src = f->out[static_cast<size_t>(c)].data();
+            for (int k = 0; k < n; ++k) {
+                const float w = std::min(1.0f, static_cast<float>(fadePos_ + k) / static_cast<float>(fadeLen));
+                dst[k] += src[k] * std::cos(w * juce::MathConstants<float>::halfPi);
+            }
         }
         fadePos_ += n;
         if (fadePos_ >= fadeLen) { retire(fading_); fading_ = nullptr; }
     }
     for (int c = 0; c < nc; ++c) {
+        float* dst = dest(*p, c);
+        if (!dst) continue;
         const float* src = p->out[static_cast<size_t>(c)].data();
-        float* dst = out[c] + offset;
         for (int k = 0; k < n; ++k) dst[k] += src[k];
     }
 
@@ -621,6 +659,27 @@ void Session::renderChunk(float* const* out, int numOut, int offset, int n) {
     time_ = static_cast<double>(pos_) / sr;
 }
 
+// Pink noise (Paul Kellet's 3-pole filter on white noise) at about -20 dBFS
+// RMS on the chosen output, faded in and out over ~10 ms.
+void Session::addTestNoise(float* const* out, int numOut, int numSamples) {
+    const int ch = testChannel_.load(std::memory_order_relaxed);
+    const float target = ch >= 0 && ch < numOut && out[ch] ? 1.0f : 0.0f;
+    if (target == 0 && testGain_ <= 0) return;
+    const float step = 1.0f / (0.01f * static_cast<float>(std::max(1000.0, deviceRate_.load())));
+    float* dst = target > 0 ? out[ch] : nullptr;
+    for (int i = 0; i < numSamples; ++i) {
+        testGain_ = target > testGain_ ? std::min(target, testGain_ + step) : std::max(target, testGain_ - step);
+        noiseSeed_ = noiseSeed_ * 1664525u + 1013904223u;
+        const float white = (static_cast<float>(noiseSeed_ >> 8) / 8388608.0f - 1.0f);
+        pinkState_[0] = 0.99765f * pinkState_[0] + white * 0.0990460f;
+        pinkState_[1] = 0.96300f * pinkState_[1] + white * 0.2965164f;
+        pinkState_[2] = 0.57000f * pinkState_[2] + white * 1.0526913f;
+        const float pink = (pinkState_[0] + pinkState_[1] + pinkState_[2] + white * 0.1848f) * 0.05f;
+        if (dst) dst[i] += pink * testGain_;
+        else if (testGain_ <= 0) break;
+    }
+}
+
 void Session::audioDeviceIOCallbackWithContext(const float* const*, int, float* const* out, int numOut, int numSamples,
                                                const juce::AudioIODeviceCallbackContext&) {
     const auto t0 = juce::Time::getHighResolutionTicks();
@@ -629,6 +688,7 @@ void Session::audioDeviceIOCallbackWithContext(const float* const*, int, float* 
     const juce::SpinLock::ScopedTryLockType lock(audioLock_);
     if (!lock.isLocked()) return;
     handleCommands();
+    addTestNoise(out, numOut, numSamples);
     if (!current_ || std::abs(current_->sampleRate - deviceRate_.load()) > 0.5) return;
     for (int done = 0; done < numSamples;) {
         const int n = std::min(current_->maxBlock, numSamples - done);

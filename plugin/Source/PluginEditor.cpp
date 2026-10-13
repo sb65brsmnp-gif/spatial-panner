@@ -11,6 +11,7 @@
 #include "sp/Pose.h"
 #include "sp/SceneAnalysis.h"
 #include "sp/SceneJson.h"
+#include "sp/PanProbe.h"
 
 namespace spplug {
 
@@ -94,7 +95,60 @@ json audioInfoJson(const juce::File& f) {
 
 }  // namespace
 
+constexpr int kHeaderHeight = 40;
+
 // ============================================================ 3D editor (scene)
+
+// Pictures for the editor's floor: the page asks for /asset/<base64url of
+// the file's path> (the URL scheme hands the provider the path only). Only
+// image files are served, read fresh each time.
+static std::optional<juce::WebBrowserComponent::Resource> imageResource(const juce::String& url) {
+    if (!url.startsWith("/asset/")) return std::nullopt;
+    auto b64 = url.fromFirstOccurrenceOf("/asset/", false, false).upToFirstOccurrenceOf("?", false, false)
+                   .replaceCharacter('-', '+').replaceCharacter('_', '/');
+    while (b64.length() % 4 != 0) b64 += "=";
+    juce::MemoryOutputStream decoded;
+    if (!juce::Base64::convertFromBase64(decoded, b64)) return std::nullopt;
+    const juce::File f(juce::String::fromUTF8(static_cast<const char*>(decoded.getData()), static_cast<int>(decoded.getDataSize())));
+    const auto ext = f.getFileExtension().toLowerCase();
+    const char* mime = ext == ".png" ? "image/png" : (ext == ".jpg" || ext == ".jpeg") ? "image/jpeg" : ext == ".gif" ? "image/gif"
+                     : ext == ".webp" ? "image/webp" : ext == ".bmp" ? "image/bmp" : nullptr;
+    if (mime == nullptr || !f.existsAsFile()) return std::nullopt;
+    juce::MemoryBlock bytes;
+    if (!f.loadFileAsData(bytes)) return std::nullopt;
+    const auto* d = static_cast<const std::byte*>(bytes.getData());
+    return juce::WebBrowserComponent::Resource{std::vector<std::byte>(d, d + bytes.getSize()), mime};
+}
+
+// {"output": {"speakers": [...], "bass": {...}}, "points": [[x,y,z]...] (head-local),
+//  "pins": [{"position": [x,y,z], "radius", "gains_db": [...]}] (head-local),
+//  "rolloff", "min_distance", "reference_distance"}
+// -> {"gains_db": [[per speaker]...]} (-120 = nothing)
+static std::string panGainsJson(const nlohmann::json& a) {
+    using nlohmann::json;
+    sp::PanProbeRequest req;
+    req.layout = sp::SpeakerLayout::fromJson(a.value("output", json::object()).dump());
+    for (const auto& p : a.value("points", json::array()))
+        req.points.push_back({p.at(0).get<float>(), p.at(1).get<float>(), p.at(2).get<float>()});
+    for (const auto& pj : a.value("pins", json::array())) {
+        sp::Pin pin;
+        const auto& pos = pj.at("position");
+        pin.position = {pos.at(0).get<float>(), pos.at(1).get<float>(), pos.at(2).get<float>()};
+        pin.radius = std::max(0.01f, pj.value("radius", 1.5f));
+        for (const auto& g : pj.value("gains_db", json::array())) pin.gainsDb.push_back(g.is_number() ? g.get<float>() : -120.0f);
+        req.pins.push_back(std::move(pin));
+    }
+    req.rolloff = a.value("rolloff", 1.0f);
+    req.minDistance = a.value("min_distance", 0.25f);
+    req.referenceDistance = a.value("reference_distance", 1.0f);
+    json rows = json::array();
+    for (const auto& row : sp::panProbe(req)) {
+        json r = json::array();
+        for (float g : row) r.push_back(g > 1e-6f ? std::max(-120.0f, 20.0f * std::log10(g)) : -120.0f);
+        rows.push_back(std::move(r));
+    }
+    return json{{"gains_db", rows}}.dump();
+}
 
 class SceneWebView : public juce::Component, private juce::Timer {
 public:
@@ -110,10 +164,10 @@ public:
                                    return juce::WebBrowserComponent::Resource{std::vector<std::byte>(d, d + BinaryData::index_htmlSize),
                                                                               "text/html; charset=utf-8"};
                                }
-                               return std::nullopt;
+                               return imageResource(url);
                            });
         const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
-                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing"};
+                               "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "editing", "resize", "testSpeaker", "panGains"};
         for (const char* n : names) {
             const std::string name = n;
             options = options.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args,
@@ -141,6 +195,10 @@ public:
     }
 
     void resized() override { browser_->setBounds(getLocalBounds()); }
+
+    // The page's corner grip asks for a new size of this view (CSS pixels,
+    // which are JUCE pixels); the editor turns it into a window size.
+    std::function<void(int, int)> onResizeRequest;
 
 private:
     void emit(const char* id, const std::string& j) {
@@ -198,13 +256,32 @@ private:
         }
         if (name == "info") {
             json tracks = json::array();
-            for (const auto& t : proc_.hostTracks()) tracks.push_back({{"id", t.id}, {"name", t.name}});
+            // The editor's tick is the one reader of the meters (reading resets
+            // the peaks), so this does not take them.
+            for (const auto& t : proc_.hostTracks(false)) tracks.push_back({{"id", t.id}, {"name", t.name}});
             const auto out = proc_.getBus(false, 0) ? proc_.getBus(false, 0)->getCurrentLayout() : juce::AudioChannelSet::stereo();
+            // What this instance renders to: the bus's channels and, in
+            // Speakers mode, the speakers (the bus's own, or the scene's custom
+            // layout on the bus channels its speakers name, 1-based).
+            const sp::SpeakerLayout layout = proc_.effectiveLayout();
+            const std::vector<int> route = proc_.effectiveRoute();
+            const bool binaural = out == juce::AudioChannelSet::stereo() && !proc_.stereoAsSpeakers();
+            json speakers = json::array();
+            if (!binaural)
+                for (int i = 0; i < layout.numChannels(); ++i) {
+                    const auto& k = layout.speakers[static_cast<size_t>(i)];
+                    speakers.push_back({{"name", k.name}, {"azimuth", k.azimuthDeg}, {"elevation", k.elevationDeg}, {"distance", k.distance},
+                                        {"lfe", k.lfe}, {"trim_db", k.trimDb}, {"delay_ms", k.delayMs},
+                                        {"channel", (i < static_cast<int>(route.size()) ? route[static_cast<size_t>(i)] : i) + 1}});
+                }
+            json channels = json::array();
+            for (int c = 0; c < out.size(); ++c) channels.push_back(juce::AudioChannelSet::getAbbreviatedChannelTypeName(out.getTypeOfChannel(c)).toStdString());
             done(json{{"device", juce::PluginHostType().getHostDescription()},
                       {"sampleRate", proc_.getSampleRate()},
                       {"outputChannels", out.size()},
                       {"cpu", proc_.cpuLoad()},
-                      {"output", {{"mode", "binaural"}, {"layout", "7.1.4"}}},
+                      {"output", {{"mode", binaural ? "binaural" : "speakers"}, {"layout", binaural ? "stereo" : layout.name}, {"speakers", speakers},
+                                  {"channels", channels}, {"bass", json::parse(layout.toJson())["bass"]}}},
                       {"status", proc_.statusText().toStdString()},
                       {"host", "plugin"},
                       {"steamAudio", sp::Renderer::steamAudioAvailable()},
@@ -223,6 +300,22 @@ private:
 #if JUCE_MAC
             setTextEditing(a.value("on", false));
 #endif
+            done(json{{"ok", true}}.dump());
+            return;
+        }
+        if (name == "panGains") { done(panGainsJson(a)); return; }
+        if (name == "testSpeaker") {
+            // Pink noise on one bus channel (1-based; 0 = off) while the host
+            // runs this instance (Logic: playing, or the track armed).
+            proc_.setTestNoise(a.value("channel", 0) - 1);
+            done(json{{"ok", true}}.dump());
+            return;
+        }
+        if (name == "resize") {
+            // The window's resize grip lives in the page: JUCE's own corner
+            // resizer is painted underneath the web view, where it cannot be
+            // reached, and Logic sizes the plug-in window from the view.
+            if (onResizeRequest) onResizeRequest(a.value("width", 0), a.value("height", 0));
             done(json{{"ok", true}}.dump());
             return;
         }
@@ -471,8 +564,9 @@ PluginEditor::PluginEditor(SpatialPannerProcessor& p) : AudioProcessorEditor(p),
     clearHistory_.onClick = [this] {
         proc_.clearAutomationHistory();
     };
-    clearHistory_.setTooltip("Forget the listener automation recorded so far. Speed automation moves the listener by "
-                             "what has been played; after editing it early in the song, play through once or clear this.");
+    clearHistory_.setTooltip("Forget the automation recorded so far: the listener's (on the scene track) and this track's "
+                             "Path Speed. Speed automation moves the listener, and a layer along its path, by what has been "
+                             "played; after editing it early in the song, play through once or clear this.");
     for (auto* l : {&status_, &outputLabel_}) {
         l->setColour(juce::Label::textColourId, kMuted);
         l->setFont(juce::FontOptions(13.0f));
@@ -502,6 +596,10 @@ void PluginEditor::rebuildContent() {
         web_ = std::make_unique<SceneWebView>(proc_);
         addAndMakeVisible(*web_);
         setResizeLimits(900, 560, 2560, 1600);
+        web_->onResizeRequest = [this](int w, int h) {
+            if (w <= 0 || h <= 0) return;
+            setSize(juce::jlimit(900, 2560, w), juce::jlimit(560, 1600, h + kHeaderHeight));
+        };
         setSize(1320, 840);
     } else if (!scene && !map_) {
         web_.reset();
@@ -518,7 +616,8 @@ void PluginEditor::refreshHeader() {
     const auto r = proc_.role();
     role_.setSelectedId(r == SpatialPannerProcessor::Role::Scene ? (proc_.sceneIsLayer() ? 2 : 3) : (r == SpatialPannerProcessor::Role::Layer ? 1 : 0),
                         juce::dontSendNotification);
-    status_.setText(proc_.statusText(), juce::dontSendNotification);
+    // The build (commit and date) so a report can say which one it is about.
+    status_.setText(proc_.statusText() + juce::String(juce::CharPointer_UTF8("  \xc2\xb7  build ")) + SP_BUILD_ID, juce::dontSendNotification);
     const auto out = proc_.getBus(false, 0) ? proc_.getBus(false, 0)->getCurrentLayout() : juce::AudioChannelSet::stereo();
     const bool stereo = out == juce::AudioChannelSet::stereo();
     const bool pass = r == SpatialPannerProcessor::Role::Scene && !proc_.sceneIsLayer();
@@ -526,7 +625,7 @@ void PluginEditor::refreshHeader() {
     output_.setSelectedId(proc_.stereoAsSpeakers() ? 2 : 1, juce::dontSendNotification);
     outputLabel_.setVisible(!stereo || pass);
     outputLabel_.setText(proc_.outputText(), juce::dontSendNotification);
-    clearHistory_.setVisible(r == SpatialPannerProcessor::Role::Scene);
+    clearHistory_.setVisible(true);
 }
 
 void PluginEditor::timerCallback() {
@@ -538,7 +637,7 @@ void PluginEditor::paint(juce::Graphics& g) { g.fillAll(kPanel); }
 
 void PluginEditor::resized() {
     auto area = getLocalBounds();
-    auto header = area.removeFromTop(40).reduced(8, 6);
+    auto header = area.removeFromTop(kHeaderHeight).reduced(8, 6);
     role_.setBounds(header.removeFromLeft(std::min(390, header.getWidth() / 2)));
     header.removeFromLeft(8);
     if (output_.isVisible()) output_.setBounds(header.removeFromLeft(180));

@@ -71,7 +71,9 @@ CPU is the limit (see docs/engine.md for figures; a stereo pair costs two
 layers, an Ambisonic sphere about four).
 
 **Path tools** (toolbar, key in brackets). Drawing on an empty scene creates
-the path; drawing again appends to the current path's end.
+the path; drawing again appends to the current path's end. The tools draw
+the listener's path, or the selected layer's own (see *Layer paths* below;
+*for* in the toolbar shows which).
 
 | Tool | Use |
 | --- | --- |
@@ -82,7 +84,7 @@ the path; drawing again appends to the current path's end.
 | Pen (P) | Bézier pen: click for a corner, drag for a smooth point; Enter finishes. |
 | Shape (S) | Drag out a circle, ellipse, figure 8, spiral or helix from its centre. |
 
-Paths are drawn on a plane at the height set under **Path & head** (default
+Paths are drawn on a plane at the height set under **Path** (default
 ear height, 1.6 m); draw in the Front or Side view to draw vertically. Grid
 snap is on the same tab.
 
@@ -137,6 +139,52 @@ is in the band. In the default
 of the direction of travel; in *keyframed* mode they are absolute; *look at*
 keeps the head on a point.
 
+**Layer paths**: the drawing tools draw for whoever is selected. With a
+layer selected, picking a tool (toolbar or key) draws that layer's path; with
+nothing selected, the listener's. *for* in the toolbar shows which and
+changes it (choose *Listener* to draw the listener's path while a layer is
+selected), and a hint in the 3D view says whose path is being drawn.
+*Draw a path* on the Layers tab does the same with the curve tool (click
+points, Enter to finish). The path is drawn at the layer's height and the layer moves to
+where it begins; the line drawn is the line it travels. Dragging the layer
+moves its path with it; its points edit like the listener's (Option+click
+the line adds one, Delete removes one; dragging the first point moves the
+layer). *Moves by* picks the timing: *its speed* (a speed curve on the
+timeline, setting off at *Sets off at*), *times to be at* (keys on a Path %
+lane: where along the path it is at that time) or *a point along the path*
+(a slider, and the Path Position parameter in Logic). *At the end* it stops,
+starts again or goes back and forth; *Turn* turns it with its direction of
+travel (facing, stereo bar, sphere). During playback and scrubbing the 3D
+view shows each layer where the engine has it.
+
+With a layer selected the timeline shows that layer's lanes: **Layer speed**
+(or **Path %**) with its own green *sets off* and red *arrives* lines, which
+drag like the listener's, and **Layer level** for fades (double-click to add
+a key; the bottom of the lane is silence). Esc deselects the layer and
+brings back the listener's lanes.
+
+**Spatialize** (Layers tab): off, the layer plays straight through, as it
+is: mono to both ears, stereo left to left and right to right, no distance,
+direction, Doppler or room. It stays a layer with its level, mute, fades and
+place in the scene, drawn as a see-through ball marked *direct*. *Room*
+sends it to the room's reverb anyway.
+
+**Link** (Layers tab): link a layer to the listener or to another layer and
+it keeps its place and bearing relative to that one as it moves and turns
+with its direction of travel (a dashed line joins them in the 3D view while
+linked). A linked layer with its own path travels it relative to its leader.
+The timeline gets a **Link** lane for the layer: double-click the bottom to
+unlink it at that time, the top to link it again; the selected key's bar
+says which. Unlinking leaves the layer where it is. *From the start* unticked
+leaves it free until the first linking key. A layer cannot follow one of its
+own followers.
+
+**Fit timing** (Path tab, shown once a layer has a path): tick the
+listener and the layers that should set off and arrive together, set the
+times and click *Fit*. Each speed curve is stretched or squeezed as a whole
+(the shape of the journey stays); a layer timed by keys has its keys spread
+over the same span.
+
 **Room**: a new scene is outdoors (ground only: one reflection off the
 ground, no walls, no reverb tail). *Type* on the Room tab switches to a box
 room with size and centre, wall materials (absorption per band), air
@@ -173,10 +221,84 @@ signals (`sp-gensignals` writes `hall_ir.wav`, stereo 2.5 s, and
 or first-order ambiX, work the same way. The scene file stores the IR path
 relative to the scene, like audio.
 
-**Output**: binaural (SADIE II KU100 HRTF), speakers (stereo, quad, 5.1, 7.1,
-5.1.4, 7.1.4, 9.1.6, mapped onto the device's first outputs) or ambiX. Changes
-apply while playing. *Bounce to WAV…* renders the scene to a 24-bit WAV in the
-current output format, faster than real time.
+**Output**: binaural (SADIE II KU100 HRTF), speakers or ambiX. Changes apply
+while playing. *Bounce to WAV…* renders the scene to a 24-bit WAV in the
+current output format, faster than real time (in speaker mode one file
+channel per speaker, in the list's order).
+
+**Speakers.** Choosing a layout (stereo, quad, 5.1, 7.1, 5.1.4, 7.1.4, 9.1.6)
+puts its speakers in the 3D view, 2 m from the listener's head, each on the
+device output of its place in the layout. They are drawn in the head's frame
+and turn with it, which is how the renderer sees them: a layer plays from the
+speakers nearest its direction from the head. From there the layout is
+yours: drag a speaker to move it around the head (Shift+drag for height), or
+select it and type its azimuth (positive to the left), elevation, distance
+and which **output** it plays on; *Test* plays pink noise on that output.
+Add speakers and subwoofers, remove them (one non-subwoofer stays), set a
+*trim* and an *extra delay* per speaker. The distances align the speakers:
+a nearer speaker is delayed and turned down (by the distance ratio) so every
+speaker's sound reaches the head together, which is what a layout with an
+off-centre listening position needs; all the same distance, nothing changes.
+**Bass management** (shown once a speaker is a subwoofer): the lows below a
+crossover are taken out of every speaker and their sum goes to the
+subwoofer(s), with a Butterworth 12/24 dB/oct or Linkwitz-Riley 24/48 dB/oct
+filter and a sub level. Switching back to headphones hides the speakers;
+they come back as placed. The layout is saved in the scene file
+(`editor.output.speakers` and `editor.output.bass`), so the plug-in reads the
+same one.
+
+**Selecting several things.** Cmd+click a layer or speaker in the 3D view
+(or in a list) to add it to the selection or take it out; Cmd+drag on empty
+space draws a box and selects what is inside (Shift keeps the earlier
+selection). Dragging a selected ball moves every selected layer by the same
+amount; dragging a selected speaker turns and moves every selected speaker
+together; Delete removes them all.
+
+**Stereo pairs.** A speaker's *Stereo pair with* menu pairs it with another:
+the two are set 30° either side of their shared centre (a 60° stereo field,
+the left one on the left, at the first one's height and distance) and from
+then on move, turn and change distance as one, whether dragged or typed. A
+bar joins them in the view. *Not paired* frees both. *Hide speakers* takes
+the speakers out of the view (they keep playing); *Custom* in the Layout
+menu starts with no speakers at all, and the engine plays plain stereo
+until some are placed.
+
+**Heatmap and readout.** *Heatmap* in the Speakers section paints how loud a
+layer at each point of the floor (at head height) would be on the chosen
+speaker, from -36 dB (dark blue) to +6 dB (white), with the panner's
+distance law and the speaker alignment included; it follows the listener
+and the speakers as they move. Hold Option and move the pointer over the
+view to read every speaker's level at that point in the HUD. (The browser
+preview approximates the panner; the app and plug-in ask the engine.)
+
+**Pinned mixes.** A pin (Output tab, *Add pin*) fixes the speaker levels a
+layer's direct sound gets at a point, like a mark in QLab: inside its radius
+the panner is blended towards the pin's levels, fully at the centre, not at
+all at the edge, and overlapping pins share by proximity. The levels set the
+balance between speakers; distance still sets the overall loudness, and
+the reflections and reverb keep their geometric placement. *Capture from
+panner* fills a pin with what the panner does there, to tweak from. Pins
+are dragged in the view like layers, and saved in the scene (`pins`).
+Speakers output only.
+
+**Test source** (app): *Test source…* puts a chosen file on a looping layer
+ahead of the listener, to drag about while it plays and hear what the
+speakers do. It is never saved and is removed before a bounce.
+
+**Floor picture** (Room tab): a floor plan, stage drawing or photo laid flat
+under the scene. Pick the file, set its width in metres (the depth follows
+the picture's shape), rotation, centre, height above the floor and opacity.
+*Set scale* takes two clicks on the picture and the real distance between
+those points, and resizes it to match. The picture's top edge faces forward
+(-Z) at 0°. Saved in the scene (`editor.floor_image`, the file by path).
+
+**Settings** tab: text size, height above the ball, background and maximum
+width of the layer labels in the 3D view, or labels on the selected layer
+only; meter width and height; the size of the balls and path points; the
+second marks along the path; name tags on speakers. These are kept in the
+browser's storage (per app or plug-in), not in the scene. Meters hold each
+peak 150 ms and fall at 30 dB/s, so a host that runs the plug-in in bursts
+does not make them flicker.
 
 Undo/redo (⌘Z / ⇧⌘Z), open (⌘O), save (⌘S / ⇧⌘S); the same in the File
 menu of the menu bar, with **Open Recent** (the last 10 scenes opened or

@@ -1,9 +1,12 @@
 #include "Bridge.h"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cmath>
 
 #include "sp/SceneAnalysis.h"
 #include "sp/SceneJson.h"
+#include "sp/PanProbe.h"
 
 namespace spapp {
 
@@ -30,6 +33,27 @@ sp::OutputMode modeFrom(const std::string& s) {
 
 std::string modeName(sp::OutputMode m) {
     return m == sp::OutputMode::Speakers ? "speakers" : m == sp::OutputMode::Ambisonics ? "ambix" : "binaural";
+}
+
+// The editor's output setting: {"mode", "layout", "speakers"?: [...], "bass"?: {...}}.
+// A speaker list makes a custom layout (checked here; the error names what
+// is wrong); without one the named preset plays.
+OutputSetup outputFrom(const json& a, std::string& error) {
+    OutputSetup o;
+    o.mode = modeFrom(a.value("mode", "binaural"));
+    o.layout = juce::String(a.value("layout", "7.1.4"));
+    if (a.contains("speakers") && a["speakers"].is_array() && !a["speakers"].empty()) {
+        json custom{{"name", o.layout.toStdString()}, {"speakers", a["speakers"]}};
+        if (a.contains("bass")) custom["bass"] = a["bass"];
+        try {
+            o.custom = sp::SpeakerLayout::fromJson(custom.dump()).toJson();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    } else if (sp::SpeakerLayout::preset(o.layout.toStdString()).numChannels() == 0) {
+        error = "Unknown speaker layout " + o.layout.toStdString();
+    }
+    return o;
 }
 
 // Audio paths are absolute in the editor and relative to the scene file on
@@ -150,6 +174,36 @@ void Bridge::menuCommand(const juce::String& action, const juce::String& path) {
     emit("menu", json{{"action", action.toStdString()}, {"path", path.toStdString()}}.dump());
 }
 
+// {"output": {"speakers": [...], "bass": {...}}, "points": [[x,y,z]...] (head-local),
+//  "pins": [{"position": [x,y,z], "radius", "gains_db": [...]}] (head-local),
+//  "rolloff", "min_distance", "reference_distance"}
+// -> {"gains_db": [[per speaker]...]} (-120 = nothing)
+static std::string panGainsJson(const nlohmann::json& a) {
+    using nlohmann::json;
+    sp::PanProbeRequest req;
+    req.layout = sp::SpeakerLayout::fromJson(a.value("output", json::object()).dump());
+    for (const auto& p : a.value("points", json::array()))
+        req.points.push_back({p.at(0).get<float>(), p.at(1).get<float>(), p.at(2).get<float>()});
+    for (const auto& pj : a.value("pins", json::array())) {
+        sp::Pin pin;
+        const auto& pos = pj.at("position");
+        pin.position = {pos.at(0).get<float>(), pos.at(1).get<float>(), pos.at(2).get<float>()};
+        pin.radius = std::max(0.01f, pj.value("radius", 1.5f));
+        for (const auto& g : pj.value("gains_db", json::array())) pin.gainsDb.push_back(g.is_number() ? g.get<float>() : -120.0f);
+        req.pins.push_back(std::move(pin));
+    }
+    req.rolloff = a.value("rolloff", 1.0f);
+    req.minDistance = a.value("min_distance", 0.25f);
+    req.referenceDistance = a.value("reference_distance", 1.0f);
+    json rows = json::array();
+    for (const auto& row : sp::panProbe(req)) {
+        json r = json::array();
+        for (float g : row) r.push_back(g > 1e-6f ? std::max(-120.0f, 20.0f * std::log10(g)) : -120.0f);
+        rows.push_back(std::move(r));
+    }
+    return json{{"gains_db", rows}}.dump();
+}
+
 std::string Bridge::call(const std::string& name, const std::string& arg, std::function<void(std::string)> async) {
     const json a = arg.empty() ? json::object() : json::parse(arg, nullptr, false);
     if (a.is_discarded()) return err("Bad arguments for " + name);
@@ -179,11 +233,17 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
         return "";
     }
     if (name == "setOutput") {
-        OutputSetup o;
-        o.mode = modeFrom(a.value("mode", "binaural"));
-        o.layout = juce::String(a.value("layout", "7.1.4"));
-        if (sp::SpeakerLayout::preset(o.layout.toStdString()).numChannels() == 0) return err("Unknown speaker layout " + o.layout.toStdString());
+        std::string e;
+        const OutputSetup o = outputFrom(a, e);
+        if (!e.empty()) return err(e);
         session_.setOutput(o);
+        return json{{"ok", true}}.dump();
+    }
+    if (name == "panGains") return panGainsJson(a);
+    if (name == "testSpeaker") {
+        // {"channel": 1-based device output, 0 = off}
+        const int ch = a.value("channel", 0);
+        session_.setTestNoise(ch >= 1 ? ch - 1 : -1);
         return json{{"ok", true}}.dump();
     }
     if (name == "info") {
@@ -242,7 +302,7 @@ std::string Bridge::call(const std::string& name, const std::string& arg, std::f
 juce::WebBrowserComponent::Options Bridge::addTo(juce::WebBrowserComponent::Options o) {
     const char* names[] = {"analyze", "setScene", "transport", "setOutput", "info", "audioInfo", "chooseAudioFiles", "chooseFile",
                            "openScene", "saveScene", "bounce", "showAudioSettings", "startupScene", "confirm", "revealFile",
-                           "recentScenes", "clearRecentScenes", "openScenePath"};
+                           "recentScenes", "clearRecentScenes", "openScenePath", "testSpeaker", "panGains"};
     for (const char* n : names) {
         const std::string name = n;
         o = o.withNativeFunction(juce::Identifier(n), [this, name](const juce::Array<juce::var>& args, Completion done) {
@@ -401,9 +461,9 @@ void Bridge::saveScene(const std::string& arg, std::function<void(std::string)> 
 // events, which is what tells the user where the file is.
 void Bridge::bounce(const std::string& arg, std::function<void(std::string)> done) {
     const json a = json::parse(arg);
-    OutputSetup o;
-    o.mode = modeFrom(a.value("mode", "binaural"));
-    o.layout = juce::String(a.value("layout", "7.1.4"));
+    std::string e;
+    const OutputSetup o = outputFrom(a, e);
+    if (!e.empty()) { done(json{{"nativeError", e}}.dump()); return; }
     const double start = a.value("start", 0.0), end = a.value("end", 30.0), rate = a.value("sampleRate", 48000.0);
     if (session_.bouncing()) { done(json{{"nativeError", "A bounce is already running"}}.dump()); return; }
     const juce::String suffix = o.mode == sp::OutputMode::Binaural ? "binaural" : o.mode == sp::OutputMode::Ambisonics ? "ambix" : o.layout;

@@ -328,3 +328,80 @@ TEST_CASE("Stereo geometry: offsets and ends round trip") {
     s.layers = {a, b};
     CHECK(inputChannels(s) == 3);
 }
+
+TEST_CASE("Speakers: a custom layout's trim and distance alignment shape each feed") {
+    Scene s = freeFieldScene();
+    Layer l;
+    l.position = {0, 1.6f, -2};   // dead ahead
+    s.layers.push_back(l);
+    // Two front speakers at +-30 degrees, both fed equally by a centre
+    // source; the left one 1 m nearer (so it is delayed and turned down),
+    // the right one trimmed by -6 dB.
+    SpeakerLayout custom;
+    custom.name = "custom";
+    Speaker a, b;
+    a.name = "L"; a.azimuthDeg = 30; a.distance = 2;
+    b.name = "R"; b.azimuthDeg = -30; b.distance = 3; b.trimDb = -6;
+    custom.speakers = {a, b};
+    RenderConfig cfg;
+    cfg.mode = OutputMode::Speakers;
+    cfg.layout = custom;
+    const int n = 24000;
+    const auto in = noise(n);
+    auto r = render(s, cfg, {in}, n);
+    REQUIRE(r.out.size() == 2);
+    const double eL = energy(r.out[0], 4800), eR = energy(r.out[1], 4800);
+    // Left: 2/3 of the far distance -> 20 log10(2/3) = -3.5 dB; right: -6 dB.
+    CHECK(10 * std::log10(eL / eR) == Approx(-3.52 + 6.0).margin(0.6));
+    // The left feed arrives (3 - 2) / 343 s = 140 samples after the right one.
+    double best = 0;
+    int bestLag = 0;
+    for (int lag = 0; lag < 300; ++lag) {
+        double c = 0;
+        for (int i = 4800; i + lag < n; ++i) c += r.out[0][i + lag] * r.out[1][i];
+        if (c > best) { best = c; bestLag = lag; }
+    }
+    CHECK(bestLag == Approx(140).margin(2));
+}
+
+TEST_CASE("Speakers: a pinned mix at the source's position decides its speaker feeds") {
+    Scene s = freeFieldScene();
+    Layer l;
+    l.position = {-std::sin(degToRad(30.0f)) * 2, 1.6f, -std::cos(degToRad(30.0f)) * 2};   // on L
+    s.layers.push_back(l);
+    Pin pin;
+    pin.position = l.position;
+    pin.radius = 1.0f;
+    pin.gainsDb = {-120, -120, -120, -120, -120, 0, -120, -120, -120, -120, -120, -120};   // Rss only
+    s.pins.push_back(pin);
+    RenderConfig cfg;
+    cfg.mode = OutputMode::Speakers;
+    cfg.layout = SpeakerLayout::preset("7.1.4");
+    const int n = 24000;
+    auto r = render(s, cfg, {noise(n)}, n);
+    REQUIRE(r.out.size() == 12);
+    const double eRss = energy(r.out[5], 2400);
+    double others = 0;
+    for (int c = 0; c < 12; ++c) if (c != 5) others += energy(r.out[c], 2400);
+    CHECK(eRss > 20 * others);
+
+    SECTION("outside the pin's radius the panner is back in charge") {
+        s.pins[0].position = {5, 1.6f, 5};
+        auto r2 = render(s, cfg, {noise(n)}, n);
+        CHECK(energy(r2.out[0], 2400) > 20 * energy(r2.out[5], 2400));
+    }
+    SECTION("half way out the two are blended") {
+        s.pins[0].position = l.position + Vec3{0, 0, 0.5f};
+        auto r3 = render(s, cfg, {noise(n)}, n);
+        const double eL = energy(r3.out[0], 2400), e5 = energy(r3.out[5], 2400);
+        CHECK(eL > 0.05 * e5);
+        CHECK(e5 > 0.05 * eL);
+    }
+    SECTION("a live update changes the pins") {
+        Renderer live(s, cfg, 2.0);
+        s.pins[0].position = {5, 1.6f, 5};
+        auto u = live.prepareUpdate(s);
+        REQUIRE(u);
+        live.applyUpdate(*u);
+    }
+}

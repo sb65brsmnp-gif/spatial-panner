@@ -8,7 +8,9 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { Store } from '../model/store';
-import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, type LayerDoc, type PathDoc, type V3 } from '../model/scene';
+import { isStereo, stereoOffset, defaultStereo, isAmbisonic, defaultAmbisonic, hasPath, isSpatialized, isLinked, linkedAt, speakerLocal, pairedWith, type LayerDoc, type PathDoc, type SpeakerDoc, type V3 } from '../model/scene';
+import { DEFAULT_SETTINGS, type Settings } from '../model/settings';
+import { layerOfPath, layerPathIndex } from '../model/layerMotion';
 import { editablePoints, getPoint, isHandle, samplePath, type PointRef } from '../model/geometry';
 import type { Viewport } from './viewport';
 
@@ -29,9 +31,13 @@ export function headQuaternion(yawDeg: number, pitchDeg: number, rollDeg: number
 // front and a handle on its surface that sets the radius.
 interface LayerEnd { ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; tag: CSS2DObject }
 interface Sphere { group: THREE.Group; shell: THREE.Mesh; wire: THREE.LineSegments; equator: THREE.Line; front: THREE.ArrowHelper; handle: THREE.Mesh }
-interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; leftTag: CSS2DObject; right: LayerEnd; bar: THREE.Mesh; hub: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement }
+interface LayerObj { group: THREE.Group; ball: THREE.Mesh; stem: THREE.Line; ring: THREE.Mesh; leftTag: CSS2DObject; right: LayerEnd; bar: THREE.Mesh; hub: THREE.Mesh; arrow: THREE.ArrowHelper; sphere: Sphere; label: CSS2DObject; meter: HTMLElement; name: HTMLElement; link: THREE.Line }
 
 export interface PointHandle { mesh: THREE.Mesh; path: number; ref: PointRef }
+
+// A loudspeaker of the output layout: the box, a stem to the floor and its
+// name tag. Group-local to speakerGroup, which sits on the listener's head.
+interface SpeakerObj { mesh: THREE.Mesh; stem: THREE.Line; pairBar: THREE.Line; label: CSS2DObject }
 
 export class SceneView {
   readonly root = new THREE.Group();
@@ -42,7 +48,13 @@ export class SceneView {
   readonly markerGroup = new THREE.Group();
   readonly previewGroup = new THREE.Group();
   readonly listener = new THREE.Group();
+  // The output layout's speakers, around the listener's head and turned with
+  // it (the renderer pans relative to the head, so this shows which speakers
+  // a layer plays from).
+  readonly speakerGroup = new THREE.Group();
+  private speakers: SpeakerObj[] = [];
   private layers: LayerObj[] = [];
+  settings: Settings = { ...DEFAULT_SETTINGS };
   pointHandles: PointHandle[] = [];
   // The listener's starting point: a disc on the floor under it (drag it to
   // move the start, and the path with it).
@@ -50,14 +62,184 @@ export class SceneView {
   private lineMaterials: LineMaterial[] = [];
   private head = new THREE.Group();
 
+  // Pinned mixes: a diamond at each pin with a ring for its reach.
+  private pinGroup = new THREE.Group();
+  private pins: { mesh: THREE.Mesh; ring: THREE.Mesh; label: CSS2DObject }[] = [];
+  // The coverage heatmap: a plane on the floor coloured by one speaker's
+  // level, sampled on a grid in the head's horizontal plane.
+  heatmapMesh: THREE.Mesh | null = null;
+  private heatmapTexture: THREE.DataTexture | null = null;
+
+  // The floor picture (editor.floor_image) and the two calibration marks.
+  private floorGroup = new THREE.Group();
+  floorMesh: THREE.Mesh | null = null;
+  private floorFile = '';
+  private floorTexture: THREE.Texture | null = null;
+  private floorAspect = new Map<string, number>();
+  private calibGroup = new THREE.Group();
+  // Resolves a file path to a URL the page can load (set by main).
+  assetUrl: (path: string) => string = (p) => p;
+
   constructor(private vp: Viewport, private store: Store) {
-    this.root.add(this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener);
+    this.root.add(this.floorGroup, this.calibGroup, this.roomGroup, this.layerGroup, this.pathGroup, this.markerGroup, this.pointGroup, this.previewGroup, this.listener, this.speakerGroup, this.pinGroup);
     vp.scene.add(this.root);
     this.buildListener();
     vp.onBeforeRender(() => {
       const w = vp.container.clientWidth, h = vp.container.clientHeight;
       for (const m of this.lineMaterials) m.resolution.set(w, h);
     });
+  }
+
+  // ----------------------------------------------------------------- pins
+
+  updatePins(): void {
+    const pins = this.store.scene.pins ?? [];
+    const sel = this.store.selection;
+    if (pins.length !== this.pins.length) {
+      clear(this.pinGroup);
+      this.pins = pins.map((_, index) => {
+        const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.16), new THREE.MeshStandardMaterial({ color: 0xff8a5c, roughness: 0.5 }));
+        mesh.userData = { kind: 'pin', index };
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.97, 1, 48), new THREE.MeshBasicMaterial({ color: 0xff8a5c, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }));
+        ring.rotation.x = -Math.PI / 2;
+        const div = document.createElement('div');
+        div.className = 'pin-label';
+        const label = new CSS2DObject(div);
+        this.pinGroup.add(mesh, ring, label);
+        return { mesh, ring, label };
+      });
+    }
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    pins.forEach((p, i) => {
+      const o = this.pins[i];
+      o.mesh.position.set(p.position[0], p.position[1], p.position[2]);
+      o.ring.position.set(p.position[0], floorY + 0.008, p.position[2]);
+      o.ring.scale.setScalar(Math.max(0.05, p.radius));
+      const selected = sel.kind === 'pin' && sel.index === i;
+      (o.mesh.material as THREE.MeshStandardMaterial).emissive.set(selected ? 0xff8a5c : 0x000000);
+      (o.mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = selected ? 0.6 : 0;
+      o.label.element.textContent = p.name || `Pin ${i + 1}`;
+      o.label.element.classList.toggle('selected', selected);
+      o.label.position.set(p.position[0], p.position[1] + 0.3, p.position[2]);
+    });
+    this.pinGroup.visible = pins.length > 0 && this.store.speakersShown().length > 0;
+    this.vp.invalidate();
+  }
+
+  pickablePins(): THREE.Object3D[] { return this.pinGroup.visible ? this.pins.map((o) => o.mesh) : []; }
+
+  // -------------------------------------------------------------- heatmap
+
+  // Paints `levelsDb` (n x n, row by row from -Z to +Z, -X to +X) on a
+  // square of side `extent` metres centred on (cx, cz) on the floor; null
+  // clears it. Colours run from -36 dB (dark) to +6 dB (white).
+  setHeatmap(levelsDb: Float32Array | null, n: number, cx: number, cz: number, extent: number): void {
+    if (!levelsDb) {
+      if (this.heatmapMesh) { this.root.remove(this.heatmapMesh); this.heatmapMesh = null; }
+      this.heatmapTexture?.dispose();
+      this.heatmapTexture = null;
+      this.vp.invalidate();
+      return;
+    }
+    if (!this.heatmapTexture || this.heatmapTexture.image.width !== n) {
+      this.heatmapTexture?.dispose();
+      this.heatmapTexture = new THREE.DataTexture(new Uint8Array(n * n * 4), n, n);
+      this.heatmapTexture.magFilter = THREE.LinearFilter;
+      this.heatmapTexture.minFilter = THREE.LinearFilter;
+      this.heatmapTexture.colorSpace = THREE.SRGBColorSpace;
+      if (this.heatmapMesh) { this.root.remove(this.heatmapMesh); this.heatmapMesh = null; }
+    }
+    const data = this.heatmapTexture.image.data as Uint8Array;
+    for (let i = 0; i < n * n; ++i) {
+      // Texture rows go bottom-up (+Z first when the plane faces up): flip.
+      const row = Math.floor(i / n), col = i % n;
+      const src = (n - 1 - row) * n + col;
+      const [r, g, b] = heatColour(levelsDb[src]);
+      data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b; data[i * 4 + 3] = 200;
+    }
+    this.heatmapTexture.needsUpdate = true;
+    if (!this.heatmapMesh) {
+      this.heatmapMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({ map: this.heatmapTexture, transparent: true, depthWrite: false }));
+      this.heatmapMesh.name = 'heatmap';
+      this.heatmapMesh.rotation.x = -Math.PI / 2;
+      this.heatmapMesh.renderOrder = 1;
+      this.root.add(this.heatmapMesh);
+    }
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    this.heatmapMesh.scale.set(extent, extent, 1);
+    this.heatmapMesh.position.set(cx, floorY + 0.006, cz);
+    this.vp.invalidate();
+  }
+
+  // --------------------------------------------------------- floor image
+
+  // Draws (or redraws) the picture under the scene. The texture is loaded
+  // once per file; its shape is remembered so a reopened scene is right
+  // before the picture arrives.
+  updateFloorImage(): void {
+    const img = this.store.scene.editor?.floor_image;
+    if (!img || !img.file) {
+      clear(this.floorGroup);
+      this.floorMesh = null;
+      this.floorFile = '';
+      this.floorTexture?.dispose();
+      this.floorTexture = null;
+      this.vp.invalidate();
+      return;
+    }
+    if (img.file !== this.floorFile) {
+      this.floorFile = img.file;
+      this.floorTexture?.dispose();
+      const file = img.file;
+      this.floorTexture = new THREE.TextureLoader().load(this.assetUrl(file), (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        const im = t.image as { width?: number; height?: number } | undefined;
+        if (im?.width && im?.height) this.floorAspect.set(file, im.height / im.width);
+        if (this.floorMesh) (this.floorMesh.material as THREE.MeshBasicMaterial).needsUpdate = true;
+        this.updateFloorImage();
+      });
+      clear(this.floorGroup);
+      this.floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({ map: this.floorTexture, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+      this.floorMesh.name = 'floor-image';
+      this.floorGroup.add(this.floorMesh);
+    }
+    const m = this.floorMesh!;
+    const aspect = img.aspect ?? this.floorAspect.get(img.file) ?? 1;
+    const w = Math.max(0.1, img.width), d = w * aspect;
+    m.scale.set(w, d, 1);
+    const s = this.store.scene;
+    const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
+    m.rotation.set(-Math.PI / 2, 0, img.rotation * Math.PI / 180, 'YXZ');
+    m.position.set(img.centre[0], floorY + 0.004 + img.height, img.centre[1]);
+    (m.material as THREE.MeshBasicMaterial).opacity = Math.max(0, Math.min(1, img.opacity));
+    this.vp.invalidate();
+  }
+
+  // The picture's height / width once it has loaded (undefined before).
+  floorImageAspect(file: string): number | undefined { return this.floorAspect.get(file); }
+
+  // The marks of a scale calibration in progress: up to two points on the
+  // floor and the line between them.
+  setCalibrationPoints(points: V3[]): void {
+    clear(this.calibGroup);
+    for (const p of points) {
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.18, 32), new THREE.MeshBasicMaterial({ color: 0xffc857, side: THREE.DoubleSide, depthTest: false }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(p[0], p[1] + 0.01, p[2]);
+      ring.renderOrder = 10;
+      this.calibGroup.add(ring);
+    }
+    if (points.length === 2) {
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(p[0], p[1] + 0.01, p[2]))),
+        new THREE.LineBasicMaterial({ color: 0xffc857, depthTest: false }));
+      line.renderOrder = 10;
+      this.calibGroup.add(line);
+    }
+    this.vp.invalidate();
   }
 
   // ---------------------------------------------------------------- room
@@ -147,7 +329,7 @@ export class SceneView {
   }
 
   private makeEnd(group: THREE.Group, index: number, end: 'L' | 'R' | 'centre'): LayerEnd {
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4 }));
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(LAYER_RADIUS, 32, 16), new THREE.MeshStandardMaterial({ roughness: 0.4, transparent: true, opacity: 1 }));
     ball.userData = { kind: 'layer', index, end };
     group.add(ball);
     const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, -1, 0)]),
@@ -204,10 +386,15 @@ export class SceneView {
     meterBox.appendChild(meter);
     div.append(name, meterBox);
     const label = new CSS2DObject(div);
-    label.position.set(0, LAYER_RADIUS + 0.25, 0);
+    label.position.set(0, LAYER_RADIUS * this.settings.dotSize + this.settings.labelOffset, 0);
     group.add(label);
     this.layerGroup.add(group);
-    return { group, ball, stem, ring, leftTag: left.tag, right, bar, hub, arrow, sphere, label, meter, name };
+    // A dashed line to what the layer is linked to (world coordinates).
+    const link = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineDashedMaterial({ color: 0xf2994a, dashSize: 0.15, gapSize: 0.1, transparent: true, opacity: 0.8 }));
+    link.visible = false;
+    this.layerGroup.add(link);
+    return { group, ball, stem, ring, leftTag: left.tag, right, bar, hub, arrow, sphere, label, meter, name, link };
   }
 
   // Places a ball and its stem and floor ring at `p` (group-local).
@@ -224,27 +411,48 @@ export class SceneView {
   updateLayers(): void {
     const s = this.store.scene;
     if (s.layers.length !== this.layers.length) return this.rebuildLayers();
-    const sel = this.store.selection;
     const anySolo = s.layers.some((l) => l.solo);
     const floorY = s.room.type === 'box' ? s.room.origin[1] : 0;
     s.layers.forEach((l, i) => {
       const o = this.layers[i];
-      o.group.position.set(l.position[0], l.position[1], l.position[2]);
+      // A layer with a path is drawn where it is at the playhead, turned with
+      // its direction of travel when it turns along the path.
+      const [px, py, pz, yaw] = this.store.layerPlace(i, this.store.time);
+      o.group.position.set(px, py, pz);
+      o.group.rotation.y = yaw * Math.PI / 180;
       const color = new THREE.Color(l.color ?? '#4f9cf9');
       const silent = l.mute || (anySolo && !l.solo);
       const mat = o.ball.material as THREE.MeshStandardMaterial;
       mat.color.copy(silent ? color.clone().multiplyScalar(0.35) : color);
-      const selected = sel.kind === 'layer' && sel.index === i;
+      // Straight through: a see-through ball, since its place is not heard.
+      const spatial = isSpatialized(l);
+      mat.opacity = spatial ? 1 : 0.4;
+      (o.right.ball.material as THREE.MeshStandardMaterial).opacity = mat.opacity;
+      // Linked and following at the playhead: a dashed line to its leader.
+      const t = this.store.time;
+      const following = isLinked(l) && linkedAt(l.link!, t);
+      o.link.visible = following;
+      if (following) {
+        const to = l.link!.to;
+        const lp: V3 = to === 'listener' ? [this.listener.position.x, this.listener.position.y, this.listener.position.z]
+          : s.layers[to] ? (this.store.layerPlace(to, t).slice(0, 3) as V3) : [px, py, pz];
+        (o.link.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(px, py, pz), new THREE.Vector3(lp[0], lp[1], lp[2])]);
+        o.link.computeLineDistances();
+        (o.link.material as THREE.LineDashedMaterial).color.copy(color);
+      }
+      const selected = this.store.isLayerSelected(i);
       mat.emissive.copy(selected ? color : new THREE.Color(0));
       mat.emissiveIntensity = selected ? 0.6 : 0;
-      o.ball.scale.setScalar(selected ? 1.25 : 1);
+      const dotScale = this.settings.dotSize;
+      o.ball.scale.setScalar((selected ? 1.25 : 1) * dotScale);
+      o.label.position.y = LAYER_RADIUS * dotScale + this.settings.labelOffset;
       // Stereo: left and right ends either side of the centre, joined by a
       // bar; folded to mono, the pair collapses to one ball at the centre.
       const stereo = isStereo(l);
       const st = l.stereo ?? defaultStereo();
       const spread = stereo && !st.mono;
       const d = spread ? stereoOffset(st) : [0, 0, 0];
-      const floor = floorY - l.position[1];  // group-local floor height
+      const floor = floorY - py;  // group-local floor height
       this.placeEnd(o, new THREE.Vector3(-d[0], -d[1], -d[2]), floor, color, o.leftTag);
       o.ball.userData.end = stereo ? 'L' : 'centre';
       o.right.ball.visible = o.right.stem.visible = o.right.ring.visible = spread;
@@ -259,7 +467,7 @@ export class SceneView {
         rm.color.copy(mat.color);
         rm.emissive.copy(mat.emissive);
         rm.emissiveIntensity = mat.emissiveIntensity;
-        o.right.ball.scale.setScalar(selected ? 1.25 : 1);
+        o.right.ball.scale.setScalar((selected ? 1.25 : 1) * dotScale);
         const len = 2 * Math.hypot(d[0], d[1], d[2]);
         o.bar.visible = len > 2 * LAYER_RADIUS;
         o.bar.scale.set(1, Math.max(0.01, len - 2 * LAYER_RADIUS * 0.9), 1);
@@ -292,12 +500,132 @@ export class SceneView {
       const f = v3(l.directivity_forward);
       if (f.lengthSq() > 1e-9) o.arrow.setDirection(f.normalize());
       o.arrow.setColor(color);
-      o.name.textContent = l.name || `Layer ${i + 1}`;
+      o.name.textContent = (l.name || `Layer ${i + 1}`) + (spatial ? '' : ' · direct') + (following ? ' · linked' : '');
       o.label.element.classList.toggle('selected', selected);
       o.label.element.classList.toggle('silent', silent);
+      // Settings: names on every layer, on the selected one only, or none.
+      const mode = this.settings.labelMode;
+      o.label.visible = mode !== 'off';
+      o.label.element.classList.toggle('quiet', mode === 'selected' && !selected);
     });
     this.updateMeters();
     this.vp.invalidate();
+  }
+
+  // Display settings (Settings tab): label distance, dot size, time dots.
+  applySettings(s: Settings): void {
+    this.settings = { ...s };
+    this.updateLayers();
+    this.rebuildPaths();
+    this.updateSpeakers();
+  }
+
+  // ------------------------------------------------------------ speakers
+
+  private rebuildSpeakers(list: SpeakerDoc[]): void {
+    for (const sp of this.speakers) sp.label.element.remove();
+    clear(this.speakerGroup);
+    this.speakers = [];
+    list.forEach((s, index) => {
+      const sub = !!s.lfe;
+      const geo = sub ? new THREE.BoxGeometry(0.42, 0.42, 0.42) : new THREE.BoxGeometry(0.26, 0.34, 0.24);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: sub ? 0x8a6fb0 : 0x9aa6b8, roughness: 0.7 }));
+      mesh.userData = { kind: 'speaker', index, sub };
+      // The driver: a disc on the face that looks at the head.
+      const cone = new THREE.Mesh(new THREE.CircleGeometry(sub ? 0.14 : 0.08, 20), new THREE.MeshBasicMaterial({ color: 0x1b1e25 }));
+      cone.position.z = (sub ? 0.21 : 0.12) + 0.002;
+      cone.userData = { kind: 'speaker', index };
+      mesh.add(cone);
+      const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineDashedMaterial({ color: 0x5a6476, dashSize: 0.08, gapSize: 0.06, transparent: true, opacity: 0.7 }));
+      const div = document.createElement('div');
+      div.className = 'speaker-label' + (sub ? ' sub' : '');
+      const name = document.createElement('span');
+      const ch = document.createElement('span');
+      ch.className = 'ch';
+      div.append(name, ch);
+      const label = new CSS2DObject(div);
+      const pairBar = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: 0xc3ccd9, transparent: true, opacity: 0.6 }));
+      pairBar.visible = false;
+      this.speakerGroup.add(mesh, stem, pairBar, label);
+      this.speakers.push({ mesh, stem, pairBar, label });
+    });
+  }
+
+  updateSpeakers(): void {
+    const list = this.store.speakersShown();
+    if (list.length !== this.speakers.length) this.rebuildSpeakers(list);
+    // The floor, in the head's frame (which may be tilted): the room's floor
+    // height taken straight down in the world.
+    const floorY = this.store.scene.room.type === 'box' ? this.store.scene.room.origin[1] : 0;
+    const headY = this.speakerGroup.position.y;
+    const inv = this.speakerGroup.quaternion.clone().invert();
+    list.forEach((s, i) => {
+      const o = this.speakers[i];
+      const sub = !!s.lfe;
+      // A speaker turned into a subwoofer (or back) gets the other box.
+      if (o.mesh.userData.sub !== sub) {
+        this.rebuildSpeakers(list);
+        this.updateSpeakers();
+        return;
+      }
+      const p = speakerLocal(s);
+      o.mesh.position.set(p[0], p[1], p[2]);
+      o.mesh.lookAt(0, 0, 0);
+      const selected = this.store.isSpeakerSelected(i);
+      const mat = o.mesh.material as THREE.MeshStandardMaterial;
+      mat.emissive.set(selected ? 0xffc857 : 0x000000);
+      mat.emissiveIntensity = selected ? 0.5 : 0;
+      o.mesh.scale.setScalar(selected ? 1.15 : 1);
+      // Stem: from the box down to the floor, vertical in the world.
+      const worldDown = new THREE.Vector3(0, -1, 0).applyQuaternion(inv);
+      const drop = p[1] + headY - floorY;
+      const foot = new THREE.Vector3(p[0], p[1], p[2]).addScaledVector(worldDown, Math.max(0, drop));
+      (o.stem.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(p[0], p[1], p[2]), foot]);
+      o.stem.computeLineDistances();
+      o.stem.visible = drop > 0.3;
+      // A stereo pair: a thin bar between the two.
+      const partner = pairedWith(list, i);
+      o.pairBar.visible = partner > i;
+      if (partner > i) {
+        const q = speakerLocal(list[partner]);
+        (o.pairBar.geometry as THREE.BufferGeometry).setFromPoints([new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(q[0], q[1], q[2])]);
+      }
+      o.label.position.set(p[0], p[1] + (sub ? 0.32 : 0.28), p[2]);
+      o.label.visible = this.settings.speakerLabels;
+      (o.label.element.children[0] as HTMLElement).textContent = s.name || `Speaker ${i + 1}`;
+      (o.label.element.children[1] as HTMLElement).textContent = `out ${s.channel}`;
+      o.label.element.classList.toggle('selected', selected);
+    });
+    this.speakerGroup.visible = list.length > 0 && this.settings.showSpeakers;
+    this.vp.invalidate();
+  }
+
+  // The balls (and speaker boxes) on the page, for a rubber-band selection.
+  layerScreenPoints(): ([number, number] | null)[] {
+    return this.layers.map((o) => { const v = new THREE.Vector3(); o.ball.getWorldPosition(v); return this.vp.screenPoint(v); });
+  }
+  speakerScreenPoints(): ([number, number] | null)[] {
+    if (!this.speakerGroup.visible) return [];
+    return this.speakers.map((o) => { const v = new THREE.Vector3(); o.mesh.getWorldPosition(v); return this.vp.screenPoint(v); });
+  }
+
+  pickableSpeakers(): THREE.Object3D[] {
+    if (!this.speakerGroup.visible) return [];
+    return this.speakers.map((o) => o.mesh);
+  }
+
+  // A world point in the speakers' (head) frame, and back.
+  speakerLocalOf(world: V3): V3 {
+    const v = new THREE.Vector3(world[0], world[1], world[2]);
+    this.speakerGroup.worldToLocal(v);
+    return [v.x, v.y, v.z];
+  }
+  speakerWorldOf(local: V3): V3 {
+    const v = new THREE.Vector3(local[0], local[1], local[2]);
+    this.speakerGroup.localToWorld(v);
+    return [v.x, v.y, v.z];
   }
 
   updateMeters(): void {
@@ -340,8 +668,32 @@ export class SceneView {
       }
     });
     if (!L.paths.length) this.buildStart(L.static_position);
+    this.buildLayerPaths();
     this.buildTimeMarkers();
     this.vp.invalidate();
+  }
+
+  // Each layer's own path in its colour, from where the layer stands; the
+  // selected layer's (or the one whose point is selected) with its points.
+  private buildLayerPaths(): void {
+    const s = this.store.scene;
+    const a = this.store.analysis;
+    const sel = this.store.selection;
+    const editing = sel.kind === 'layer' ? sel.index : sel.kind === 'point' ? layerOfPath(sel.path) : -1;
+    s.layers.forEach((l, i) => {
+      if (!hasPath(l)) return;
+      const p = l.motion!.path;
+      const tr = a && a.revision === this.store.revision ? a.layers?.find((x) => x.layer === i) : undefined;
+      const pts = tr?.points.length ? tr.points : samplePath(p);
+      if (pts.length < 2) return;
+      const color = new THREE.Color(l.color ?? '#4f9cf9').getHex();
+      const selected = editing === i;
+      const line = this.fatLine(pts as V3[], color, selected ? 3 : 2, selected ? 1 : 0.65);
+      line.userData = { kind: 'layerpath', layer: i };
+      this.pathGroup.add(line);
+      if (!p.closed) this.pathGroup.add(endMarker(pts[pts.length - 1] as V3, color, 0.09));
+      if (selected) this.buildPointHandles(p, layerPathIndex(i));
+    });
   }
 
   // The start disc on the floor under `p`, with a stem up to it and a label.
@@ -392,6 +744,7 @@ export class SceneView {
         new THREE.MeshBasicMaterial({ color: selected ? 0xffffff : handle ? 0x56ccf2 : 0xffc857, depthTest: false, transparent: true }));
       mesh.renderOrder = 10;
       mesh.position.copy(v3(pos));
+      mesh.scale.setScalar(this.settings.dotSize);
       mesh.userData = { kind: 'point', path: pathIndex, ref };
       this.pointGroup.add(mesh);
       this.pointHandles.push({ mesh, path: pathIndex, ref });
@@ -409,9 +762,9 @@ export class SceneView {
   // (from the engine's pose evaluation, so speed changes show as spacing).
   private buildTimeMarkers(): void {
     const a = this.store.analysis;
-    if (!a || a.active_path < 0 || !a.poses.length) return;
+    if (!this.settings.timeDots || !a || a.active_path < 0 || !a.poses.length) return;
     const step = Math.max(1, Math.round(1 / a.dt));
-    const dotGeo = new THREE.SphereGeometry(0.045, 8, 6);
+    const dotGeo = new THREE.SphereGeometry(0.045 * this.settings.dotSize, 8, 6);
     const dotMat = new THREE.MeshBasicMaterial({ color: 0xffe3a3 });
     let lastPos: number[] | null = null;
     for (let i = 0; i < a.poses.length; i += step) {
@@ -468,6 +821,11 @@ export class SceneView {
     body.rotation.y = p[3] * Math.PI / 180;
     this.vp.setEye(new THREE.Vector3(p[0], p[1], p[2]), this.head.quaternion);
     this.listener.visible = this.vp.view !== 'listener';
+    const moved = !this.speakerGroup.position.equals(this.listener.position) || !this.speakerGroup.quaternion.equals(this.head.quaternion);
+    this.speakerGroup.position.copy(this.listener.position);
+    this.speakerGroup.quaternion.copy(this.head.quaternion);
+    this.speakerGroup.updateMatrixWorld(true);
+    if (moved && this.speakers.length) this.updateSpeakers();
     this.vp.invalidate();
   }
 
@@ -519,8 +877,8 @@ function makeLabel(text: string, cls: string): CSS2DObject {
   return new CSS2DObject(div);
 }
 
-function endMarker(p: V3, color: number): THREE.Mesh {
-  const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.12), new THREE.MeshBasicMaterial({ color }));
+function endMarker(p: V3, color: number, size = 0.12): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(size), new THREE.MeshBasicMaterial({ color }));
   m.position.copy(v3(p));
   return m;
 }
@@ -529,6 +887,14 @@ function disposeLayer(l: LayerObj): void {
   l.label.element.remove();
   l.leftTag.element.remove();
   l.right.tag.element.remove();
+}
+
+// -36 dB .. +6 dB: deep blue, teal, green, yellow, white.
+export function heatColour(db: number): [number, number, number] {
+  const t = Math.max(0, Math.min(1, (db + 36) / 42));
+  const stops: [number, number, number][] = [[12, 16, 48], [16, 90, 140], [30, 170, 120], [240, 200, 60], [255, 255, 255]];
+  const x = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  return [0, 1, 2].map((k) => Math.round(stops[i][k] + (stops[i + 1][k] - stops[i][k]) * f)) as [number, number, number];
 }
 
 function clear(g: THREE.Object3D): void {

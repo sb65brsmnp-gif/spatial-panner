@@ -24,6 +24,30 @@ struct Biquad {
     void reset() { z1 = z2 = 0; }
     void setIdentity() { b0 = 1; b1 = b2 = a1 = a2 = 0; }
     void copyCoefficients(const Biquad& o) { b0 = o.b0; b1 = o.b1; b2 = o.b2; a1 = o.a1; a2 = o.a2; }
+
+    // Second-order lowpass / highpass (RBJ cookbook), -3 dB at fc for
+    // q = 1/sqrt(2); other q values are the sections of higher-order
+    // Butterworth and Linkwitz-Riley cascades.
+    void setLowpass(float fc, float q, float fs) {
+        fc = clamp(fc, 1.0f, 0.49f * fs);
+        const float w0 = 2.0f * kPi * fc / fs, cw = std::cos(w0), alpha = std::sin(w0) / (2.0f * std::max(q, 0.05f));
+        const float n = 1.0f / (1.0f + alpha);
+        b0 = (1.0f - cw) * 0.5f * n;
+        b1 = (1.0f - cw) * n;
+        b2 = b0;
+        a1 = -2.0f * cw * n;
+        a2 = (1.0f - alpha) * n;
+    }
+    void setHighpass(float fc, float q, float fs) {
+        fc = clamp(fc, 1.0f, 0.49f * fs);
+        const float w0 = 2.0f * kPi * fc / fs, cw = std::cos(w0), alpha = std::sin(w0) / (2.0f * std::max(q, 0.05f));
+        const float n = 1.0f / (1.0f + alpha);
+        b0 = (1.0f + cw) * 0.5f * n;
+        b1 = -(1.0f + cw) * n;
+        b2 = b0;
+        a1 = -2.0f * cw * n;
+        a2 = (1.0f - alpha) * n;
+    }
 };
 
 // First-order section, direct form II transposed.

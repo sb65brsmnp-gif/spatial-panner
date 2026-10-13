@@ -66,6 +66,9 @@ await check('adding audio files creates layers around the listener', async () =>
 
 await ed(() => window.spEditor.setView('top'));
 await page.waitForTimeout(200);
+// Adding files selects the last layer; with a layer selected the drawing
+// tools would draw its path, so the listener's path is drawn unselected.
+await ed(() => window.spEditor.store.select({ kind: 'none' }));
 
 await check('freehand tool draws a smoothed Catmull-Rom path that the engine samples', async () => {
   await page.keyboard.press('f');
@@ -430,6 +433,188 @@ await check('timeline: Cmd-drag selects a range; dragging it moves start, end, s
   await ed(() => window.spEditor.store.update((s) => { s.listener.path_start_time = 0; }));
 });
 
+await check('layer path: Draw a path gives the selected layer its own path; the engine carries it along', async () => {
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[0].position = [2, 1.6, 2]; s.layers[0].home = [2, 1.6, 2]; s.duration = 20; });
+    st.select({ kind: 'layer', index: 0 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  await page.click('button:has-text("Draw a path")');
+  for (const p of [[2, 1.6, 2], [5, 1.6, 0], [2, 1.6, -3]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  await waitAnalysis();
+  const r = await ed(() => { const s = window.spEditor.store; return { l: s.scene.layers[0], tool: window.spEditor.tools.opts.tool, tr: s.analysis.layers }; });
+  assert(r.l.motion && r.l.motion.path.segments.length === 1, JSON.stringify(r.l.motion));
+  assert(r.tool === 'select', `tool ${r.tool}`);
+  const first = r.l.motion.path.segments[0].points[0];
+  assert(Math.hypot(first[0] - r.l.position[0], first[2] - r.l.position[2]) < 1e-6 && Math.abs(first[1] - 1.6) < 1e-6, `path starts at the layer ${first} ${r.l.position}`);
+  const tr = r.tr.find((t) => t.layer === 0);
+  assert(tr && tr.length > 5, JSON.stringify(tr && tr.length));
+  // At 3 s it is 4.2 m along (1.4 m/s), and the 3D view shows it there.
+  await ed(() => window.spEditor.store.setTime(3));
+  await page.waitForTimeout(100);
+  const g = await ed(() => window.spEditor.view.layers[0].group.position.toArray());
+  const s3 = tr.samples[Math.round(3 / tr.dt)];
+  assert(Math.hypot(g[0] - s3[0], g[2] - s3[2]) < 0.05, `shown ${g} vs engine ${s3}`);
+  assert(Math.abs(s3[4] - 4.2) < 0.05, `distance ${s3[4]}`);
+});
+
+await check('layer path: dragging the moving layer moves it with its path; the timeline shows its lanes', async () => {
+  const before = await ed(() => ({ pos: window.spEditor.store.scene.layers[0].position, path: window.spEditor.store.scene.layers[0].motion.path.segments[0].points }));
+  const shown = await ed(() => window.spEditor.view.layers[0].group.position.toArray());
+  await page.mouse.move(...(await screen(shown)));
+  await page.mouse.down();
+  await page.mouse.move(...(await screen([shown[0] - 1, shown[1], shown[2]])), { steps: 6 });
+  await page.mouse.up();
+  const after = await ed(() => ({ pos: window.spEditor.store.scene.layers[0].position, path: window.spEditor.store.scene.layers[0].motion.path.segments[0].points }));
+  const dx = after.pos[0] - before.pos[0];
+  assert(Math.abs(dx + 1) < 0.15, `moved ${dx}`);
+  assert(Math.abs(after.path[1][0] - before.path[1][0] - dx) < 1e-6, 'path moved with it');
+  await waitAnalysis();
+  // Layer lanes: speed (with its start and end lines) and level.
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const lane = (box.height - 22) / 2;
+  const xAt = (t) => box.x + 96 + (t / 20) * (box.width - 96);
+  await page.mouse.dblclick(xAt(2), box.y + 22 + lane * 0.5);    // speed key at 2 s
+  await page.mouse.dblclick(xAt(1), box.y + 22 + lane + lane - 3);  // level key at 1 s, at the bottom: silent
+  await page.mouse.dblclick(xAt(4), box.y + 22 + lane + lane * 0.2);  // level key at 4 s, near 0 dB
+  await waitAnalysis();
+  const l = await ed(() => window.spEditor.store.scene.layers[0]);
+  assert(l.motion.speed.length === 2, JSON.stringify(l.motion.speed));
+  assert(l.level_keys.length === 2 && l.level_keys[0].level_db === -80 && l.level_keys[1].level_db > -6, JSON.stringify(l.level_keys));
+});
+
+await check('layer path: timed by keys, it is where the keys say; back and forth turns it round', async () => {
+  await ed(() => window.spEditor.store.update((s) => {
+    const m = s.layers[0].motion;
+    m.timing = 'keys';
+    m.keys = [{ time: 1, fraction: 0, easing: 'linear' }, { time: 5, fraction: 1, easing: 'linear' }];
+    m.end = 'ping_pong';
+    m.turn = true;
+  }));
+  await waitAnalysis();
+  const tr = await ed(() => window.spEditor.store.analysis.layers.find((t) => t.layer === 0));
+  const at = (t) => tr.samples[Math.round(t / tr.dt)];
+  assert(Math.abs(at(3)[4] - tr.length / 2) < 0.1, `half way at 3 s: ${at(3)[4]} of ${tr.length}`);
+  assert(Math.abs(at(5)[4] - tr.length) < 0.1 && Math.abs(at(7)[4] - tr.length / 2) < 0.1, 'back half way at 7 s');
+  // Going back it faces the other way: about 180 degrees from going out at the same point.
+  const d = Math.abs(((at(7)[3] - at(3)[3]) % 360 + 540) % 360 - 180);
+  assert(d > 150, `turned ${at(3)[3]} -> ${at(7)[3]}`);
+});
+
+await check('fit timing: the listener and a layer set off and arrive together', async () => {
+  await ed(() => window.spEditor.store.update((s) => { const m = s.layers[0].motion; m.timing = 'speed'; m.end = 'stop'; m.start_time = 1; }));
+  await waitAnalysis();
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await page.click('.tab[data-tab="path"]');
+  await page.waitForSelector('text=Fit timing');
+  const from = page.locator('.section:has-text("Fit timing") input[type=number]').nth(0);
+  const to = page.locator('.section:has-text("Fit timing") input[type=number]').nth(1);
+  await from.fill('2'); await from.press('Tab');
+  await to.fill('14'); await to.press('Tab');
+  await page.click('.section:has-text("Fit timing") button:has-text("Fit")');
+  await waitAnalysis();
+  const r = await ed(() => { const s = window.spEditor.store; return { a: s.analysis, start: s.scene.listener.path_start_time, ls: s.scene.layers[0].motion.start_time }; });
+  assert(r.start === 2 && r.ls === 2, `starts ${r.start} ${r.ls}`);
+  assert(Math.abs(r.a.arrival_time - 14) < 0.15, `listener arrives ${r.a.arrival_time}`);
+  const tr = r.a.layers.find((t) => t.layer === 0);
+  const arrive = tr.samples.findIndex((x) => x[4] >= tr.length - 0.01) * tr.dt;
+  assert(Math.abs(arrive - 14) < 0.15, `layer arrives ${arrive}`);
+});
+
+await check('layer path: a toolbar drawing tool draws for the selected layer; "for" shows and changes the target', async () => {
+  const n = await ed(() => window.spEditor.store.scene.layers.length);
+  assert(n >= 2, `layers ${n}`);
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[1].position = [-3, 1.6, 2]; s.layers[1].home = [-3, 1.6, 2]; });
+    st.select({ kind: 'layer', index: 1 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  // The C key with a layer selected: the curve tool, for that layer.
+  await page.keyboard.press('c');
+  let r = await ed(() => ({ tool: window.spEditor.tools.opts.tool, target: window.spEditor.tools.opts.layerTarget, shown: document.querySelector('.target-select').value }));
+  assert(r.tool === 'curve' && r.target === 1 && r.shown === '1', JSON.stringify(r));
+  for (const p of [[-3, 1.6, 2], [-6, 1.6, 0], [-3, 1.6, -3]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  await waitAnalysis();
+  r = await ed(() => { const s = window.spEditor.store; return { l: s.scene.layers[1], paths: s.scene.listener.paths.length, tool: window.spEditor.tools.opts.tool }; });
+  assert(r.l.motion && r.l.motion.path.segments.length === 1, JSON.stringify(r.l.motion));
+  assert(r.tool === 'select', `tool ${r.tool}`);
+  // "for" switched to the listener draws the listener's path even with the layer selected.
+  await page.selectOption('.target-select', '-1');
+  r = await ed(() => ({ tool: window.spEditor.tools.opts.tool, target: window.spEditor.tools.opts.layerTarget, sel: window.spEditor.store.selection }));
+  assert(r.tool === 'curve' && r.target === -1 && r.sel.kind === 'layer', JSON.stringify(r));
+  const before = await ed(() => window.spEditor.store.scene.listener.paths.length);
+  for (const p of [[6, 1.7, 6], [8, 1.7, 6]]) await page.mouse.click(...(await screen(p)));
+  await page.keyboard.press('Enter');
+  r = await ed(() => { const s = window.spEditor.store; return { paths: s.scene.listener.paths.length, segs: s.scene.layers[1].motion.path.segments.length }; });
+  assert(r.paths === before + 1 && r.segs === 1, JSON.stringify(r));
+  await ed(() => window.spEditor.store.update((s) => { s.listener.paths.pop(); s.listener.active_path = 0; }));
+  // Picking a layer in the Layers list while a tool is out retargets it.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await page.keyboard.press('l');
+  assert(await ed(() => window.spEditor.tools.opts.layerTarget) === -1, 'nothing selected should target the listener');
+  await ed(() => window.spEditor.store.select({ kind: 'layer', index: 0 }));
+  r = await ed(() => ({ target: window.spEditor.tools.opts.layerTarget, shown: document.querySelector('.target-select').value }));
+  assert(r.target === 0 && r.shown === '0', JSON.stringify(r));
+  await page.keyboard.press('Escape');
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+});
+
+await check('spatialize off and a link to the listener: the sidebar, the Link lane, the 3D view and the engine follow', async () => {
+  await ed(() => {
+    const st = window.spEditor.store;
+    st.update((s) => { s.layers[0].position = [1, 1.6, 0]; s.layers[0].home = [1, 1.6, 0]; delete s.layers[0].motion; s.listener.paths = []; s.listener.active_path = 0; });
+    st.select({ kind: 'layer', index: 0 });
+    st.setTime(0);
+  });
+  await page.click('.tab[data-tab="layers"]');
+  // Spatialize off: the file says so, the ball goes see-through, the label says "direct".
+  await page.waitForSelector('.section-title:has-text("Spatialize")');
+  const spat = page.locator('.section:has(.section-title:has-text("Spatialize")) input[type=checkbox]').first();
+  await spat.uncheck();
+  let r = await ed(() => ({ sp: window.spEditor.store.scene.layers[0].spatialize, label: document.querySelector('.layer-label span').textContent }));
+  assert(r.sp === false && r.label.includes('direct'), JSON.stringify(r));
+  await page.waitForSelector('text=send it to the room');
+  await spat.check();
+  r = await ed(() => ({ sp: window.spEditor.store.scene.layers[0].spatialize, label: document.querySelector('.layer-label span').textContent }));
+  assert(r.sp === undefined && !r.label.includes('direct'), JSON.stringify(r));
+  // Linked to the listener: the Link lane appears; a key on it unlinks at 3 s.
+  await page.locator('.section:has(.section-title:has-text("Link")) select').first().selectOption('listener');
+  r = await ed(() => window.spEditor.store.scene.layers[0].link);
+  assert(r && r.to === 'listener' && r.linked_at_start === true, JSON.stringify(r));
+  await page.waitForFunction(() => window.spEditor.timeline.lanes().some((l) => l.id === 'llink'));
+  const lane = await ed(() => window.spEditor.timeline.lanes().find((l) => l.id === 'llink'));
+  const box = await page.locator('.tl-canvas').boundingBox();
+  const x3 = await ed(() => window.spEditor.timeline.x(3));
+  await page.mouse.dblclick(box.x + x3, box.y + lane.y + lane.h - 6);   // the bottom of the lane: free
+  r = await ed(() => window.spEditor.store.scene.layers[0].link);
+  assert(r.keys.length === 1 && Math.abs(r.keys[0].time - 3) < 0.06 && r.keys[0].linked === false, JSON.stringify(r));
+  // The listener walks: while linked (t = 1) the layer stays 1 m to its right; unlinked (t = 5) it stays put.
+  await page.keyboard.press('Escape');
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  await ed(() => window.spEditor.store.update((s) => {
+    s.listener.paths = [{ name: 'walk', closed: false, segments: [{ type: 'line', points: [[0, 1.7, 0], [0, 1.7, -10]] }] }];
+    s.listener.active_path = 0;
+    s.listener.path_start_time = 0;
+    s.listener.speed = [{ time: 0, speed: 1, easing: 'linear' }];
+  }));
+  await waitAnalysis();
+  await ed(() => window.spEditor.store.setTime(1));
+  let p = await ed(() => window.spEditor.store.layerPlace(0, 1));
+  assert(Math.abs(p[0] - 1) < 0.05 && Math.abs(p[2] + 1) < 0.05, `linked: ${JSON.stringify(p)}`);
+  const line = await ed(() => window.spEditor.view.layerGroup.children.some((c) => c.type === 'Line' && c.visible && c.material.type === 'LineDashedMaterial' && c.material.dashSize === 0.15));
+  assert(line, 'no link line drawn');
+  p = await ed(() => window.spEditor.store.layerPlace(0, 5));
+  assert(Math.abs(p[0] - 1) < 0.05 && Math.abs(p[2] + 3) < 0.05, `free: ${JSON.stringify(p)}`);
+  await ed(() => window.spEditor.store.update((s) => { delete s.layers[0].link; s.listener.paths = []; }));
+  await ed(() => window.spEditor.store.setTime(0));
+});
+
 await check('Home (H) returns to the default 3D view with the scene in frame', async () => {
   await ed(() => { const vp = window.spEditor.vp; vp.persp.position.set(0.5, 0.5, 0.5); vp.controls.target.set(0, 0.5, 0); vp.controls.update(); });
   await page.keyboard.press('h');
@@ -503,6 +688,323 @@ await check('a mesh room opens from its OBJ file and is drawn from the engine', 
   assert(lines >= 1, 'mesh edges not drawn');
   await page.waitForTimeout(300);
   await page.screenshot({ path: resolve(outDir, 'lshape.png') });
+});
+
+await check('Output tab: a speaker preset puts its speakers around the listener, binaural hides them', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  await page.click('.tab[data-tab="output"]');
+  await page.waitForSelector('#sidebar select');
+  // Output: Speakers, then the 5.1 layout.
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForSelector('#sidebar .row:has-text("Layout") select');
+  await page.locator('#sidebar .row:has-text("Layout") select').selectOption('5.1');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor?.output?.speakers?.length === 6);
+  const out = await ed(() => window.spEditor.store.scene.editor.output);
+  assert(out.mode === 'speakers' && out.layout === '5.1' && out.speakers[3].lfe === true && out.speakers[5].channel === 6, JSON.stringify(out));
+  await page.waitForTimeout(200);
+  const drawn = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(drawn === 6, `speakers drawn ${drawn}`);
+  const items = await page.locator('#sidebar .speaker-item').count();
+  assert(items === 6, `list items ${items}`);
+  // L sits 2 m from the head, 30 degrees to the left: in front and to the left (-X, -Z).
+  const l = await ed(() => { const v = new (window.spEditor.view.speakerGroup.constructor)(); const m = window.spEditor.view.pickableSpeakers()[0]; m.getWorldPosition(v.position); return [v.position.x, v.position.y, v.position.z]; });
+  assert(l[0] < -0.9 && l[0] > -1.1 && l[2] < -1.6, `L at ${l}`);
+  await page.screenshot({ path: resolve(outDir, 'speakers-5-1.png') });
+  // Back to headphones: no speakers in the space.
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('binaural');
+  await page.waitForTimeout(200);
+  const after = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(after === 0, `speakers still drawn ${after}`);
+});
+
+await check('dragging a speaker in the top view changes its azimuth and distance, typed values move it', async () => {
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForFunction(() => window.spEditor.view.pickableSpeakers().length === 6);
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(100);
+  // The centre speaker (index 2) stands 2 m ahead of the head at [0, 1.7, -2]; drag it to the right and further away.
+  const from = await screen([0, 1.7, -2]);
+  const to = await screen([2, 1.7, -2]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const c = await ed(() => window.spEditor.store.scene.editor.output.speakers[2]);
+  assert(c.azimuth < -40 && c.azimuth > -50, `azimuth ${c.azimuth}`);
+  assert(Math.abs(c.distance - Math.SQRT2 * 2) < 0.15, `distance ${c.distance}`);
+  const sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'speaker' && sel.index === 2, JSON.stringify(sel));
+  const layout = await page.locator('#sidebar .row:has-text("Layout") select').inputValue();
+  assert(layout === 'custom', `layout ${layout}`);
+  // Typed distance.
+  const dist = page.locator('#sidebar .row:has-text("Distance") input');
+  await dist.fill('3.5');
+  await dist.press('Enter');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers[2].distance === 3.5);
+  // Output channel.
+  await page.locator('#sidebar .row:has-text("Output") select').last().selectOption('8');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers[2].channel === 8);
+  // Bass management appears because the preset has a subwoofer.
+  await page.waitForSelector('#sidebar .section-title:has-text("Bass management")');
+  await page.locator('#sidebar .check:has-text("Send the lows") input').check();
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.bass?.enabled === true);
+  await page.screenshot({ path: resolve(outDir, 'speaker-edit.png') });
+});
+
+await check('Hide speakers takes them out of the 3D view and back; Custom starts with no speakers', async () => {
+  await page.click('.tab[data-tab="output"]');
+  await page.waitForSelector('#sidebar button:has-text("Hide speakers")');
+  await page.click('#sidebar button:has-text("Hide speakers")');
+  await page.waitForSelector('#sidebar button:has-text("Show speakers")');
+  await page.waitForFunction(() => window.spEditor.view.speakerGroup.visible === false);
+  const stored = await ed(() => JSON.parse(localStorage.getItem('sp.settings')));
+  assert(stored.showSpeakers === false, JSON.stringify(stored));
+  await page.click('#sidebar button:has-text("Show speakers")');
+  await page.waitForFunction(() => window.spEditor.view.speakerGroup.visible === true);
+  // Custom: the previous speakers go away.
+  await page.locator('#sidebar .row:has-text("Layout") select').selectOption('custom');
+  await page.waitForFunction(() => Array.isArray(window.spEditor.store.scene.editor.output.speakers) && window.spEditor.store.scene.editor.output.speakers.length === 0);
+  await page.waitForTimeout(100);
+  const items = await page.locator('#sidebar .speaker-item').count();
+  assert(items === 0, `list items ${items}`);
+  const drawn = await ed(() => window.spEditor.view.pickableSpeakers().length);
+  assert(drawn === 0, `speakers drawn ${drawn}`);
+  await page.waitForSelector('#sidebar .hint:has-text("No speakers yet")');
+  const layout = await page.locator('#sidebar .row:has-text("Layout") select').inputValue();
+  assert(layout === 'custom', `layout ${layout}`);
+});
+
+await check('a stereo pair sits 30° either side of its centre and moves as one when dragged or typed', async () => {
+  await page.click('#sidebar button:has-text("Add speaker")');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers.length === 1);
+  await page.click('#sidebar button:has-text("Add speaker")');
+  await page.waitForFunction(() => window.spEditor.store.scene.editor.output.speakers.length === 2);
+  // Second speaker is selected; pair it with the first.
+  await page.waitForSelector('#sidebar .row:has-text("Stereo pair with") select');
+  await page.locator('#sidebar .row:has-text("Stereo pair with") select').selectOption('0');
+  await page.waitForFunction(() => { const sp = window.spEditor.store.scene.editor.output.speakers; return !!sp[0].pair && sp[0].pair === sp[1].pair; });
+  let sp = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  // Both started straight ahead (centre 0): one goes to +30 (left), the other to -30.
+  assert(new Set(sp.map((x) => x.azimuth)).size === 2 && sp.every((x) => Math.abs(x.azimuth) === 30), JSON.stringify(sp));
+  const tags = await page.locator('#sidebar .pair-tag').count();
+  assert(tags === 2, `pair tags ${tags}`);
+  // Typed azimuth on the selected one turns both.
+  const az = page.locator('#sidebar .row:has-text("Azimuth") input');
+  await az.fill(String(sp[1].azimuth + 40));
+  await az.press('Enter');
+  await page.waitForFunction((want) => window.spEditor.store.scene.editor.output.speakers[1].azimuth === want, sp[1].azimuth + 40);
+  sp = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  assert(Math.abs(sp[0].azimuth - sp[1].azimuth) === 60, JSON.stringify(sp));
+  // Dragging the left one in the top view away from the head takes the right one along.
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(100);
+  const left = sp[0].azimuth > sp[1].azimuth ? 0 : 1;
+  const pos = await ed((i) => { const v = new (window.spEditor.view.speakerGroup.constructor)(); window.spEditor.view.pickableSpeakers()[i].getWorldPosition(v.position); return [v.position.x, v.position.y, v.position.z]; }, left);
+  const from = await screen(pos);
+  const to = await screen([pos[0] * 2, pos[1], pos[2] * 2]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const after = await ed(() => window.spEditor.store.scene.editor.output.speakers);
+  assert(after[0].distance > 3.5 && Math.abs(after[0].distance - after[1].distance) < 0.05, JSON.stringify(after));
+  assert(Math.abs(Math.abs(after[0].azimuth - after[1].azimuth) - 60) < 2, JSON.stringify(after));
+  await page.screenshot({ path: resolve(outDir, 'speaker-pair.png') });
+});
+
+await check('Cmd+click and Cmd+drag select several layers, which then move together', async () => {
+  await page.click('.tab[data-tab="layers"]');
+  await page.click('text=Add audio files…');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.length >= 3);
+  await ed(() => window.spEditor.setView('top'));
+  await page.waitForTimeout(150);
+  const layers = await ed(() => window.spEditor.store.scene.layers.map((l) => l.position));
+  // Adding files leaves the last one selected; start from nothing.
+  await ed(() => window.spEditor.store.select({ kind: 'none' }));
+  // Cmd+click the first two balls.
+  await page.keyboard.down('Meta');
+  await page.mouse.click(...(await screen(layers[0])));
+  await page.mouse.click(...(await screen(layers[1])));
+  await page.keyboard.up('Meta');
+  let sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi' && sel.layers.length === 2 && sel.layers.includes(0) && sel.layers.includes(1), JSON.stringify(sel));
+  await page.waitForSelector('#sidebar .hint:has-text("2 layers selected")');
+  // Cmd+click one again takes it out.
+  await page.keyboard.down('Meta');
+  await page.mouse.click(...(await screen(layers[1])));
+  await page.keyboard.up('Meta');
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'layer' && sel.index === 0, JSON.stringify(sel));
+  // Cmd+drag a box around every ball on empty space.
+  const pts = await Promise.all(layers.map((p) => screen(p)));
+  const x0 = Math.min(...pts.map((p) => p[0])) - 40, x1 = Math.max(...pts.map((p) => p[0])) + 40;
+  const y0 = Math.min(...pts.map((p) => p[1])) - 40, y1 = Math.max(...pts.map((p) => p[1])) + 40;
+  await page.keyboard.down('Meta');
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x1, y1, { steps: 5 });
+  const box = await page.locator('.marquee').isVisible();
+  assert(box, 'no rubber band shown');
+  await page.mouse.up();
+  await page.keyboard.up('Meta');
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi' && sel.layers.length === layers.length, JSON.stringify(sel));
+  // Dragging one selected ball moves them all by the same amount.
+  const from = await screen(layers[0]);
+  const to = await screen([layers[0][0] + 1.5, layers[0][1], layers[0][2]]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  const moved = await ed(() => window.spEditor.store.scene.layers.map((l) => l.position));
+  for (let i = 0; i < layers.length; ++i) {
+    assert(Math.abs(moved[i][0] - layers[i][0] - 1.5) < 0.15 && Math.abs(moved[i][2] - layers[i][2]) < 0.15, `layer ${i}: ${layers[i]} -> ${moved[i]}`);
+  }
+  sel = await ed(() => window.spEditor.store.selection);
+  assert(sel.kind === 'multi', `selection lost: ${JSON.stringify(sel)}`);
+  await page.screenshot({ path: resolve(outDir, 'multi-select.png') });
+  // Delete removes them all.
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.length === 0);
+});
+
+await check('Room tab: a floor picture is drawn flat under the scene at its width, two clicks set its scale, opacity fades it', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  // The dev file chooser is a prompt; set the picture straight into the scene (a 200 x 100 picture, 10 m wide).
+  await ed(() => window.spEditor.store.update((s) => { s.editor = { ...s.editor, floor_image: { file: '/tests/e2e/fixtures/floor.png', centre: [0, 0], width: 10, rotation: 0, opacity: 0.6, height: 0, aspect: 0.5 } }; }));
+  await page.waitForFunction(() => { const m = window.spEditor.view.floorMesh; return !!m && m.scale.x === 10 && m.scale.y === 5; });
+  await page.waitForFunction(() => !!window.spEditor.view.floorImageAspect('/tests/e2e/fixtures/floor.png'), null, { timeout: 10000 });
+  const asp = await ed(() => window.spEditor.view.floorImageAspect('/tests/e2e/fixtures/floor.png'));
+  assert(Math.abs(asp - 0.5) < 1e-6, `aspect ${asp}`);
+  await page.click('.tab[data-tab="room"]');
+  await page.waitForSelector('#sidebar .section-title:has-text("Floor picture")');
+  const widthText = await page.locator('#sidebar .row:has-text("Width")').textContent();
+  assert(widthText.includes('5.00 m deep'), widthText);
+  // Scale: click two points 2 m apart in the view and say they are 4 m apart; the picture doubles.
+  await page.click('#sidebar button:has-text("Set scale…")');
+  await page.waitForFunction(() => window.spEditor.tools.calibrating === 0);
+  await page.mouse.click(...(await screen([-1, 0, 1])));
+  await page.waitForFunction(() => window.spEditor.tools.calibrating === 1);
+  await page.mouse.click(...(await screen([1, 0, 1])));
+  await page.waitForSelector('#sidebar .row:has-text("Real distance")');
+  const measured = await page.locator('#sidebar .section:has-text("Floor picture") .muted').first().textContent();
+  assert(/2\.0\d m apart|1\.9\d m apart/.test(measured), measured);
+  const real = page.locator('#sidebar .row:has-text("Real distance") input');
+  await real.fill('4');
+  await real.press('Enter');
+  await page.click('#sidebar button:has-text("Apply")');
+  await page.waitForFunction(() => { const f = window.spEditor.store.scene.editor.floor_image; return f.width > 19.5 && f.width < 20.5; });
+  await page.waitForFunction(() => window.spEditor.view.floorMesh.scale.x > 19.5);
+  // Opacity.
+  const op = page.locator('#sidebar .row:has-text("Opacity") input[type=range]');
+  await op.fill('0.2');
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.floorMesh.material.opacity - 0.2) < 1e-6);
+  await page.screenshot({ path: resolve(outDir, 'floor-picture.png') });
+  // Saved with the scene and removable.
+  const saved = await ed(() => JSON.parse(JSON.stringify(window.spEditor.store.scene)).editor.floor_image);
+  assert(saved.file === '/tests/e2e/fixtures/floor.png' && Math.abs(saved.opacity - 0.2) < 1e-6, JSON.stringify(saved));
+  await page.click('#sidebar button:has-text("Remove picture")');
+  await page.waitForFunction(() => !window.spEditor.store.scene.editor.floor_image && !window.spEditor.view.floorMesh);
+});
+
+await check('Output tab: the heatmap paints one speaker\'s coverage, Option-hover reads the levels at a point', async () => {
+  await page.goto('http://localhost:5199/');
+  await page.waitForFunction(() => !!window.spEditor);
+  await ed(() => window.spEditor.setView('top'));
+  await page.click('.tab[data-tab="output"]');
+  await page.locator('#sidebar .row:has-text("Output") select').selectOption('speakers');
+  await page.waitForFunction(() => window.spEditor.view.pickableSpeakers().length === 12);
+  await page.locator('#sidebar .row:has-text("Heatmap") select').selectOption('0');   // L
+  await page.waitForFunction(() => !!window.spEditor.view.heatmapMesh, null, { timeout: 10000 });
+  const hm = await ed(() => { const m = window.spEditor.view.heatmapMesh; return { w: m.scale.x, x: m.position.x, z: m.position.z, tex: m.material.map.image.width }; });
+  assert(hm.w >= 8 && hm.tex === 40 && Math.abs(hm.x) < 0.01, JSON.stringify(hm));
+  // Front-left of the listener is bright for L, far right is dark.
+  const px = await ed(() => {
+    const d = window.spEditor.view.heatmapMesh.material.map.image.data, n = 40;
+    const at = (col, row) => { const i = (row * n + col) * 4; return d[i] + d[i + 1] + d[i + 2]; };
+    // Texture rows run bottom-up: +Z (behind) first. Front-left = high row, low column; right = high column.
+    return { frontLeft: at(14, 30), right: at(38, 20) };
+  });
+  assert(px.frontLeft > px.right + 100, JSON.stringify(px));
+  await page.screenshot({ path: resolve(outDir, 'heatmap-L.png') });
+  // Option-hover over a point to the front-left: L is loudest in the readout.
+  await page.keyboard.down('Alt');
+  await page.mouse.move(...(await screen([-1.2, 1.7, -2])));
+  await page.mouse.move(...(await screen([-1.2, 1.7, -2.1])));
+  await page.waitForFunction(() => document.querySelector('.hud .probe')?.textContent?.includes('L '), null, { timeout: 5000 });
+  await page.keyboard.up('Alt');
+  const text = await page.textContent('.hud .probe');
+  const m = /L (-?\d+\.\d)/.exec(text), r = /\bR (-?\d+\.\d)/.exec(text);
+  assert(m && r && parseFloat(m[1]) > parseFloat(r[1]) + 6, text);
+  await page.locator('#sidebar .row:has-text("Heatmap") select').selectOption('none');
+  await page.waitForFunction(() => !window.spEditor.view.heatmapMesh);
+});
+
+await check('pinned mixes: a pin is added at a point, captured from the panner, dragged, and removed', async () => {
+  await page.click('#sidebar button:has-text("Add pin")');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins?.length === 1);
+  let pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(pin.gains_db.length === 12 && pin.gains_db.every((g) => g === -120), JSON.stringify(pin));
+  assert(Math.abs(pin.position[2] + 1.2) < 0.01, JSON.stringify(pin.position));   // 1.2 m ahead
+  const drawn = await ed(() => window.spEditor.view.pickablePins().length);
+  assert(drawn === 1, `pins drawn ${drawn}`);
+  await page.waitForSelector('#sidebar .section-title:has-text("Pin: Pin 1")');
+  await page.click('#sidebar button:has-text("Capture from panner")');
+  // 1.2 m ahead: C at about -1.6 dB (distance), L and R well below.
+  await page.waitForFunction(() => window.spEditor.store.scene.pins[0].gains_db[2] > -5);
+  pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(pin.gains_db[0] < pin.gains_db[2] - 6, JSON.stringify(pin.gains_db));
+  // A level slider.
+  const lSlider = page.locator('#sidebar .row:has-text("L") input[type=range]').first();
+  await lSlider.fill('-3');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins[0].gains_db[0] === -3);
+  // Drag the pin in the top view.
+  const from = await screen(pin.position);
+  const to = await screen([pin.position[0] + 2, pin.position[1], pin.position[2]]);
+  await page.mouse.move(...from);
+  await page.mouse.down();
+  await page.mouse.move(...to, { steps: 6 });
+  await page.mouse.up();
+  pin = await ed(() => window.spEditor.store.scene.pins[0]);
+  assert(Math.abs(pin.position[0] - 2) < 0.15, JSON.stringify(pin.position));
+  // The engine scene carries the pins.
+  const sent = await ed(() => JSON.stringify(window.spEditor.store.scene.pins));
+  assert(sent.includes('"radius":1.5'), sent);
+  await page.screenshot({ path: resolve(outDir, 'pins.png') });
+  await page.click('#sidebar button:has-text("Remove pin")');
+  await page.waitForFunction(() => window.spEditor.store.scene.pins.length === 0);
+});
+
+await check('test source: a looping layer that is dragged about, left out of the saved scene', async () => {
+  page.once('dialog', (d) => d.accept('/signals/demo.wav'));
+  await page.click('#sidebar button:has-text("Test source…")');
+  await page.waitForFunction(() => window.spEditor.store.scene.layers.some((l) => l.test));
+  const l = await ed(() => window.spEditor.store.scene.layers.find((x) => x.test));
+  assert(l.loop === true && l.name.startsWith('Test:'), JSON.stringify(l));
+  await page.waitForSelector('#sidebar button:has-text("Remove test source")');
+  const saved = await ed(() => window.spEditor.withoutTestLayers(window.spEditor.store.scene).layers.length);
+  assert(saved === 0, `saved layers ${saved}`);
+  await page.click('#sidebar button:has-text("Remove test source")');
+  await page.waitForFunction(() => !window.spEditor.store.scene.layers.some((l) => l.test));
+});
+
+await check('Settings tab: text size and label height apply to the page and the view', async () => {
+  await page.click('.tab[data-tab="settings"]');
+  await page.waitForSelector('#sidebar .section-title:has-text("Labels in the 3D view")');
+  const size = page.locator('#sidebar .row:has-text("Text size") input[type=range]');
+  await size.fill('16');
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--label-size').trim() === '16px');
+  const off = page.locator('#sidebar .row:has-text("Height above") input[type=range]');
+  await off.fill('0.8');
+  await page.waitForFunction(() => Math.abs(window.spEditor.view.settings.labelOffset - 0.8) < 1e-6);
+  const stored = await ed(() => JSON.parse(localStorage.getItem('sp.settings')));
+  assert(stored.labelSize === 16 && Math.abs(stored.labelOffset - 0.8) < 1e-6, JSON.stringify(stored));
+  await page.click('#sidebar button:has-text("Reset to defaults")');
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--label-size').trim() === '11px');
 });
 
 if (errors.length) { failed++; console.log('Page errors:\n' + errors.join('\n')); }

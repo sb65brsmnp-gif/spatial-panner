@@ -2,8 +2,8 @@
 import * as THREE from 'three';
 import './styles.css';
 import { store } from './model/store';
-import { defaultScene, engineScene, mergeEditorKeys, type SceneDoc } from './model/scene';
-import { createBackend } from './bridge/backend';
+import { defaultScene, engineScene, mergeEditorKeys, withoutTestLayers, type SceneDoc, type V3 } from './model/scene';
+import { createBackend, type PanGainsRequest } from './bridge/backend';
 import { Viewport, type ViewName } from './view/viewport';
 import { SceneView } from './view/sceneView';
 import { Interaction, type ToolName } from './view/interaction';
@@ -11,6 +11,8 @@ import { Toolbar } from './panels/toolbar';
 import { Sidebar } from './panels/sidebar';
 import { Timeline, transportKeyAction } from './panels/timeline';
 import { el, fmtTime } from './panels/dom';
+import { applySettingsToPage, loadSettings, saveSettings, type Settings } from './model/settings';
+import { MeterBallistics } from './model/meters';
 
 const backend = createBackend();
 const plugin = backend.kind === 'plugin';
@@ -25,7 +27,22 @@ viewportEl.append(hud, emptyHint, toasts);
 const vp = new Viewport(viewportEl);
 const view = new SceneView(vp, store);
 const tools = new Interaction(vp, view, store);
+view.assetUrl = (p) => backend.assetUrl(p);
 let follow = false;
+store.plugin = plugin;
+
+// Display settings (Settings tab): the page's CSS variables and the view.
+let settings: Settings = loadSettings();
+function applySettings(s: Settings): void {
+  settings = s;
+  applySettingsToPage(s);
+  view.applySettings(s);
+  saveSettings(s);
+  store.emit('output');
+}
+applySettingsToPage(settings);
+view.settings = { ...settings };
+const settingsHost = { get: () => settings, set: (s: Settings) => applySettings(s) };
 
 async function newScene(): Promise<void> {
   if (plugin) {
@@ -49,7 +66,8 @@ const toolbar = new Toolbar(tools, plugin, {
   home: () => homeView(),
   toggleFollow: () => { follow = !follow; refreshToolbar(); },
 });
-const sidebar = new Sidebar(store, backend, tools);
+const sidebar = new Sidebar(store, backend, tools, settingsHost);
+sidebar.probe = (points, withoutPin) => { const req = probeRequest(points, withoutPin); return req ? backend.panGains(req) : Promise.resolve([]); };
 const timeline = new Timeline(store, backend);
 tools.blockDelete = () => timeline.keyFocused;
 
@@ -68,6 +86,7 @@ function sceneBounds(): THREE.Box3 {
   }
   for (const l of s.layers) b.expandByPoint(new THREE.Vector3(...l.position));
   for (const p of store.analysis?.paths ?? []) for (const q of p.points) b.expandByPoint(new THREE.Vector3(...q));
+  for (const t of store.analysis?.layers ?? []) for (const q of t.points) b.expandByPoint(new THREE.Vector3(...q));
   b.expandByPoint(new THREE.Vector3(...s.listener.static_position));
   // Without a box room (outdoor, open, mesh) the ground around the origin is
   // part of the picture, and a scene of one layer is not a point: framing a
@@ -118,9 +137,86 @@ function refreshToolbar(): void {
   // Plugin: the scene is saved with the Logic project, so nothing is ever "unsaved".
   const title = `${name}${store.dirty && !plugin ? ' •' : ''}`;
   document.title = `${title} · Spatial Panner`;
-  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title });
+  toolbar.refresh({ view: vp.view, follow, canUndo: store.canUndo, canRedo: store.canRedo, title,
+    layers: store.scene.layers.map((l, i) => l.name || `Layer ${i + 1}`) });
 }
 tools.onToolChange = refreshToolbar;
+
+// ----------------------------------------------------------- heatmap
+
+// One speaker's coverage painted on the floor: the panner probed on a grid
+// of points in the head's horizontal plane around the listener (the view
+// converts them to the head's frame, the engine answers in dB).
+const HEAT_N = 40;
+let heatTimer: number | null = null;
+let heatBusy = false, heatAgain = false;
+function scheduleHeatmap(): void {
+  if (heatTimer !== null) return;
+  heatTimer = window.setTimeout(() => { heatTimer = null; void drawHeatmap(); }, 80);
+}
+function probeRequest(points: V3[], withoutPin = -1): PanGainsRequest | null {
+  const speakers = store.speakersShown();
+  if (!speakers.length) return null;
+  const pins = (store.scene.pins ?? []).filter((_, i) => i !== withoutPin)
+    .map((p) => ({ position: view.speakerLocalOf(p.position), radius: p.radius, gains_db: p.gains_db }));
+  return { output: { speakers, bass: store.scene.editor?.output?.bass }, points: points.map((p) => view.speakerLocalOf(p)), pins };
+}
+async function drawHeatmap(): Promise<void> {
+  const i = store.heatmapSpeaker;
+  const speakers = store.speakersShown();
+  if (i < 0 || i >= speakers.length) { view.setHeatmap(null, 0, 0, 0, 0); return; }
+  if (heatBusy) { heatAgain = true; return; }
+  const pose = store.poseAt(store.time);
+  if (!pose) return;
+  const extent = Math.max(8, 2.5 * Math.max(...speakers.map((x) => x.distance || 2)));
+  const cx = pose[0], cz = pose[2], y = pose[1];
+  const points: V3[] = [];
+  for (let r = 0; r < HEAT_N; ++r)
+    for (let c = 0; c < HEAT_N; ++c)
+      points.push([cx + ((c + 0.5) / HEAT_N - 0.5) * extent, y, cz + ((r + 0.5) / HEAT_N - 0.5) * extent]);
+  const req = probeRequest(points);
+  if (!req) return;
+  heatBusy = true;
+  try {
+    const rows = await backend.panGains(req);
+    const levels = new Float32Array(HEAT_N * HEAT_N);
+    rows.forEach((row, k) => { levels[k] = row[i] ?? -120; });
+    if (store.heatmapSpeaker === i) view.setHeatmap(levels, HEAT_N, cx, cz, extent);
+  } catch (e) {
+    toast(`Heatmap: ${String(e instanceof Error ? e.message : e)}`, 'error');
+  } finally {
+    heatBusy = false;
+    if (heatAgain) { heatAgain = false; scheduleHeatmap(); }
+  }
+}
+
+// Option-hover in the view: the levels every speaker would get for a layer
+// at that point of the head's horizontal plane, in the HUD.
+let probeText = '';
+let probeTimer: number | null = null;
+let probePending: PointerEvent | null = null;
+viewportEl.addEventListener('pointermove', (e) => {
+  if (!e.altKey || e.target !== vp.renderer.domElement || !store.speakersShown().length) {
+    if (probeText) { probeText = ''; updateHud(); }
+    return;
+  }
+  probePending = e;
+  if (probeTimer !== null) return;
+  probeTimer = window.setTimeout(() => { probeTimer = null; void probeAt(probePending!); }, 60);
+});
+viewportEl.addEventListener('pointerleave', () => { if (probeText) { probeText = ''; updateHud(); } });
+async function probeAt(e: PointerEvent): Promise<void> {
+  const pose = store.poseAt(store.time);
+  if (!pose) return;
+  const hit = vp.intersect(e, new THREE.Plane(new THREE.Vector3(0, 1, 0), -pose[1]));
+  const req = hit ? probeRequest([[hit.x, hit.y, hit.z]]) : null;
+  if (!req || !hit) { if (probeText) { probeText = ''; updateHud(); } return; }
+  const rows = await backend.panGains(req);
+  const speakers = store.speakersShown();
+  const fmt = (db: number) => (db <= -119 ? '—' : `${db > 0 ? '+' : ''}${db.toFixed(1)}`);
+  probeText = `at (${hit.x.toFixed(1)}, ${hit.z.toFixed(1)}) m: ` + speakers.map((sp, k) => `${sp.name || `Spk ${k + 1}`} ${fmt(rows[0]?.[k] ?? -120)}`).join('  ') + ' dB';
+  updateHud();
+}
 
 // --------------------------------------------------------------- HUD
 
@@ -130,10 +226,22 @@ function updateHud(): void {
   const yaw = p[3], pitch = p[4];
   hud.innerHTML = `<b>${fmtTime(store.time, true)}</b> &nbsp; listener (${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)}) m`
     + ` &nbsp; head ${Math.abs(yaw).toFixed(0)}° ${yaw >= 0 ? 'left' : 'right'}, ${Math.abs(pitch).toFixed(0)}° ${pitch >= 0 ? 'up' : 'down'}`
-    + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '');
+    + (p[7] > 0.01 ? ` &nbsp; ${p[7].toFixed(1)} m/s` : '')
+    + (probeText ? `<br><span class="probe">${probeText}</span>` : '');
   const s = store.scene;
-  emptyHint.textContent = !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
-    : !s.listener.paths.length ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
+  // While a drawing tool is out, say whose path it draws: the selected
+  // layer's, or the listener's ("for" in the toolbar changes it).
+  const target = tools.opts.tool !== 'select' ? s.layers[tools.opts.layerTarget] : undefined;
+  emptyHint.textContent = tools.calibrating >= 0
+    ? (tools.calibrating === 0 ? 'Floor picture scale: click the first of two points on the picture whose real distance you know. Esc cancels.'
+      : 'Now click the second point.')
+    : tools.opts.tool !== 'select'
+    ? (target ? `Drawing the path of ${target.name || `Layer ${tools.opts.layerTarget + 1}`} at its height. For the listener's path instead, choose Listener under "for" in the toolbar. Esc cancels.`
+      : s.layers.length ? 'Drawing the listener\'s path. For a layer\'s own path, choose it under "for" in the toolbar, or press Esc and select the layer first.' : '')
+    : !s.layers.length ? (plugin ? 'Insert Spatial Panner on the tracks you want in the scene; each track becomes a layer.' : 'Add audio files (Layers tab), then draw the listener\'s path with a tool above.')
+      // Until anything has been drawn; a scene whose layers move while the
+      // listener stands still (common in Logic) is not waiting for a path.
+      : !s.listener.paths.length && !s.layers.some((l) => l.motion?.path.segments.length) ? 'Draw the listener\'s path: pick Freehand, Point to point, Curve, Pen or a Shape above and draw on the floor.' : '';
   emptyHint.style.display = emptyHint.textContent ? '' : 'none';
 }
 
@@ -191,6 +299,9 @@ async function requestAudioInfo(): Promise<void> {
   }
 }
 
+// Peaks arrive as "since the last read": hold and fall, so bursty hosts do
+// not make the meters flicker.
+const meterBallistics = new MeterBallistics();
 backend.onTick((t) => {
   const wasPlaying = store.playing;
   const host = !!t.host;
@@ -200,7 +311,7 @@ backend.onTick((t) => {
   store.playing = t.playing;
   if (t.playing || wasPlaying || host) store.time = t.time;
   store.livePose = t.pose ?? null;
-  if (t.meters) { store.meters = t.meters; store.emit('meters'); }
+  if (t.meters) { store.meters = meterBallistics.update(t.meters, performance.now()); store.emit('meters'); }
   // The host's automation turns the head even while the playhead stands.
   if (t.playing || wasPlaying !== t.playing || moved || host) store.emit('time');
   if (wasPlaying !== t.playing) store.emit('transport');
@@ -210,9 +321,33 @@ backend.onSceneReplaced((doc) => store.replace(mergeEditorKeys(doc, doc)));
 window.addEventListener('sp-message', (e) => { const d = (e as CustomEvent).detail; toast(d.text, d.level); });
 
 async function refreshInfo(): Promise<void> {
-  try { sidebar.info = await backend.info(); sidebar.render(); } catch { /* app not ready */ }
+  try {
+    const info = await backend.info();
+    sidebar.info = info;
+    if (plugin) {
+      // What this track renders to: the speakers drawn when the scene has
+      // placed none, and the bus channel names for the Output tab.
+      const next = JSON.stringify(info.output);
+      if (next !== JSON.stringify(store.hostOutput)) { store.hostOutput = JSON.parse(next); store.emit('output'); }
+    }
+    sidebar.render();
+  } catch { /* app not ready */ }
 }
 setInterval(refreshInfo, 2000);
+
+// The app's engine follows the scene's output setting (mode, layout, placed
+// speakers, bass management); the plug-in reads it from the document.
+let sentOutput = '';
+function syncOutput(): void {
+  if (plugin) return;
+  let out = store.scene.editor?.output ?? { mode: 'binaural' as const, layout: '7.1.4' };
+  // A custom layout with nothing placed yet plays plain stereo meanwhile.
+  if (out.mode === 'speakers' && Array.isArray(out.speakers) && !out.speakers.length) out = { ...out, layout: 'stereo', speakers: undefined };
+  const text = JSON.stringify(out);
+  if (text === sentOutput) return;
+  sentOutput = text;
+  backend.setOutput(out).then((r) => { if (r && !r.ok && r.error) toast(r.error, 'error'); }).catch(() => { /* no native side */ });
+}
 
 store.subscribe((kinds) => {
   if (kinds.has('scene')) {
@@ -224,12 +359,20 @@ store.subscribe((kinds) => {
     if (kinds.has('selection')) { view.updateLayers(); view.rebuildPaths(); }
     if (kinds.has('analysis')) view.rebuildPaths();
   }
+  // Layers with paths move with the playhead.
+  if (!kinds.has('scene') && !kinds.has('selection') && (kinds.has('time') || kinds.has('analysis') || kinds.has('transport'))
+    && store.scene.layers.some((l) => l.motion)) view.updateLayers();
   // A mesh room is drawn from the analysis, which arrives after the scene.
   if (kinds.has('analysis') && store.scene.room.type === 'mesh') view.rebuildRoom();
   if (kinds.has('meters')) view.updateMeters();
-  if (kinds.has('file')) backend.setOutput(store.scene.editor?.output ?? { mode: 'binaural', layout: '7.1.4' });
+  if (kinds.has('file') || kinds.has('scene')) syncOutput();
   if (kinds.has('scene') || kinds.has('analysis') || kinds.has('time') || kinds.has('transport')) updateListener();
+  if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updateSpeakers();
+  if (kinds.has('scene') || kinds.has('file')) view.updateFloorImage();
+  if (kinds.has('scene') || kinds.has('selection') || kinds.has('output') || kinds.has('file')) view.updatePins();
+  if (kinds.has('scene') || kinds.has('output') || kinds.has('file') || kinds.has('time') || kinds.has('analysis')) scheduleHeatmap();
   if (kinds.has('scene') || kinds.has('file') || kinds.has('tool') || kinds.has('selection')) refreshToolbar();
+  if (kinds.has('tool')) updateHud();
   if (kinds.has('time') || kinds.has('transport')) timeline.draw();
 });
 
@@ -280,7 +423,7 @@ function loadOpened(r: { path: string | null; scene: SceneDoc; raw: unknown }): 
 
 async function saveScene(saveAs: boolean): Promise<void> {
   try {
-    const r = await backend.saveScene(store.scene, saveAs || plugin ? null : store.filePath);
+    const r = await backend.saveScene(withoutTestLayers(store.scene), saveAs || plugin ? null : store.filePath);
     if (!r) return;
     if (plugin) { toast(`Exported ${r.path.split(/[\\/]/).pop()}`, 'info'); return; }
     store.filePath = r.path;
@@ -404,6 +547,29 @@ if (plugin) {
   };
   document.addEventListener('focusin', (e) => { if (editable(e.target)) backend.editing(true).catch(() => { /* no native side */ }); });
   document.addEventListener('focusout', (e) => { if (editable(e.target)) backend.editing(false).catch(() => { /* no native side */ }); });
+
+  // The window's resize grip. JUCE's own corner resizer is painted under
+  // the web view, so the page draws one and asks the plug-in for the size.
+  const grip = el('div', { class: 'resize-grip', title: 'Drag to resize the window' });
+  document.body.append(grip);
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const start = { x: e.clientX, y: e.clientY, w: window.innerWidth, h: window.innerHeight };
+    let want: [number, number] | null = null;
+    let sending = false;
+    const send = () => {
+      if (sending || !want) return;
+      sending = true;
+      const [w, h] = want;
+      want = null;
+      backend.resize(w, h).catch(() => { /* no native side */ }).finally(() => { sending = false; send(); });
+    };
+    const move = (ev: PointerEvent) => { want = [start.w + ev.clientX - start.x, start.h + ev.clientY - start.y]; send(); };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
 }
 
 window.addEventListener('beforeunload', (e) => { if (store.dirty && backend.kind === 'dev') e.preventDefault(); });
@@ -426,4 +592,4 @@ function project(p: [number, number, number]): [number, number] {
   const v = new THREE.Vector3(...p).project(vp.camera);
   return [(v.x * 0.5 + 0.5) * r.width + r.left, (-v.y * 0.5 + 0.5) * r.height + r.top];
 }
-(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, setView, project, dropAudio, openRecent };
+(window as unknown as Record<string, unknown>).spEditor = { store, tools, vp, view, backend, timeline, setView, project, dropAudio, openRecent, withoutTestLayers };

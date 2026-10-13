@@ -1,7 +1,8 @@
 // Editor state: the scene document, selection, undo/redo, and the current
 // analysis (engine-sampled paths and poses). Views subscribe to changes.
-import { completeScene, defaultScene, type SceneDoc } from './scene';
+import { completeScene, defaultScene, outputSpeakers, type OutputDoc, type SceneDoc, type SpeakerDoc } from './scene';
 import type { PointRef } from './geometry';
+import { pathOf } from './layerMotion';
 
 export interface Analysis {
   duration: number;
@@ -12,6 +13,9 @@ export interface Analysis {
   // [x, y, z, yaw, pitch, roll, distance, speed]
   poses: number[][];
   // A mesh room's triangles, for drawing.
+  // Layers with paths: [x, y, z, yaw, distance] at t = 0, dt, 2 dt ... (each
+  // layer's own dt).
+  layers?: { layer: number; length: number; points: [number, number, number][]; dt: number; samples: number[][] }[];
   room_mesh?: { vertices: [number, number, number][]; triangles: [number, number, number][] };
   revision?: number;
   error?: string;
@@ -20,9 +24,17 @@ export interface Analysis {
 export type Selection =
   | { kind: 'none' }
   | { kind: 'layer'; index: number }
-  | { kind: 'point'; path: number; ref: PointRef };
+  | { kind: 'point'; path: number; ref: PointRef }
+  // A speaker of the output layout (index into speakersShown()).
+  | { kind: 'speaker'; index: number }
+  // A pinned mix (index into scene.pins).
+  | { kind: 'pin'; index: number }
+  // Several layers and/or speakers (Cmd+click, Cmd+drag): they move and
+  // delete together.
+  | { kind: 'multi'; layers: number[]; speakers: number[] };
 
-export type ChangeKind = 'scene' | 'selection' | 'analysis' | 'time' | 'transport' | 'meters' | 'file' | 'tool';
+// 'output': what the host renders to changed (plugin), or the display settings.
+export type ChangeKind = 'scene' | 'selection' | 'analysis' | 'time' | 'transport' | 'meters' | 'file' | 'tool' | 'output';
 
 type Listener = (kinds: Set<ChangeKind>) => void;
 
@@ -39,6 +51,13 @@ export class Store {
   livePose: number[] | null = null;  // pose from the audio engine while playing
   hostDriven = false;           // plugin: the host's playhead drives time and pose
   hostActive = true;            // plugin: the host is running the plug-in (livePose is current)
+  plugin = false;               // the editor runs inside the plug-in
+  // Plugin: what this instance's track renders to (from the plug-in's info):
+  // its bus's speakers when the scene has placed none.
+  hostOutput: (OutputDoc & { channels?: string[] }) | null = null;
+  // The speaker whose coverage the view paints on the floor (-1 = none);
+  // display state, not saved.
+  heatmapSpeaker = -1;
   meters: number[] = [];        // per-layer dBFS
   filePath: string | null = null;
   dirty = false;
@@ -170,13 +189,100 @@ export class Store {
     return Math.max(d, 30);
   }
 
+  // The speakers drawn around the listener: the scene's placed layout; in
+  // the plug-in without one, the bus's own layout; none in binaural or
+  // Ambisonic mode (the app's Output setting, or a stereo track).
+  speakersShown(): SpeakerDoc[] {
+    const out = this.scene.editor?.output;
+    if (this.plugin) {
+      if (Array.isArray(out?.speakers)) return out!.speakers!;
+      return this.hostOutput?.mode === 'speakers' ? this.hostOutput.speakers ?? [] : [];
+    }
+    return outputSpeakers(out);
+  }
+
+  // Whether the drawn speakers are the scene's own (editable in place; a
+  // placed list may be empty) or stand in for a preset / the bus: editing
+  // one first writes them all into the scene.
+  speakersPlaced(): boolean { return Array.isArray(this.scene.editor?.output?.speakers); }
+
+  // The layers in the selection (one, or several), likewise the speakers.
+  selectedLayers(): number[] {
+    const s = this.selection;
+    if (s.kind === 'layer') return [s.index];
+    if (s.kind === 'multi') return s.layers;
+    return [];
+  }
+  selectedSpeakers(): number[] {
+    const s = this.selection;
+    if (s.kind === 'speaker') return [s.index];
+    if (s.kind === 'multi') return s.speakers;
+    return [];
+  }
+  isLayerSelected(i: number): boolean { return this.selectedLayers().includes(i); }
+  isSpeakerSelected(i: number): boolean { return this.selectedSpeakers().includes(i); }
+
+  // Adds or removes one layer or speaker from the selection (Cmd+click).
+  toggleSelected(what: 'layer' | 'speaker', index: number): void {
+    const layers = new Set(this.selectedLayers()), speakers = new Set(this.selectedSpeakers());
+    const set = what === 'layer' ? layers : speakers;
+    if (set.has(index)) set.delete(index); else set.add(index);
+    this.selectMany([...layers], [...speakers]);
+  }
+
+  // A selection of several things; one thing stays a plain selection.
+  selectMany(layers: number[], speakers: number[]): void {
+    layers = [...new Set(layers)].sort((a, b) => a - b);
+    speakers = [...new Set(speakers)].sort((a, b) => a - b);
+    if (!layers.length && !speakers.length) this.select({ kind: 'none' });
+    else if (layers.length === 1 && !speakers.length) this.select({ kind: 'layer', index: layers[0] });
+    else if (speakers.length === 1 && !layers.length) this.select({ kind: 'speaker', index: speakers[0] });
+    else this.select({ kind: 'multi', layers, speakers });
+  }
+
   private validateSelection(): void {
     const s = this.selection;
     if (s.kind === 'layer' && s.index >= this.scene.layers.length) this.selection = { kind: 'none' };
+    if (s.kind === 'speaker' && s.index >= this.speakersShown().length) this.selection = { kind: 'none' };
+    if (s.kind === 'pin' && s.index >= (this.scene.pins?.length ?? 0)) this.selection = { kind: 'none' };
+    if (s.kind === 'multi') {
+      const n = this.scene.layers.length, m = this.speakersShown().length;
+      const layers = s.layers.filter((i) => i < n), speakers = s.speakers.filter((i) => i < m);
+      if (layers.length !== s.layers.length || speakers.length !== s.speakers.length) {
+        if (!layers.length && !speakers.length) this.selection = { kind: 'none' };
+        else this.selection = { kind: 'multi', layers, speakers };
+      }
+    }
     if (s.kind === 'point') {
-      const p = this.scene.listener.paths[s.path];
+      const p = pathOf(this.scene, s.path);
       if (!p || !p.segments[s.ref.seg] || !p.segments[s.ref.seg].points[s.ref.pt]) this.selection = { kind: 'none' };
     }
+  }
+
+  // Where layer i is drawn at time t: [x, y, z, yaw] of its centre, from the
+  // engine's analysis (which covers layers with a path and layers carried
+  // by a link); its own position when the analysis does not cover it.
+  layerPlace(i: number, t: number): [number, number, number, number] {
+    const l = this.scene.layers[i];
+    const own: [number, number, number, number] = [l.position[0], l.position[1], l.position[2], 0];
+    const tr = this.analysis?.layers?.find((x) => x.layer === i);
+    if (!tr || !tr.samples.length) return own;
+    const f = t / tr.dt;
+    const a = Math.max(0, Math.min(tr.samples.length - 1, Math.floor(f)));
+    const b = Math.min(tr.samples.length - 1, a + 1);
+    const u = Math.max(0, Math.min(1, f - a));
+    const p = tr.samples[a], q = tr.samples[b];
+    // The analysis was taken with the layer where it stood then; a drag since
+    // moves the whole journey with it.
+    const s0 = tr.points[0];
+    const d = s0 ? [l.position[0] - s0[0], l.position[1] - s0[1], l.position[2] - s0[2]] : [0, 0, 0];
+    // A jump (loop restart) is not interpolated across.
+    const jump = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) > 2;
+    const w = jump ? (u < 0.5 ? 0 : 1) : u;
+    let dy = q[3] - p[3];
+    if (dy > 180) dy -= 360;
+    if (dy < -180) dy += 360;
+    return [p[0] + (q[0] - p[0]) * w + d[0], p[1] + (q[1] - p[1]) * w + d[1], p[2] + (q[2] - p[2]) * w + d[2], p[3] + dy * w];
   }
 
   // Pose at the playhead: the audio engine's while playing (always, when the

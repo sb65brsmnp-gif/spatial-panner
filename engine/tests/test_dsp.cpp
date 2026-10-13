@@ -266,3 +266,110 @@ TEST_CASE("HRTF set loads and has interaural differences") {
     for (int i = 0; i < h.filterLength(); ++i) { el += l[i] * l[i]; er += r[i] * r[i]; }
     CHECK(std::fabs(10 * std::log10(el / er)) < 1.5);
 }
+
+#include "dsp/Crossover.h"
+
+namespace {
+double rmsOf(const std::vector<float>& v, size_t from = 0) {
+    double s = 0;
+    size_t n = 0;
+    for (size_t i = from; i < v.size(); ++i, ++n) s += static_cast<double>(v[i]) * v[i];
+    return n ? std::sqrt(s / static_cast<double>(n)) : 0.0;
+}
+std::vector<float> tone(float f, float fs, int n) {
+    std::vector<float> x(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) x[static_cast<size_t>(i)] = std::sin(2.0f * static_cast<float>(M_PI) * f * static_cast<float>(i) / fs);
+    return x;
+}
+}  // namespace
+
+TEST_CASE("Biquad lowpass and highpass: -3 dB at the cutoff, flat far from it") {
+    const float fs = 48000;
+    Biquad lp, hp;
+    lp.setLowpass(100, 0.70710678f, fs);
+    hp.setHighpass(100, 0.70710678f, fs);
+    auto mag = [&](Biquad& b, float f) {
+        b.reset();
+        auto x = tone(f, fs, 48000);
+        std::vector<float> y(x.size());
+        for (size_t i = 0; i < x.size(); ++i) y[i] = b.process(x[i]);
+        return 20 * std::log10(rmsOf(y, 24000) / rmsOf(x, 24000));
+    };
+    CHECK(mag(lp, 100) == Approx(-3.0).margin(0.2));
+    CHECK(mag(hp, 100) == Approx(-3.0).margin(0.2));
+    CHECK(mag(lp, 10) == Approx(0.0).margin(0.1));
+    CHECK(mag(lp, 1000) < -38);
+    CHECK(mag(hp, 1000) == Approx(0.0).margin(0.1));
+    CHECK(mag(hp, 10) < -38);
+}
+
+TEST_CASE("Bass crossover: the lows leave the speakers and reach the subwoofer; LR24 sums flat") {
+    const float fs = 48000;
+    SpeakerLayout l = SpeakerLayout::preset("5.1");
+    l.bass.enabled = true;
+    l.bass.cutoffHz = 80;
+    l.bass.filter = BassManagement::Filter::LinkwitzRiley24;
+    BassCrossover x;
+    x.init(l, fs);
+    REQUIRE(x.active());
+    const int n = 48000;
+    std::vector<std::vector<float>> ch(6, std::vector<float>(static_cast<size_t>(n), 0.0f));
+    std::vector<float*> ptrs;
+    for (auto& c : ch) ptrs.push_back(c.data());
+    // Feeds channel L (the buffers stay where they are: ptrs point into them).
+    const auto feed = [&](float f) {
+        for (auto& c : ch) std::fill(c.begin(), c.end(), 0.0f);
+        const auto t = tone(f, fs, n);
+        std::copy(t.begin(), t.end(), ch[0].begin());
+        x.reset();
+        x.process(ptrs.data(), 6, n);
+        return rmsOf(t, 24000);
+    };
+    // 10 Hz on L only (three octaves under the 80 Hz crossover, 24 dB/oct):
+    // it moves to the LFE channel (index 3).
+    const double in = feed(10);
+    CHECK(20 * std::log10(rmsOf(ch[0], 24000) / in) < -40);
+    CHECK(20 * std::log10(rmsOf(ch[3], 24000) / in) == Approx(0.0).margin(0.3));
+    // 2 kHz on L stays on L and does not reach the sub.
+    const double in2 = feed(2000);
+    CHECK(20 * std::log10(rmsOf(ch[0], 24000) / in2) == Approx(0.0).margin(0.1));
+    CHECK(20 * std::log10(rmsOf(ch[3], 24000) / in2) < -60);
+    // At the cutoff the two halves sum back to the input level (Linkwitz-Riley).
+    feed(80);
+    std::vector<float> sum(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) sum[static_cast<size_t>(i)] = ch[0][static_cast<size_t>(i)] + ch[3][static_cast<size_t>(i)];
+    CHECK(20 * std::log10(rmsOf(sum, 24000) / rmsOf(tone(80, fs, n), 24000)) == Approx(0.0).margin(0.3));
+    // Off, or without a subwoofer, nothing happens.
+    SpeakerLayout st = SpeakerLayout::preset("stereo");
+    st.bass.enabled = true;
+    BassCrossover none;
+    none.init(st, fs);
+    CHECK_FALSE(none.active());
+}
+
+TEST_CASE("Speaker layout JSON round trip keeps trims, delays, channels and bass settings") {
+    SpeakerLayout l = SpeakerLayout::preset("quad");
+    l.speakers[0].distance = 2.5f;
+    l.speakers[1].trimDb = -3;
+    l.speakers[2].delayMs = 4.5f;
+    l.speakers[3].channel = 7;
+    l.bass.enabled = true;
+    l.bass.cutoffHz = 100;
+    l.bass.filter = BassManagement::Filter::Butterworth24;
+    l.bass.subGainDb = 2;
+    const SpeakerLayout r = SpeakerLayout::fromJson(l.toJson());
+    REQUIRE(r.numChannels() == 4);
+    CHECK(r.speakers[0].distance == Approx(2.5));
+    CHECK(r.speakers[1].trimDb == Approx(-3));
+    CHECK(r.speakers[2].delayMs == Approx(4.5));
+    CHECK(r.channelOf(3) == 7);
+    CHECK(r.channelOf(0) == 0);
+    CHECK(r.numOutputChannelsNeeded() == 8);
+    CHECK(r.bass.enabled);
+    CHECK(r.bass.filter == BassManagement::Filter::Butterworth24);
+    CHECK(r.bass.cutoffHz == Approx(100));
+    CHECK(r.needsAlignment());
+    CHECK_FALSE(SpeakerLayout::preset("5.1").needsAlignment());
+    CHECK_THROWS(SpeakerLayout::fromJson("{\"speakers\": []}"));
+    CHECK_THROWS(SpeakerLayout::fromJson("[1, 2]"));
+}

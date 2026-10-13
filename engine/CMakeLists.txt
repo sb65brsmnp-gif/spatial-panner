@@ -6,6 +6,7 @@ add_library(sp_engine STATIC
   src/Materials.cpp
   src/Geometry.cpp
   src/SpeakerLayout.cpp
+  src/PanProbe.cpp
   src/SceneJson.cpp
   src/SceneAnalysis.cpp
   src/Renderer.cpp

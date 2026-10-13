@@ -30,7 +30,14 @@ namespace spapp {
 struct OutputSetup {
     sp::OutputMode mode = sp::OutputMode::Binaural;
     juce::String layout = "7.1.4";
-    bool operator==(const OutputSetup& o) const { return mode == o.mode && layout == o.layout; }
+    // A custom speaker layout (sp::SpeakerLayout::toJson form) instead of the
+    // preset named by `layout`; empty = the preset. Each speaker names the
+    // device output it plays on (SpeakerLayout::channelOf).
+    std::string custom;
+    bool operator==(const OutputSetup& o) const { return mode == o.mode && layout == o.layout && custom == o.custom; }
+    // The layout this setup plays: the custom one, else the preset (7.1.4
+    // when the name is unknown).
+    sp::SpeakerLayout speakerLayout() const;
 };
 
 struct Program;
@@ -101,6 +108,11 @@ public:
 
     // Builds a RenderConfig for a setup (HRTF location resolved here).
     static sp::RenderConfig makeConfig(const OutputSetup& out, double rate);
+
+    // Speaker test: pink noise at -20 dBFS on one device output (0-based),
+    // -1 for none. Plays whether or not the scene does.
+    void setTestNoise(int deviceChannel) { testChannel_.store(deviceChannel); }
+    int testNoiseChannel() const { return testChannel_.load(); }
     static juce::File hrtfFile();
 
     std::function<void(juce::String message, bool error)> onMessage;
@@ -128,6 +140,7 @@ private:
 
     // audio-thread helpers
     void renderChunk(float* const* out, int numOut, int offset, int n);
+    void addTestNoise(float* const* out, int numOut, int numSamples);
     void fillInputs(Program& p, int n, float gainStart, float gainStep, bool metering);
     void retire(Program* p);
     void resetRenderers();
@@ -163,6 +176,10 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<float> cpu_{0};
     std::array<std::atomic<float>, 8> pose_{};
+    std::atomic<int> testChannel_{-1};
+    float testGain_ = 0;            // ramps the test noise in and out
+    float pinkState_[3] = {0, 0, 0};
+    uint32_t noiseSeed_ = 22222;
     static constexpr int kMaxMeters = 1024;
     std::array<std::atomic<float>, kMaxMeters> meters_{};
 

@@ -173,10 +173,17 @@ export class Viewport {
   }
 
   screenDistance(e: PointerEvent | MouseEvent, p: THREE.Vector3): number {
+    const q = this.screenPoint(p);
+    if (!q) return Infinity;
+    return Math.hypot(e.clientX - q[0], e.clientY - q[1]);
+  }
+
+  // Where a world point lands on the page (client coordinates), or null
+  // behind the camera.
+  screenPoint(p: THREE.Vector3): [number, number] | null {
     const r = this.renderer.domElement.getBoundingClientRect();
     const s = p.clone().project(this.camera);
-    if (s.z > 1) return Infinity;
-    const x = (s.x * 0.5 + 0.5) * r.width + r.left, y = (-s.y * 0.5 + 0.5) * r.height + r.top;
-    return Math.hypot(e.clientX - x, e.clientY - y);
+    if (s.z > 1) return null;
+    return [(s.x * 0.5 + 0.5) * r.width + r.left, (-s.y * 0.5 + 0.5) * r.height + r.top];
   }
 }

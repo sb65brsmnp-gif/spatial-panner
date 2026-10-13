@@ -57,6 +57,13 @@ struct Vec3 {
 
 inline Vec3 operator*(float s, const Vec3& v) { return v * s; }
 
+// Turns `v` about +Y by `deg` (positive turns -Z towards -X: the head's yaw).
+inline Vec3 rotateYaw(const Vec3& v, float deg) {
+    if (deg == 0) return v;
+    const float a = degToRad(deg), c = std::cos(a), s = std::sin(a);
+    return {v.x * c + v.z * s, v.y, -v.x * s + v.z * c};
+}
+
 // Unit quaternion, (x, y, z) imaginary, w real.
 struct Quat {
     float x = 0, y = 0, z = 0, w = 1;

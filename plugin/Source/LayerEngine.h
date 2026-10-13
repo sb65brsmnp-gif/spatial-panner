@@ -15,7 +15,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
+#include "LayerPathHistory.h"
 #include "ListenerTimeline.h"
 #include "SharedSession.h"
 #include "sp/Renderer.h"
@@ -27,6 +29,10 @@ struct EngineConfig {
     int maxBlock = 512;
     sp::OutputMode mode = sp::OutputMode::Binaural;
     sp::SpeakerLayout layout;   // Speakers mode
+    // Speakers mode: the host bus channel each renderer output plays on
+    // (empty = output c on channel c). The processor applies it; it is here
+    // so a change of routing counts as a change of configuration.
+    std::vector<int> route;
     bool render = true;         // false: only the listener timeline (a scene instance that passes audio through)
     std::string hrtfPath;
     // Offline bounce: Steam Audio simulates in line with the audio so every
@@ -82,6 +88,13 @@ public:
         const SharedSession* session = nullptr;
         bool useHistory = false;
         sp::LayerControls layer;
+        // A layer with a path: the Path Speed multiplier (speed timing) and
+        // the Path Position, 0..1 (position timing), ramped from
+        // `pathPositionFrom` at the first frame to `pathPosition` at the end
+        // of the block (the next block's first frame).
+        float pathSpeed = 1.0f;
+        float pathPosition = 0.0f;
+        float pathPositionFrom = 0.0f;
     };
     // Writes (replaces) the outputs; leaves them silent until a renderer exists.
     void process(const Block& b);
@@ -90,6 +103,13 @@ public:
 
     // Listener pose of the latest block: x y z yaw pitch roll (degrees).
     std::array<float, 6> pose() const;
+
+    // This track's recorded Path Speed automation (clear / save / restore
+    // from any thread).
+    LayerPathHistory& pathHistory() { return history_; }
+    // Metres the layer has travelled along its path at the latest sub-block
+    // (speed timing; before the end rule folds it onto the path).
+    double pathTravel() const { return pathTravel_.load(std::memory_order_relaxed); }
 
 private:
     struct Program;
@@ -100,7 +120,7 @@ private:
     void retire(Program* p);
     void collectGarbage();
     void handleInbox(bool blocking);
-    void renderProgram(Program& p, const Block& b, int numOut);
+    void renderProgram(Program& p, const Block& b, int numOut, bool primary);
 
     // control side
     mutable std::mutex lock_;
@@ -124,6 +144,8 @@ private:
     std::atomic<bool> offlineProgram_{false};
     std::array<std::atomic<float>, 6> pose_{};
     std::vector<float> fadeBuf_;
+    LayerPathHistory history_;
+    std::atomic<double> pathTravel_{0};
 };
 
 // Picks the HRTF shipped inside the plugin bundle (Contents/Resources) or
